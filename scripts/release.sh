@@ -43,13 +43,15 @@ require VERSION; require BUILD; require NOTARY_PROFILE
 command -v gh >/dev/null || { echo "error: gh CLI not found — install with: brew install gh" >&2; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "error: gh not authenticated — run: gh auth login" >&2; exit 1; }
 
-# Artifact names carry the BUILD too: builds are immutable + uniquely addressable, so cutting a new
-# build at the same marketing VERSION (a flow bin/menu supports) can't overwrite a prior artifact.
 # Two artifacts per release, both wrapping the SAME notarized+stapled .app:
-#   • ZIP → the auto-updater feed (in-place extract + bundle swap; dmg can't be extracted programmatically)
-#   • DMG → the website first-install (drag-to-Applications; the expected Mac UX)
+#   • ZIP → the auto-updater feed (in-place extract + bundle swap; dmg can't be extracted
+#     programmatically). Versioned + immutable: cutting a new build at the same marketing VERSION can't
+#     overwrite a prior updater artifact, and latest.json points the updater at this exact URL.
+#   • DMG → the website first-install (drag-to-Applications; the expected Mac UX). STABLE-NAMED so the
+#     site can link a permanent direct download — /releases/latest/download/Shadowtype.dmg always
+#     resolves to the newest STABLE release's DMG.
 ZIP_ARTIFACT="$APP_NAME-$VERSION-$BUILD.zip"
-DMG_ARTIFACT="$APP_NAME-$VERSION-$BUILD.dmg"
+DMG_ARTIFACT="$APP_NAME.dmg"
 ZIP="$REPO_ROOT/dist/$ZIP_ARTIFACT"
 DMG="$REPO_ROOT/dist/$DMG_ARTIFACT"
 MANIFEST_FILE="$REPO_ROOT/dist/latest.json"
@@ -79,9 +81,11 @@ echo "==> [5/9] zip the stapled app (the auto-updater feed)"
 rm -f "$ZIP"
 /usr/bin/ditto -c -k --keepParent "$APP_DIR" "$ZIP"
 
-echo "==> [6/9] sha256 of the zip"
+echo "==> [6/9] sha256 of the zip (updater feed) + the dmg (Homebrew cask)"
 SHA256="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
+DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
 echo "    $SHA256  $ZIP_ARTIFACT"
+echo "    $DMG_SHA256  $DMG_ARTIFACT"
 
 URL="https://github.com/$GITHUB_REPO/releases/download/$TAG/$ZIP_ARTIFACT"
 
@@ -131,7 +135,7 @@ if [[ -n "${TAP_REPO:-}" && -n "${TAP_DIR:-}" ]]; then
     if [[ -f "$CASK" ]]; then
       # The cask serves the DMG (the human download) from the GitHub Release.
       sed -i '' -E "s/^([[:space:]]*version )\"[^\"]*\"/\1\"$VERSION\"/" "$CASK"
-      sed -i '' -E "s/^([[:space:]]*sha256 )\"[^\"]*\"/\1\"$SHA256\"/"    "$CASK"
+      sed -i '' -E "s/^([[:space:]]*sha256 )\"[^\"]*\"/\1\"$DMG_SHA256\"/"    "$CASK"
       if git -C "$TAP_DIR" diff --quiet -- Casks/shadowtype.rb; then
         echo "    cask already at $VERSION — no change"
       else

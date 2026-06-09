@@ -24,3 +24,19 @@ run_worker_first = true
 # Non-secret vars. Only the canonical origin (used by the www → apex redirect).
 [vars]
 SITE_ORIGIN = "https://shadowtype.app"
+
+# One-time cleanup migration: the old licensing/founders backend defined two Durable Objects
+# (FoundersCounter in v1, LicenseSeats in v2). That backend is gone, but Cloudflare won't let a
+# script drop DO classes that still exist without an explicit delete-class migration. v3 deletes
+# both (and their stored data). Once this deploy lands, this whole [[migrations]] block can be removed.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FoundersCounter"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["LicenseSeats"]
+
+[[migrations]]
+tag = "v3"
+deleted_classes = ["FoundersCounter", "LicenseSeats"]
