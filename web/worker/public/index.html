@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shadowtype — Private, on-device AI text completion for macOS</title>
+  <meta name="description" content="Shadowtype predicts your next words as faint ghost text in any Mac text field — powered by a local LLM. Fully on-device, works offline, no cloud, no account. Press Tab to accept. Free and open source." />
+  <meta name="theme-color" content="#0a0b0e" />
+  <link rel="canonical" href="https://shadowtype.app/" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <link rel="stylesheet" href="/landing.css" />
+
+  <!-- Open Graph / social -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Shadowtype" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:title" content="Shadowtype — on-device AI autocomplete for macOS" />
+  <meta property="og:description" content="Ghost-text autocomplete in every Mac app. 100% local, offline, no account. Press Tab to accept. Free and open source." />
+  <meta property="og:url" content="https://shadowtype.app/" />
+  <meta property="og:image" content="https://shadowtype.app/assets/og.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:alt" content="Shadowtype: write faster everywhere on your Mac — nothing leaves your machine. 100% on-device, offline, free and open source." />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Shadowtype — on-device AI autocomplete for macOS" />
+  <meta name="twitter:description" content="Ghost-text autocomplete in every Mac app. 100% local, offline, no account. Press Tab to accept. Free and open source." />
+  <meta name="twitter:image" content="https://shadowtype.app/assets/og.png" />
+  <meta name="twitter:image:alt" content="Shadowtype: on-device ghost-text autocomplete for macOS. Free and open source." />
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Shadowtype",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "macOS 14+ (Apple Silicon)",
+    "url": "https://shadowtype.app/",
+    "image": "https://shadowtype.app/assets/og.png",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD",
+      "availability": "https://schema.org/InStock",
+      "url": "https://github.com/dario-valles/shadowtype/releases"
+    },
+    "isAccessibleForFree": true,
+    "license": "https://github.com/dario-valles/shadowtype",
+    "description": "Free and open source, on-device AI text completion for macOS. Ghost-text autocomplete in any app, fully local and offline."
+  }
+  </script>
+
+  <!-- FAQ structured data — mirrors the visible #faq section verbatim (Google requires parity).
+       Keep in sync with the <details> below; also aids AI-answer/GEO citation. -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "Does it really work offline?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Yes. All completion happens on your Mac using a local model and Metal — there is no inference network call, ever. The only outbound traffic is the optional update check and the one-time model download. Turn off Wi-Fi and Shadowtype keeps completing." }
+      },
+      {
+        "@type": "Question",
+        "name": "What about my privacy?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Your keystrokes never leave the device. There is no telemetry, no analytics backend, and no account. Password and secure fields are never read. The personalization profile is stored encrypted on your Mac and you can wipe it any time. You keep full copyright of everything you write." }
+      },
+      {
+        "@type": "Question",
+        "name": "What does it cost?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Nothing. Shadowtype is free and open source — every feature is on, with no cap, no account, and no subscription. There is no paid tier: system-wide ghost text, Tab-to-accept, emoji, typo suppression, screen-aware context, full autocorrect, personalization, clipboard context, custom & per-app instructions, configurable completion length, the largest models, and Labs features are all included." }
+      },
+      {
+        "@type": "Question",
+        "name": "Is it really open source?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Yes. The full source is on GitHub. You can read the code, build it yourself, file issues, and contribute. There is no telemetry and no backend to trust — you can verify exactly what runs on your Mac." }
+      },
+      {
+        "@type": "Question",
+        "name": "Which Macs are supported?",
+        "acceptedAnswer": { "@type": "Answer", "text": "macOS 14 (Sonoma) and later, on Apple Silicon (M1 and up). 8 GB RAM runs the compact + mid models; 16 GB+ unlocks the larger ones. Use it on as many of your Macs as you like." }
+      },
+      {
+        "@type": "Question",
+        "name": "Can I use my own model, or call it from my code?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Yes. Shadowtype ships a local OpenAI-compatible HTTP API on 127.0.0.1 — your scripts, editor plugins, and agents can hit /v1/chat/completions with no key and no cloud. There's also a built-in MCP server for Claude Code and other MCP clients, and a BYOM picker for any GGUF you drop in. Everything stays on your machine, bound to localhost only." }
+      },
+      {
+        "@type": "Question",
+        "name": "How do updates work?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Shadowtype checks for new builds in the background and offers a one-click in-place update — signed, notarized, and verified before install. No App Store, no Sparkle, no account. You can also grab any release directly from GitHub." }
+      }
+    ]
+  }
+  </script>
+</head>
+<body>
+
+  <!-- ===================== HEADER ===================== -->
+  <header class="site-header">
+    <div class="wrap site-header__inner">
+      <a class="brand" href="/" aria-label="Shadowtype home">
+        <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+        <span>Shadowtype</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a class="nav__link" href="#how">How it works</a>
+        <a class="nav__link" href="#features">Features</a>
+        <a class="nav__link" href="/shadowtype-vs-cotypist">vs Cotypist</a>
+        <a class="nav__link" href="https://github.com/dario-valles/shadowtype">GitHub</a>
+        <a class="nav__link" href="#faq">FAQ</a>
+        <a class="btn btn--primary nav__cta" href="https://github.com/dario-valles/shadowtype/releases">Download</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- ===================== HERO ===================== -->
+    <section class="section hero">
+      <div class="wrap hero__grid">
+        <div>
+          <span class="hero-eyebrow"><span class="dot"></span> Free &amp; open source · on-device AI autocomplete · macOS</span>
+          <h1>Write faster everywhere on your Mac.<br><span class="accent">Nothing ever leaves your machine.</span></h1>
+          <p class="hero__lead">
+            Shadowtype predicts your next words as faint ghost text — right at the caret,
+            in <em>any</em> text field. It runs a local LLM on Apple Silicon, so it works
+            offline, needs no account, and your keystrokes never touch the cloud.
+            Press <kbd>Tab</kbd> to accept. <strong>Free and open source — every feature on, no subscription, ever.</strong>
+          </p>
+          <div class="hero__cta">
+            <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.4 12.9c0-2.3 1.9-3.4 2-3.5-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.1-2.8.9-3.5.9-.7 0-1.8-.8-3-.8-1.5 0-3 .9-3.7 2.3-1.6 2.8-.4 6.9 1.1 9.2.8 1.1 1.6 2.4 2.8 2.3 1.1-.04 1.5-.7 2.9-.7 1.3 0 1.7.7 3 .7 1.2 0 2-1.1 2.7-2.2.9-1.3 1.2-2.5 1.3-2.6-.03 0-2.5-1-2.5-3.7ZM14.2 5.9c.6-.8 1.1-1.9 1-3-.9.04-2.1.6-2.8 1.4-.6.7-1.1 1.8-1 2.9 1 .08 2.1-.5 2.8-1.3Z"/></svg>
+              Download for macOS
+            </a>
+            <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+          </div>
+          <ul class="hero__meta">
+            <li>Free &amp; open source</li>
+            <li>100% on-device</li>
+            <li>Works offline</li>
+            <li>No account</li>
+          </ul>
+        </div>
+
+        <!-- live, interactive ghost-text demo -->
+        <div class="hero__demo demo-stage">
+          <div class="demo-badge demo-badge--tl">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 4 5v6c0 5 3.4 9 8 11 4.6-2 8-6 8-11V5l-8-3Z"/></svg>
+            Keystrokes stay on-device
+          </div>
+          <div class="demo-badge demo-badge--br">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 7v5l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+            ~150&nbsp;ms on M2, compact model
+          </div>
+
+          <div class="demo" role="img" aria-label="A text field showing faint AI ghost-text suggestion at the caret, with a Tab key that accepts it">
+            <div class="demo__bar">
+              <span class="demo__dots"><span></span><span></span><span></span></span>
+              <span class="demo__app" id="demo-app">
+                <img class="app-ico" src="/assets/logo-small.svg" alt="" id="demo-app-ico" />
+                <span id="demo-app-name">Mail</span>
+              </span>
+              <button class="demo__net" id="demo-net" type="button" data-online="true" aria-pressed="true" aria-label="Toggle Wi-Fi to prove it works offline">
+                <svg class="wifi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="19.5" r="1" fill="currentColor"/></svg>
+                <span id="demo-net-label">Wi-Fi</span>
+                <span class="switch"></span>
+              </button>
+            </div>
+            <div class="demo__body">
+              <span class="demo__typed" id="demo-typed"></span><span class="demo__caret" id="demo-caret" aria-hidden="true"></span><span class="demo__ghost" id="demo-ghost"></span>
+              <span class="demo__offline-flag" id="demo-offline">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 5l14 14"/><path d="M12 17.5a1 1 0 1 0 0-.01"/><path d="M16.5 13.5a6 6 0 0 0-2-1.3M3.5 9.5a13 13 0 0 1 4-2.4M20.5 9.5a13 13 0 0 0-3-2"/></svg>
+                Offline — still completing
+              </span>
+              <span class="demo__hint"><span class="keycap" id="demo-key">Tab</span> accept word · <kbd>⌥Tab</kbd> line</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== TRUST STRIP ===================== -->
+    <div class="wrap">
+      <div class="trust">
+        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 4 5v6c0 5 3.4 9 8 11 4.6-2 8-6 8-11V5l-8-3Z"/></svg> Keystrokes never leave the device</span>
+        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg> Sub-frame ghost text at the caret</span>
+        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg> Zero telemetry, zero analytics</span>
+        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/></svg> Works in Mail, Slack, Notes, Safari…</span>
+      </div>
+    </div>
+
+    <!-- ===================== FREE vs RENT ===================== -->
+    <!-- Anti-subscription positioning band: the writing-assistant category is monthly-rental by
+         default (Grammarly, ChatGPT-as-editor, Copilot, Notion AI). Shadowtype's wedge is free,
+         open source, and fully on-device. The card grid anchors the user's mental price on the
+         multi-year cost of renting, so "free" reads as obviously better. Prices below are public
+         list prices and intentionally exclude promos that change month-to-month. -->
+    <section class="section section--tight" id="pay-once">
+      <div class="wrap">
+        <div class="section-head center">
+          <span class="eyebrow">Free · open source</span>
+          <h2>Most AI writing tools rent. <span class="accent">We don't charge at all.</span></h2>
+          <p class="lead" style="margin-inline:auto;">In a market of $20-$30/month "AI for writing" subscriptions, Shadowtype is free and open source. Use it for ten years; you still paid nothing.</p>
+        </div>
+
+        <div class="payonce">
+          <article class="payonce__card">
+            <span class="payonce__badge">Subscription</span>
+            <h3>Grammarly Premium</h3>
+            <div class="payonce__price"><span class="payonce__num">$30</span><span class="payonce__per">/month</span></div>
+            <p class="payonce__note">$360 the first year. $1,800 over five. Cloud-based — your text leaves your machine.</p>
+          </article>
+          <article class="payonce__card">
+            <span class="payonce__badge">Subscription</span>
+            <h3>ChatGPT Plus</h3>
+            <div class="payonce__price"><span class="payonce__num">$20</span><span class="payonce__per">/month</span></div>
+            <p class="payonce__note">$240 the first year. $1,200 over five. Cloud-based — separate window, copy-paste workflow.</p>
+          </article>
+          <article class="payonce__card payonce__card--us">
+            <span class="payonce__badge payonce__badge--us">Free &amp; open source</span>
+            <h3>Shadowtype</h3>
+            <div class="payonce__price"><span class="payonce__num">$0</span><span class="payonce__per">forever</span></div>
+            <p class="payonce__note">Forever. On as many of your Macs as you like. Free updates. 100% on-device. No account.</p>
+          </article>
+        </div>
+
+        <p class="payonce__foot">No card on file · no "free trial" auto-charge · no price-hike emails · no churn email asking you to come back. It's free and open source — like software used to work.</p>
+      </div>
+    </section>
+
+    <!-- ===================== HOW IT WORKS ===================== -->
+    <section class="section section--tight" id="how">
+      <div class="wrap">
+        <div class="section-head center">
+          <span class="eyebrow">How it works</span>
+          <h2>Three keystrokes from thought to sentence</h2>
+          <p class="lead">No new window, no command palette, no copy-paste. Shadowtype lives in the caret of whatever you're already typing in.</p>
+        </div>
+        <div class="steps">
+          <article class="step">
+            <h3>Type anywhere</h3>
+            <p>Mail, Slack, Notes, your code editor, a browser field — if there's a cursor, Shadowtype is watching the local context, not the network.</p>
+            <div class="step__demo">Hey team, just shipped the<span class="mini-caret"></span></div>
+          </article>
+          <article class="step">
+            <h3>See the ghost text</h3>
+            <p>A local model predicts your next words and renders them faint, inline, at the caret — like spell-check, invisible until it's useful.</p>
+            <div class="step__demo">Hey team, just shipped the <span class="g">fix to staging.</span></div>
+          </article>
+          <article class="step">
+            <h3>Tab or Right Arrow to accept</h3>
+            <p><kbd>Tab</kbd> (or <kbd>→</kbd> at end-of-line) takes the next word, <kbd>⌥Tab</kbd> takes the whole line. Keep typing to dismiss. Need a bigger change? Select text and hit <kbd>⌥⌘K</kbd> to rewrite it.</p>
+            <div class="step__demo">Hey team, just shipped the fix to staging.<span class="mini-caret"></span></div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== FEATURES ===================== -->
+    <section class="section" id="features">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">What it does</span>
+          <h2>A system-wide ghost-text layer for your whole Mac</h2>
+          <p class="lead">It behaves like spell-check: invisible until useful, never in the way. Best-in-class capability — matched locally, on your hardware.</p>
+        </div>
+
+        <div class="features">
+          <article class="feature feature--feat">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2Z"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/></svg></div>
+            <h3>100% on-device &amp; offline</h3>
+            <p>Inference runs locally on Apple Silicon with llama.cpp + Metal. No cloud, no account, no network call for completion — ever. Pull the Wi-Fi and it keeps finishing your sentences. Your keystrokes are read on the device and stay there.</p>
+            <div class="feature__big">
+              <div class="feature__chips">
+                <span>llama.cpp + Metal</span>
+                <span>no inference server</span>
+                <span>no telemetry</span>
+                <span>encrypted profile</span>
+              </div>
+            </div>
+          </article>
+
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h6M7 13h10"/></svg></div>
+            <h3>Inline ghost-text completion</h3>
+            <p>Faint suggestions appear exactly at the caret in every text field. <kbd>Tab</kbd> accepts the next word; <kbd>⌥Tab</kbd> takes the whole line.</p>
+          </article>
+
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h6"/></svg></div>
+            <h3>Per-app &amp; per-domain control</h3>
+            <p>Enable or silence Shadowtype by app bundle or browser domain. Casual in Slack, formal in Mail — set instruction overrides per app.</p>
+          </article>
+
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3.5"/></svg></div>
+            <h3>Personalization that learns you</h3>
+            <p>An on-device style profile biases completions toward your phrasing — stored encrypted, never transmitted, wipeable anytime.</p>
+          </article>
+
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2M9 20h6M12 4v16"/><path d="m16 11 2 2-2 2"/></svg></div>
+            <h3>Autocorrect &amp; typo suppression</h3>
+            <p>A fast heuristic holds back a suggestion when you're mid-typo, and full inline autocorrect fixes transpositions as you go.</p>
+          </article>
+
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
+            <h3>Multiple local models</h3>
+            <p>Pick from a catalog of GGUF models — Qwen3 Base (sharp FIM continuation), Gemma 3, MoE and small-MoE variants. Compact, mid-size, and the largest are all included, RAM permitting. Bring your own GGUF too.</p>
+          </article>
+
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="m2 9 10 6 10-6"/></svg></div>
+            <h3>Screen-aware context</h3>
+            <p>Optional local OCR reads the focused window so suggestions fit what's on screen, with clipboard awareness for sharper completions.</p>
+          </article>
+
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg></div>
+            <h3>Emoji &amp; multi-language</h3>
+            <p>Type <code>:smi</code> → 😄. English is sharpest, with working support for Norwegian, Hinglish and more — your language, never sent anywhere.</p>
+          </article>
+
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m12 3 1.8 4.7L18 9.5l-4.2 1.8L12 16l-1.8-4.7L6 9.5l4.2-1.8L12 3Z"/><path d="M19 14l.6 1.8 1.8.6-1.8.6-.6 1.8-.6-1.8-1.8-.6 1.8-.6.6-1.8Z"/></svg></div>
+            <h3>Selection rewrite</h3>
+            <p>Select any text and press <kbd>⌥⌘K</kbd> to rewrite it inline — improve, shorten, formal, casual, fix grammar, or summarize. Runs on your Mac, previews before it commits. Pro.</p>
+          </article>
+
+          <article class="feature feature--api">
+            <div class="feature--api__copy">
+              <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-6 6 6 6M16 6l6 6-6 6M14 4l-4 16"/></svg></div>
+              <h3>Local API + MCP for developers</h3>
+              <p>An OpenAI-compatible HTTP endpoint runs on <code>localhost</code> so your scripts, editors, and agents can call the same on-device model — no key, no cloud. A built-in MCP bridge plugs into Claude Code and other MCP clients. Bring your own GGUF via the BYOM picker.</p>
+              <div class="feature__chips">
+                <span>OpenAI-compat <code>/v1/chat/completions</code></span>
+                <span>MCP server</span>
+                <span>BYOM (any GGUF)</span>
+                <span>127.0.0.1 only</span>
+              </div>
+            </div>
+            <div class="feature--api__demo" aria-hidden="true">
+              <div class="terminal">
+                <div class="terminal__bar"><span></span><span></span><span></span><em>zsh — your Mac, offline</em></div>
+                <pre class="terminal__body"><code><span class="tl-c"># same on-device model your typing uses — no key, no cloud</span>
+<span class="tl-p">$</span> curl 127.0.0.1:5666/v1/chat/completions \
+    -d '{"messages":[{"role":"user","content":"ship it"}]}'
+
+<span class="tl-o">{ "choices": [ { "message": {</span>
+<span class="tl-o">    "role": "assistant",</span>
+<span class="tl-o">    "content": "Done — pushed to main." } } ] }</span>
+</code></pre>
+              </div>
+              <div class="terminal terminal--mcp">
+                <div class="terminal__bar"><span></span><span></span><span></span><em>~/.claude/mcp.json</em></div>
+                <pre class="terminal__body"><code><span class="tl-k">"mcpServers"</span>: { <span class="tl-k">"shadowtype"</span>: {
+  <span class="tl-k">"command"</span>: <span class="tl-s">"…/Shadowtype.app/…/shadowtype-mcp"</span> } }
+<span class="tl-c"># plugs straight into Claude Code &amp; other MCP clients</span>
+</code></pre>
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== SELECTION REWRITE ===================== -->
+    <section class="section" id="rewrite">
+      <div class="wrap">
+        <div class="section-head center">
+          <span class="eyebrow">New</span>
+          <h2>Rewrite anything. On-device.</h2>
+          <p class="lead">What Apple's Writing Tools do in the cloud, Shadowtype does locally — free and open source. Select text in any app, press <kbd>⌥⌘K</kbd>, and pick how to rewrite it. The model runs on your Mac, so nothing is ever sent anywhere.</p>
+        </div>
+
+        <!-- Interactive rewrite demo. Chips post a {sourceKey, action} pair to rewrite-demo.js,
+             which fades in a canned local rewrite. No network call — the values are illustrative
+             and live in the script. Live source-text cycling so the demo doesn't feel canned. -->
+        <div class="rewrite" id="rewrite-demo" data-source="dm">
+          <div class="rewrite__demo">
+            <div class="rewrite__head">
+              <span class="rewrite__label">Selected</span>
+              <button class="rewrite__cycle" id="rewrite-cycle" type="button"
+                      aria-label="Cycle through example selections">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"/><path d="M3 21v-5h5"/></svg>
+                <span>Try another</span>
+              </button>
+            </div>
+            <p class="rewrite__before"><mark id="rewrite-before">hey can u send me that doc when u get a sec</mark></p>
+            <div class="rewrite__action">
+              <span class="rewrite__arrow">↓</span>
+              <span id="rewrite-action-label">Make formal</span>
+              <span class="rewrite__pulse" id="rewrite-pulse" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </span>
+            </div>
+            <p class="rewrite__after" id="rewrite-after">Could you please send me that document when you have a moment?</p>
+            <p class="rewrite__latency" id="rewrite-latency" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 7v5l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+              <span id="rewrite-latency-val">~142 ms · M2 · local model</span>
+            </p>
+          </div>
+
+          <div class="rewrite__chips" role="toolbar" aria-label="Pick a rewrite action">
+            <button class="rewrite-chip" type="button" data-action="rewrite">✦ Rewrite</button>
+            <button class="rewrite-chip" type="button" data-action="shorter">⤵ Make shorter</button>
+            <button class="rewrite-chip is-active" type="button" data-action="formal" aria-pressed="true">▣ Make formal</button>
+            <button class="rewrite-chip" type="button" data-action="casual">☺ Make casual</button>
+            <button class="rewrite-chip" type="button" data-action="grammar">✓ Fix grammar</button>
+            <button class="rewrite-chip" type="button" data-action="summarize">≣ Summarize</button>
+          </div>
+        </div>
+
+        <p class="rewrite__meta">
+          <kbd>⌥⌘K</kbd> to rewrite · <kbd>⏎</kbd> keep · <kbd>⌘R</kbd> redo · <kbd>⎋</kbd> undo
+          <span class="rewrite__dot">·</span> 100% local <span class="rewrite__dot">·</span> free &amp; open source
+        </p>
+      </div>
+    </section>
+
+    <!-- ===================== OFFLINE PROOF BAND ===================== -->
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="offline">
+          <div class="offline__copy">
+            <span class="eyebrow">The proof</span>
+            <h2>Turn off the Wi-Fi. <span class="strike">Watch it break.</span><br>It keeps finishing your sentences.</h2>
+            <p>There is no inference network call, ever. The only outbound traffic is an optional update check and the one-time model download. Everything that completes your text happens on your Mac. Try the toggle in the demo above — flip it offline and keep typing.</p>
+          </div>
+          <div class="offline__visual" aria-hidden="true">
+            <div class="offline__plane">
+              <div class="offline__row">
+                <span class="offline__label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 5l14 14M12 18a1 1 0 1 0 0-.01M16.5 14a6 6 0 0 0-2.2-1.4M3.5 10a13 13 0 0 1 4.3-2.5M20.5 10a13 13 0 0 0-3.3-2.1"/></svg> Network</span>
+                <span class="offline__val off">DISCONNECTED</span>
+              </div>
+              <div class="offline__row">
+                <span class="offline__label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h6M7 13h10"/></svg> Ghost-text engine</span>
+                <span class="offline__val on">RUNNING</span>
+              </div>
+              <div class="offline__row">
+                <span class="offline__label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 7v5l3 3"/><circle cx="12" cy="12" r="9"/></svg> Latency</span>
+                <span class="offline__val on">~150&nbsp;ms</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== COMPARISON (full tables moved to dedicated /…-vs-… pages) ===================== -->
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="section-head center">
+          <span class="eyebrow">The honest comparison</span>
+          <h2>See how Shadowtype compares</h2>
+          <p class="lead" style="margin-inline:auto;">Same on-device autocomplete as the alternatives — without the subscription, the telemetry, or the cloud. Read the full side-by-side breakdowns.</p>
+        </div>
+        <div class="hero__cta" style="justify-content:center">
+          <a class="btn btn--primary btn--lg" href="/shadowtype-vs-cotypist">Shadowtype vs Cotypist</a>
+          <a class="btn btn--ghost btn--lg" href="/shadowtype-vs-apple-intelligence">vs Apple Intelligence</a>
+          <a class="btn btn--ghost btn--lg" href="/grammarly-alternative-mac">vs Grammarly</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== PRICING ===================== -->
+    <section class="section" id="pricing">
+      <div class="wrap">
+        <div class="section-head center">
+          <span class="eyebrow">Free &amp; open source</span>
+          <h2>Free forever. Every feature on.</h2>
+          <p class="lead" style="margin-inline:auto;">Shadowtype is free and open source. No tiers, no subscription, no account, no card — just download it and write. The full source lives on GitHub, so you can read it, build it, and verify exactly what runs on your Mac.</p>
+        </div>
+
+        <div class="pricing pricing--solo">
+          <div class="price-card price-card--hero">
+            <span class="price-card__flag price-card__flag--beta">Free &amp; open source</span>
+            <h3>Everything included</h3>
+            <span class="price-card__sub">Every feature, no limits, no account, no card, no expiry.</span>
+            <div class="price-card__amount">
+              <span class="num">$0</span>
+            </div>
+            <p class="price-card__once">Free &amp; open source · no account · no expiry</p>
+            <ul class="price-list">
+              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6 9 17l-5-5"/></svg> Inline ghost-text in every app — no daily word cap</li>
+              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6 9 17l-5-5"/></svg> Unlimited completions · largest models</li>
+              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6 9 17l-5-5"/></svg> 100% on-device, offline, no account</li>
+              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6 9 17l-5-5"/></svg> Full autocorrect, clipboard context &amp; per-app instructions</li>
+              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6 9 17l-5-5"/></svg> Local OpenAI-compatible API, MCP server &amp; BYOM</li>
+              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6 9 17l-5-5"/></svg> Use on as many of your Macs as you like</li>
+            </ul>
+            <a class="btn btn--primary btn--lg btn--block" href="https://github.com/dario-valles/shadowtype/releases">Download free</a>
+            <p class="price-card__note">Or <a href="https://github.com/dario-valles/shadowtype">read the source on GitHub →</a></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== TRUST BAND ===================== -->
+    <section class="section section--tight" id="love">
+      <div class="wrap">
+        <div class="section-head center">
+          <span class="eyebrow">Why people switch</span>
+          <h2>Built on what cloud keyboards can't offer</h2>
+          <p class="lead" style="margin-inline:auto;">Real, local, private — owned, not rented.</p>
+        </div>
+        <div class="hero__cta" style="justify-content:center;flex-wrap:wrap;gap:.6rem">
+          <span class="beta-pill">Keystrokes stay on the device</span>
+          <span class="beta-pill">No account, no telemetry</span>
+          <span class="beta-pill">Works on a plane</span>
+          <span class="beta-pill">Free &amp; open source</span>
+          <span class="beta-pill">All your Macs</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== FAQ ===================== -->
+    <section class="section section--tight" id="faq">
+      <div class="wrap">
+        <div class="section-head center">
+          <span class="eyebrow">Questions</span>
+          <h2>Good to know</h2>
+        </div>
+
+        <div class="faq">
+          <details>
+            <summary>Does it really work offline?</summary>
+            <div class="faq__a">Yes. All completion happens on your Mac using a local model and Metal — there is no inference network call, ever. The only outbound traffic is the optional update check and the one-time model download. Turn off Wi-Fi and Shadowtype keeps completing.</div>
+          </details>
+          <details>
+            <summary>What about my privacy?</summary>
+            <div class="faq__a">Your keystrokes never leave the device. There is no telemetry, no analytics backend, and no account. Password and secure fields are never read. The personalization profile is stored encrypted on your Mac and you can wipe it any time. You keep full copyright of everything you write.</div>
+          </details>
+          <details>
+            <summary>What does it cost?</summary>
+            <div class="faq__a">Nothing. Shadowtype is free and open source — every feature is on, with no cap, no account, and no subscription. There is no paid tier: system-wide ghost text, Tab-to-accept, emoji, typo suppression, screen-aware context, full autocorrect, personalization, clipboard context, custom &amp; per-app instructions, configurable completion length, the largest models, and Labs features are all included.</div>
+          </details>
+          <details>
+            <summary>Is it really open source?</summary>
+            <div class="faq__a">Yes. The full source is on <a href="https://github.com/dario-valles/shadowtype">GitHub</a>. You can read the code, build it yourself, file issues, and contribute. There is no telemetry and no backend to trust — you can verify exactly what runs on your Mac.</div>
+          </details>
+          <details>
+            <summary>Which Macs are supported?</summary>
+            <div class="faq__a">macOS 14 (Sonoma) and later, on Apple Silicon (M1 and up). 8&nbsp;GB RAM runs the compact + mid models; 16&nbsp;GB+ unlocks the larger ones. Use it on as many of your Macs as you like.</div>
+          </details>
+          <details>
+            <summary>Can I use my own model, or call it from my code?</summary>
+            <div class="faq__a">Yes. Shadowtype ships a local OpenAI-compatible HTTP API on <code>127.0.0.1</code> — your scripts, editor plugins, and agents can hit <code>/v1/chat/completions</code> with no key and no cloud. There's also a built-in MCP server for Claude Code and other MCP clients, and a BYOM picker for any GGUF you drop in. Everything stays on your machine, bound to localhost only.</div>
+          </details>
+          <details>
+            <summary>How do updates work?</summary>
+            <div class="faq__a">Shadowtype checks for new builds in the background and offers a one-click in-place update — signed, notarized, and verified before install. No App Store, no Sparkle, no account. You can also grab any release directly from <a href="https://github.com/dario-valles/shadowtype/releases">GitHub</a>.</div>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== CTA BAND ===================== -->
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="cta-band">
+          <span class="eyebrow" style="justify-content:center">Ready when you are</span>
+          <h2>Free and open source. Every feature, on your Mac.</h2>
+          <p class="muted" style="margin-top:-.4rem">All models, the local API, MCP, and BYOM — included, on-device, offline.</p>
+          <p>Download Shadowtype, accept your first word with <kbd>Tab</kbd>, and feel the difference. Read the source, build it yourself, or contribute on GitHub.</p>
+          <div class="hero__cta">
+            <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download for macOS</a>
+            <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+          </div>
+          <ul class="risk-reversal" style="justify-content:center" aria-label="Why you'll like it">
+            <li>Free forever</li>
+            <li>Open source</li>
+            <li>No subscription</li>
+            <li>No account</li>
+            <li>Works offline</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===================== FOOTER ===================== -->
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="site-footer__grid">
+        <div class="site-footer__brand">
+          <a class="brand" href="/" aria-label="Shadowtype home">
+            <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+            <span>Shadowtype</span>
+          </a>
+          <p>Private, on-device AI text completion for macOS. Your words stay yours.</p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="#how">How it works</a></li>
+            <li><a href="#features">Features</a></li>
+            <li><a href="/local-ai-autocomplete-mac">Local AI autocomplete</a></li>
+            <li><a href="/offline-text-prediction-macos">Offline text prediction</a></li>
+            <li><a href="/private-autocomplete-mac">Private autocomplete</a></li>
+            <li><a href="/ai-writing-assistant-mac">AI writing assistant</a></li>
+            <li><a href="#pricing">Free &amp; open source</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/releases">Download</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Compare</h4>
+          <ul>
+            <li><a href="/shadowtype-vs-cotypist">vs Cotypist</a></li>
+            <li><a href="/shadowtype-vs-cotabby">vs Cotabby</a></li>
+            <li><a href="/shadowtype-vs-apple-intelligence">vs Apple Intelligence</a></li>
+            <li><a href="/cotypist-alternative">Cotypist alternative</a></li>
+            <li><a href="/cotabby-alternative">Cotabby alternative</a></li>
+            <li><a href="/apple-intelligence-alternative">Apple Intelligence alternative</a></li>
+            <li><a href="/grammarly-alternative-mac">Grammarly alternative</a></li>
+            <li><a href="/ai-writing-assistant-mac">AI writing assistant</a></li>
+            <li><a href="/local-ai-autocomplete-mac">Local AI autocomplete</a></li>
+            <li><a href="/offline-text-prediction-macos">Offline text prediction</a></li>
+            <li><a href="/private-autocomplete-mac">Private autocomplete</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Project</h4>
+          <ul>
+            <li><a href="https://github.com/dario-valles/shadowtype">GitHub</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/releases">Releases</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/issues">Issues</a></li>
+            <li><a href="#faq">FAQ</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Legal</h4>
+          <ul>
+            <li><a href="/privacy">Privacy</a></li>
+            <li><a href="/terms">Terms</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/issues">Contact</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="site-footer__bottom">
+        <span>© 2026 Shadowtype. All rights reserved.</span>
+        <span>macOS 14+ · Apple Silicon · 100% on-device</span>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/landing.js"></script>
+  <script src="/demo.js"></script>
+  <script src="/rewrite-demo.js"></script>
+  <script>
+    window.__TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+      "ctaColor": "amber"
+    }/*EDITMODE-END*/;
+  </script>
+  <script src="/tweaks.js"></script>
+</body>
+</html>

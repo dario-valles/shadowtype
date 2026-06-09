@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shadowtype vs Cotypist — free &amp; open source vs subscription AI autocomplete for Mac</title>
+  <meta name="description" content="Shadowtype and Cotypist both run a local LLM for system-wide ghost-text autocomplete on Mac. The difference: Shadowtype is free, open source, and zero-telemetry on all your Macs; Cotypist is a $6–9/month subscription. Honest, side-by-side comparison." />
+  <meta name="theme-color" content="#0a0b0e" />
+  <link rel="canonical" href="https://shadowtype.app/shadowtype-vs-cotypist" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <link rel="stylesheet" href="/landing.css" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Shadowtype vs Cotypist — free, open source, no subscription" />
+  <meta property="og:description" content="Both are on-device Mac autocomplete. Shadowtype is free, open source, and zero-telemetry on all your Macs; Cotypist rents at $6–9/month. Side-by-side comparison." />
+  <meta property="og:url" content="https://shadowtype.app/shadowtype-vs-cotypist" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta property="og:site_name" content="Shadowtype" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:image" content="https://shadowtype.app/assets/og-shadowtype-vs-cotypist.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:alt" content="Shadowtype vs Cotypist — free and open source — 100% on-device, no subscription." />
+  <meta name="twitter:title" content="Shadowtype vs Cotypist — free, open source, no subscription" />
+  <meta name="twitter:description" content="Both are on-device Mac autocomplete. Shadowtype is free, open source, and zero-telemetry on all your Macs; Cotypist rents at $6–9/month. Side-by-side comparison." />
+  <meta name="twitter:image" content="https://shadowtype.app/assets/og-shadowtype-vs-cotypist.png" />
+  <meta name="twitter:image:alt" content="Shadowtype vs Cotypist — free, open source, no subscription" />
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Shadowtype",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "macOS 14+ (Apple Silicon)",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "availability": "https://schema.org/InStock", "url": "https://github.com/dario-valles/shadowtype/releases" },
+    "isAccessibleForFree": true, "license": "https://github.com/dario-valles/shadowtype",
+    "description": "Private, on-device AI text completion for macOS. Ghost-text autocomplete in any app, fully local and offline. Free and open source.",
+    "dateModified": "2026-06-06"
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      { "@type": "ListItem", "position": 1, "name": "Shadowtype", "item": "https://shadowtype.app/" },
+      { "@type": "ListItem", "position": 2, "name": "Shadowtype vs Cotypist", "item": "https://shadowtype.app/shadowtype-vs-cotypist" }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      { "@type": "Question", "name": "What is the main difference between Shadowtype and Cotypist?", "acceptedAnswer": { "@type": "Answer", "text": "Both run a local LLM on Apple Silicon for system-wide ghost-text autocomplete. The core difference is the model: Shadowtype is free and open source with no subscription and zero telemetry, while Cotypist is a recurring subscription ($6–9/month, or $72–108/year)." } },
+      { "@type": "Question", "name": "Are both Shadowtype and Cotypist fully on-device?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Both run inference locally with a downloaded model and work offline, with no account required. Neither sends your keystrokes to the cloud for completion." } },
+      { "@type": "Question", "name": "Does Cotypist collect telemetry?", "acceptedAnswer": { "@type": "Answer", "text": "Cotypist collects anonymous usage and crash telemetry by default (it can be disabled in settings), sent to third-party services. Shadowtype ships with no telemetry or analytics backend at all." } },
+      { "@type": "Question", "name": "How many Macs does each license cover?", "acceptedAnswer": { "@type": "Answer", "text": "Shadowtype is free, so you can use it on as many of your Macs as you like. Cotypist covers 1 Mac on its Plus plan and up to 3 Macs on Pro." } },
+      { "@type": "Question", "name": "Can my own scripts and editors use Shadowtype's local model?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Shadowtype runs an OpenAI-compatible HTTP endpoint on 127.0.0.1 with no key, so terminals, editor plugins, and AI agents can call /v1/chat/completions against the same on-device model. It also ships a built-in MCP server for Claude Code and other MCP clients, plus a BYOM picker for any GGUF. Cotypist does not offer a local API or MCP server." } },
+      { "@type": "Question", "name": "Is Shadowtype cheaper than Cotypist over time?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Shadowtype is free and open source, while Cotypist is a $6–9/month subscription, or $72–108 per year. Over three years that is several hundred dollars saved for the same on-device autocomplete." } }
+    ]
+  }
+  </script>
+</head>
+<body>
+
+  <header class="site-header">
+    <div class="wrap site-header__inner">
+      <a class="brand" href="/" aria-label="Shadowtype home">
+        <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+        <span>Shadowtype</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a class="nav__link" href="/#how">How it works</a>
+        <a class="nav__link" href="/#features">Features</a>
+        <a class="nav__link" href="https://github.com/dario-valles/shadowtype">GitHub</a>
+        <a class="nav__link" href="/#faq">FAQ</a>
+        <a class="btn btn--primary nav__cta" href="https://github.com/dario-valles/shadowtype/releases">Download</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="section hero">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Comparison · Shadowtype vs Cotypist</span>
+          <h1>Shadowtype vs Cotypist:<br><span class="accent">free and open, or rented forever.</span></h1>
+          <p class="lead"><strong>The short answer:</strong> Shadowtype and Cotypist are both on-device, offline, account-free ghost-text autocomplete apps for Apple Silicon Macs — they tie on the core capability. The deciding difference is the model: Shadowtype is <strong>free and open source</strong>, runs on all your Macs, and ships <strong>zero telemetry</strong>, while Cotypist is a recurring <strong>$6–9/month subscription</strong> ($72–108/year) with opt-out telemetry on 1–3 Macs.</p>
+          <p>Both are excellent: a local LLM predicts your next words as ghost text in any text field, and <kbd>Tab</kbd> accepts, completing in roughly 150&nbsp;ms on an M2. They&rsquo;re genuinely close on capability — the real fork is whether you want to buy the tool or keep renting it.</p>
+        </div>
+        <div class="hero__cta">
+          <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download Shadowtype free</a>
+          <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+        </div>
+        <ul class="hero__meta">
+          <li>Free &amp; open source</li>
+          <li>Zero telemetry</li>
+          <li>All your Macs</li>
+          <li>Open source</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="compare">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">The honest comparison</span>
+          <h2>How is Shadowtype different from Cotypist?</h2>
+          <p class="lead">Where they tie, we say so. Both are private, local, and account-free — that&rsquo;s the floor. Shadowtype wins on ownership, telemetry, and device count.</p>
+        </div>
+        <div class="compare">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Capability</th>
+                <th scope="col" class="col-us">Shadowtype</th>
+                <th scope="col">Cotypist</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>System-wide inline ghost-text completion</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>On-device LLM · offline · no account</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>Tab-to-accept word / whole line</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>Model choice (Gemma / Qwen GGUF)</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>Per-app instructions &amp; personalization</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>Selection rewrite (⌥⌘K, on-device)</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Completion only</td></tr>
+              <tr><td>Local API + MCP server (OpenAI-compatible)</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">No</td></tr>
+              <tr><td>Telemetry / analytics backend</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>None</span></td><td class="no">On by default (opt-out)</td></tr>
+              <tr><td>Macs per license</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Up to 5</span></td><td class="no">1 → 3</td></tr>
+              <tr><td>Free tier</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>100 words/day</span></td><td>100 words/day</td></tr>
+              <tr><td>Pricing model</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Free &amp; open source</span></td><td class="badge-sub">$6–9 / month</td></tr>
+              <tr><td>Requirements</td><td class="col-us">macOS 14+ · Apple Silicon</td><td>macOS 14+ · Apple Silicon</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="rewrite__meta" style="margin-top:1rem">By the numbers: at a typical $6–9/month, Cotypist costs <strong>$72–108 every year</strong>; Shadowtype is <strong>free</strong>, forever. &ldquo;We didn&rsquo;t want to build another keyboard you rent forever — Shadowtype is free and open source, on as many of your Macs as you like,&rdquo; says Shadowtype&rsquo;s developer.</p>
+        <p class="rewrite__meta" style="margin-top:.5rem">Figures reflect each product&rsquo;s public pricing and docs as of June 2026. Cotypist is a fine app — this page is about which trade-offs fit you.</p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Why people pick Shadowtype</span>
+          <h2>Same local autocomplete. Better ownership.</h2>
+        </div>
+        <div class="features">
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+            <h3>Free, not every month</h3>
+            <p>Free and open source versus $72–108 every year, forever. Over three years that&rsquo;s several hundred dollars of difference for the same on-device completion.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg></div>
+            <h3>Zero telemetry — not opt-out</h3>
+            <p>Cotypist sends anonymous usage and crash data by default; you can turn it off. Shadowtype has no analytics backend to turn off in the first place. Nothing to trust, because nothing is sent.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></div>
+            <h3>All your Macs, free</h3>
+            <p>Laptop, desktop, the work Mac — install it on every machine you own, at no charge. Cotypist caps you at one Mac (Plus) or three (Pro).</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-6 6 6 6M16 6l6 6-6 6M14 4l-4 16"/></svg></div>
+            <h3>Local API + MCP for developers</h3>
+            <p>An OpenAI-compatible HTTP endpoint runs on <code>127.0.0.1</code> so your scripts, editors, and agents can call the same on-device model — no key, no cloud. A built-in MCP bridge plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="faq">
+      <div class="wrap">
+        <div class="section-head center"><span class="eyebrow">Questions</span><h2>Shadowtype vs Cotypist FAQ</h2></div>
+        <div class="faq">
+          <details><summary>Is Cotypist on-device too?</summary><div class="faq__a">Yes. Cotypist runs a local model and works offline with no account, just like Shadowtype. On the privacy-and-local axis they&rsquo;re very similar — the difference is the subscription versus free and open source, plus telemetry and device count.</div></details>
+          <details><summary>Will Shadowtype cost me more over time?</summary><div class="faq__a">No — that&rsquo;s the point. Shadowtype is free and open source with free updates. Cotypist&rsquo;s $72–108/year keeps recurring for as long as you use it.</div></details>
+          <details><summary>Is Shadowtype really free?</summary><div class="faq__a">Yes. Shadowtype is free and open source — system-wide ghost text, Tab-to-accept, emoji, every model, and the local API, all included with no cap and no account. You can read the source on GitHub.</div></details>
+          <details><summary>Do they support the same Macs?</summary><div class="faq__a">Both require Apple Silicon and macOS 14 or later. Intel Macs are not supported by either.</div></details>
+          <details><summary>Can my own scripts, editors, and agents use the same local model?</summary><div class="faq__a">Yes. Shadowtype exposes an OpenAI-compatible HTTP endpoint on <code>127.0.0.1</code> with no key required, so your terminal, editor plugins, and AI agents can call <code>/v1/chat/completions</code> against the same on-device model. A built-in MCP server plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF you drop in. Everything is bound to localhost — nothing leaves your Mac. Cotypist doesn&rsquo;t offer a local API or MCP server.</div></details>
+          <details><summary>Is Shadowtype cheaper than Cotypist over time?</summary><div class="faq__a">Yes. Shadowtype is free and open source, while Cotypist is a $6–9/month subscription, or $72–108 per year. Over three years that is several hundred dollars saved for the same on-device autocomplete.</div></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="cta-band">
+          <span class="eyebrow" style="justify-content:center">Ready when you are</span>
+          <h2>The local autocomplete that&rsquo;s free and open source.</h2>
+          <p>Download Shadowtype free, accept your first word with <kbd>Tab</kbd>, and never pay a monthly bill.</p>
+          <div class="hero__cta">
+            <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download for macOS</a>
+            <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+          </div>
+          <ul class="risk-reversal" style="justify-content:center" aria-label="Purchase reassurance">
+            <li>Free forever</li><li>No subscription</li><li>No account</li><li>Zero telemetry</li><li>Open source</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="site-footer__grid">
+        <div class="site-footer__brand">
+          <a class="brand" href="/" aria-label="Shadowtype home">
+            <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+            <span>Shadowtype</span>
+          </a>
+          <p>Private, on-device AI text completion for macOS. Your words stay yours.</p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="/#how">How it works</a></li>
+            <li><a href="/#features">Features</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype">Free &amp; open source</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/releases">Download</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Compare</h4>
+          <ul>
+            <li><a href="/shadowtype-vs-cotypist">vs Cotypist</a></li>
+            <li><a href="/shadowtype-vs-cotabby">vs Cotabby</a></li>
+            <li><a href="/shadowtype-vs-apple-intelligence">vs Apple Intelligence</a></li>
+            <li><a href="/cotypist-alternative">Cotypist alternative</a></li>
+            <li><a href="/cotabby-alternative">Cotabby alternative</a></li>
+            <li><a href="/apple-intelligence-alternative">Apple Intelligence alternative</a></li>
+            <li><a href="/grammarly-alternative-mac">Grammarly alternative</a></li>
+            <li><a href="/ai-writing-assistant-mac">AI writing assistant</a></li>
+            <li><a href="/local-ai-autocomplete-mac">Local AI autocomplete</a></li>
+            <li><a href="/offline-text-prediction-macos">Offline text prediction</a></li>
+            <li><a href="/private-autocomplete-mac">Private autocomplete</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Legal</h4>
+          <ul>
+            <li><a href="/privacy">Privacy</a></li>
+            <li><a href="/terms">Terms</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/issues">Contact</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="site-footer__bottom">
+        <span>© 2026 Shadowtype. All rights reserved.</span>
+        <span>macOS 14+ · Apple Silicon · 100% on-device</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    window.__TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{ "ctaColor": "amber" }/*EDITMODE-END*/;
+  </script>
+  <script src="/tweaks.js"></script>
+</body>
+</html>

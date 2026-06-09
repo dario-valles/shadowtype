@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+# bin/menu — interactive release console for Shadowtype's in-app auto-updater.
+#
+# Cut a STABLE or BETA release whenever you want without remembering release.sh's env vars. The menu:
+#   • tracks the monotonic build counter in release/state.env (proposes the next build automatically),
+#   • runs local preflight checks (Developer ID identity, gh CLI installed + authenticated, notary config),
+#   • collects the version bump + release notes, then hands off to scripts/release.sh,
+#   • bumps + (optionally) commits the counter ONLY after a successful release,
+#   • can promote the current beta build to stable with NO rebuild (flip the GitHub prerelease flag),
+#   • has a Setup submenu for one-time config: notary profile, Homebrew tap.
+#
+# Releases publish to GitHub Releases (tag v<VERSION>, beta = --prerelease). The in-app updater reads
+# the latest.json asset from the release and self-updates — no Worker, no Ed25519 manifest, no R2.
+#
+# Per-machine config (notary profile / Homebrew tap) lives in release/release.config (gitignored,
+# written by the Setup submenu). The shared build counter (release/state.env) is committed.
+#
+# Usage: ./bin/menu        (run from anywhere; resolves the repo root itself)
+set -o pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STATE="$REPO_ROOT/release/state.env"
+CONFIG="$REPO_ROOT/release/release.config"
+RELEASE_SH="$REPO_ROOT/scripts/release.sh"
+GITHUB_REPO="dario-valles/shadowtype"
+
+# ---- colors (no-op when not a tty) ------------------------------------------------------------
+if [[ -t 1 ]]; then
+  BOLD=$(tput bold); DIM=$(tput dim); RED=$(tput setaf 1); GRN=$(tput setaf 2)
+  YEL=$(tput setaf 3); BLU=$(tput setaf 4); RST=$(tput sgr0)
+else
+  BOLD=; DIM=; RED=; GRN=; YEL=; BLU=; RST=
+fi
+
+# ---- state + config ---------------------------------------------------------------------------
+VERSION=0.1.0; BUILD=1
+[[ -f "$STATE" ]] || { mkdir -p "$(dirname "$STATE")"; printf 'VERSION=0.1.0\nBUILD=1\n' >"$STATE"; }
+# shellcheck disable=SC1090
+source "$STATE"
+NOTARY_PROFILE=""; TAP_REPO=""; TAP_DIR=""
+# shellcheck disable=SC1090
+[[ -f "$CONFIG" ]] && source "$CONFIG"
+
+save_state() { printf 'VERSION=%s\nBUILD=%s\n' "$1" "$2" >"$STATE"; }
+pause() { read -r -p "${DIM}↵ to continue…${RST} " _; }
+confirm() { local a; read -r -p "$1 ${DIM}[y/N]${RST} " a; [[ $a == [yY] ]]; }
+
+# Semantic-version bump (x.y.z). `keep` echoes the input unchanged.
+bump() {
+  local v=$1 kind=$2 major minor patch
+  IFS=. read -r major minor patch <<<"$v"
+  major=${major:-0}; minor=${minor:-0}; patch=${patch:-0}
+  case $kind in
+    major) echo "$((major + 1)).0.0" ;;
+    minor) echo "${major}.$((minor + 1)).0" ;;
+    patch) echo "${major}.${minor}.$((patch + 1))" ;;
+    *)     echo "$v" ;;
+  esac
+}
+
+# ---- preflight (local, fast) — returns nonzero on any hard failure -----------------------------
+preflight() {
+  local fail=0
+
+  if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+    echo "  ${GRN}✓${RST} Developer ID Application identity in keychain"
+  else
+    echo "  ${RED}✗${RST} no 'Developer ID Application' identity — notarized release impossible"; fail=1
+  fi
+
+  if command -v gh >/dev/null 2>&1; then
+    if gh auth status >/dev/null 2>&1; then
+      echo "  ${GRN}✓${RST} gh CLI installed + authenticated"
+    else
+      echo "  ${RED}✗${RST} gh CLI not authenticated — run: gh auth login"; fail=1
+    fi
+  else
+    echo "  ${RED}✗${RST} gh CLI not found — install with: brew install gh"; fail=1
+  fi
+
+  if [[ -n $NOTARY_PROFILE ]]; then
+    echo "  ${GRN}✓${RST} notary profile configured"
+  else
+    echo "  ${RED}✗${RST} NOTARY_PROFILE not set — run Setup ▸ Configure"; fail=1
+  fi
+
+  return $fail
+}
+
+# ---- cut a release ----------------------------------------------------------------------------
+# $1 = channel (stable|beta)
+cut_release() {
+  local channel=$1
+  echo
+  echo "${BOLD}Preflight — $channel${RST}"
+  if ! preflight; then
+    echo "${RED}Resolve the above before releasing.${RST}"; return 1
+  fi
+
+  # Version bump.
+  echo
+  echo "${BOLD}Version${RST} (current ${VERSION}):"
+  echo "  1) keep   ${VERSION}"
+  echo "  2) patch  → $(bump "$VERSION" patch)"
+  echo "  3) minor  → $(bump "$VERSION" minor)"
+  echo "  4) major  → $(bump "$VERSION" major)"
+  echo "  5) custom"
+  local vc newver; read -r -p "${BLU}›${RST} " vc
+  case $vc in
+    2) newver=$(bump "$VERSION" patch) ;;
+    3) newver=$(bump "$VERSION" minor) ;;
+    4) newver=$(bump "$VERSION" major) ;;
+    5) read -r -p "version (x.y.z): " newver ;;
+    *) newver=$VERSION ;;
+  esac
+  [[ -n $newver ]] || newver=$VERSION
+
+  # Build (auto-bump, override allowed).
+  local nextbuild=$((BUILD + 1)) newbuild
+  read -r -p "Build [${nextbuild}]: " newbuild; newbuild=${newbuild:-$nextbuild}
+  if ! [[ $newbuild =~ ^[0-9]+$ ]]; then echo "${RED}Build must be an integer.${RST}"; return 1; fi
+  if (( newbuild <= BUILD )); then
+    echo "${YEL}Warning: build $newbuild is not greater than the last build $BUILD — clients won't see it as newer.${RST}"
+    confirm "Continue anyway?" || return 1
+  fi
+
+  # Notes + mandatory flag.
+  local notes; read -r -p "Release notes [Bug fixes and improvements.]: " notes
+  [[ -n $notes ]] || notes="Bug fixes and improvements."
+  local min_build=0
+  if confirm "Mark MANDATORY (force-update everyone below this build)?"; then min_build=$newbuild; fi
+
+  # Confirm.
+  echo
+  echo "${BOLD}Release plan${RST}"
+  printf "  %-10s %s\n" "channel"  "$channel$([[ $channel == beta ]] && echo '  (GitHub prerelease)')"
+  printf "  %-10s %s (build %s)\n" "version" "$newver" "$newbuild"
+  printf "  %-10s %s\n" "notes"    "$notes"
+  printf "  %-10s %s\n" "min_build" "$min_build"
+  printf "  %-10s %s\n" "notary"   "$NOTARY_PROFILE"
+  printf "  %-10s %s\n" "repo"     "$GITHUB_REPO"
+  printf "  %-10s %s\n" "tap"      "${TAP_REPO:-${DIM}(none — skip Homebrew cask bump)${RST}}"
+  echo
+  confirm "Build, notarize, and publish?" || { echo "Aborted."; return 1; }
+
+  # Hand off to release.sh. A "beta" release is just a GitHub --prerelease (CHANNEL=beta);
+  # there is no beta BUILD flag anymore. Pass the Homebrew tap only when configured.
+  local tapenv=()
+  [[ -n $TAP_REPO && -n $TAP_DIR ]] && tapenv=(TAP_REPO="$TAP_REPO" TAP_DIR="$TAP_DIR")
+  if env CHANNEL="$channel" VERSION="$newver" BUILD="$newbuild" NOTES="$notes" MIN_BUILD="$min_build" \
+         NOTARY_PROFILE="$NOTARY_PROFILE" GITHUB_REPO="$GITHUB_REPO" "${tapenv[@]}" \
+         bash "$RELEASE_SH"; then
+    save_state "$newver" "$newbuild"
+    VERSION=$newver; BUILD=$newbuild
+    echo "${GRN}✓ Released $newver (build $newbuild) → $channel.${RST}"
+    if confirm "Commit the counter bump (release/state.env)?"; then
+      git -C "$REPO_ROOT" add release/state.env \
+        && git -C "$REPO_ROOT" commit -q -m "release: $newver (build $newbuild, $channel)" \
+        && echo "${GRN}committed.${RST}"
+    fi
+  else
+    echo "${RED}Release failed — counter unchanged (still build $BUILD). Fix and retry the same build.${RST}"
+  fi
+}
+
+# ---- promote beta → stable (no rebuild) -------------------------------------------------------
+# A release is published once at tag v<VERSION>. Promoting it just flips the GitHub prerelease flag
+# off, so the stable channel (which reads the repo's `latest` release) starts serving that build.
+promote() {
+  if ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
+    echo "${RED}gh CLI not installed/authenticated — can't promote.${RST}"; return 1
+  fi
+  echo "Latest prerelease (beta) on ${BOLD}$GITHUB_REPO${RST}:"
+  local tag
+  tag=$(gh release list --repo "$GITHUB_REPO" --limit 30 --json tagName,isPrerelease \
+        --jq 'map(select(.isPrerelease)) | .[0].tagName' 2>/dev/null)
+  if [[ -z $tag || $tag == "null" ]]; then
+    echo "${RED}No prerelease found — nothing to promote.${RST}"; return 1
+  fi
+  echo "  $tag"
+  echo
+  echo "This flips $tag from prerelease → stable on GitHub (no rebuild, no notarize)."
+  confirm "Promote $tag → stable?" || return 1
+  if gh release edit "$tag" --repo "$GITHUB_REPO" --prerelease=false --latest; then
+    echo "${GRN}✓ Promoted $tag → stable.${RST}"
+  else
+    echo "${RED}Promote failed (gh).${RST}"
+  fi
+}
+
+# ---- setup & diagnostics ----------------------------------------------------------------------
+setup_config() {
+  echo "${BOLD}Configure release environment${RST} ${DIM}(saved to release/release.config, gitignored)${RST}"
+  local a
+  read -r -p "notarytool keychain profile name [${NOTARY_PROFILE}]: " a; NOTARY_PROFILE=${a:-$NOTARY_PROFILE}
+  read -r -p "Homebrew tap repo (e.g. dario-valles/homebrew-shadowtype, blank = skip) [${TAP_REPO}]: " a; TAP_REPO=${a:-$TAP_REPO}
+  read -r -p "Homebrew tap local clone dir (blank = skip) [${TAP_DIR}]: " a; TAP_DIR=${a:-$TAP_DIR}
+  mkdir -p "$(dirname "$CONFIG")"
+  {
+    echo "NOTARY_PROFILE=\"$NOTARY_PROFILE\""
+    echo "TAP_REPO=\"$TAP_REPO\""
+    echo "TAP_DIR=\"$TAP_DIR\""
+  } >"$CONFIG"
+  echo "${GRN}Saved.${RST}"
+}
+
+store_notary() {
+  echo "Launching ${BOLD}xcrun notarytool store-credentials${RST} (interactive)."
+  echo "You'll need your Apple ID, an app-specific password, and your Team ID."
+  echo "Pick a profile NAME and set the same name in Setup ▸ Configure."
+  xcrun notarytool store-credentials || true
+}
+
+diagnostics() {
+  echo "${BOLD}Diagnostics${RST}"
+  preflight || true
+  echo
+  echo "Recent releases on ${BOLD}$GITHUB_REPO${RST}:"
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    gh release list --repo "$GITHUB_REPO" --limit 10 2>/dev/null | sed 's/^/  /' \
+      || echo "  ${YEL}?${RST} couldn't list releases"
+  else
+    echo "  ${YEL}?${RST} gh not installed/authenticated"
+  fi
+}
+
+setup_menu() {
+  while true; do
+    clear 2>/dev/null || true
+    echo "${BOLD}${BLU}Setup & diagnostics${RST}"
+    echo
+    echo "  1) Configure notary profile / Homebrew tap"
+    echo "  2) Store notarytool credentials"
+    echo "  3) Run diagnostics"
+    echo "  4) Back"
+    echo
+    local c; read -r -p "${BLU}›${RST} " c
+    case $c in
+      1) setup_config; pause ;;
+      2) store_notary; pause ;;
+      3) diagnostics; pause ;;
+      4 | "" | b | q) return ;;
+    esac
+  done
+}
+
+# ---- header + main loop -----------------------------------------------------------------------
+header() {
+  local cfg="${RED}not configured${RST}"
+  [[ -n $NOTARY_PROFILE ]] && cfg="${GRN}configured${RST}"
+  echo "${BOLD}${BLU}Shadowtype · Release${RST}"
+  echo "${DIM}current${RST} v${BOLD}${VERSION}${RST} ${DIM}build${RST} ${BOLD}${BUILD}${RST}    ${DIM}env${RST} ${cfg}"
+  echo
+}
+
+case "${1:-}" in
+  -h | --help)
+    echo "Shadowtype release menu. Run ./bin/menu and pick stable or beta."
+    exit 0 ;;
+esac
+
+while true; do
+  clear 2>/dev/null || true
+  header
+  echo "  1) Cut ${BOLD}BETA${RST} release      ${DIM}(rebuild · notarize · publish → GitHub prerelease)${RST}"
+  echo "  2) Cut ${BOLD}STABLE${RST} release    ${DIM}(rebuild · notarize · publish → GitHub release)${RST}"
+  echo "  3) Promote current beta → stable  ${DIM}(no rebuild · flip prerelease flag)${RST}"
+  echo "  4) Setup & diagnostics ▸"
+  echo "  5) Quit"
+  echo
+  read -r -p "${BLU}›${RST} " c
+  case $c in
+    1) cut_release beta;   pause ;;
+    2) cut_release stable; pause ;;
+    3) promote;            pause ;;
+    4) setup_menu ;;
+    5 | q | Q | "") echo "bye"; exit 0 ;;
+  esac
+done

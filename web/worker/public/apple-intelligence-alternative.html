@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Apple Intelligence Alternative for Mac — Private Inline Autocomplete</title>
+  <meta name="description" content="Apple Intelligence is free and built-in, but inline prediction is short-range and mostly limited to Apple apps. Shadowtype is the focused alternative: continuous on-device ghost text in any app." />
+  <meta name="theme-color" content="#0a0b0e" />
+  <link rel="canonical" href="https://shadowtype.app/apple-intelligence-alternative" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <link rel="stylesheet" href="/landing.css" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="A focused alternative to Apple Intelligence for writing on Mac" />
+  <meta property="og:description" content="Apple Intelligence is free and built-in. Shadowtype is the alternative for real continuous inline prediction in every app, guaranteed on-device, with model choice." />
+  <meta property="og:url" content="https://shadowtype.app/apple-intelligence-alternative" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta property="og:site_name" content="Shadowtype" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:image" content="https://shadowtype.app/assets/og-apple-intelligence-alternative.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:alt" content="A focused alternative to Apple Intelligence for writing on Mac — 100% on-device, free, no subscription." />
+  <meta name="twitter:title" content="A focused alternative to Apple Intelligence for writing on Mac" />
+  <meta name="twitter:description" content="Apple Intelligence is free and built-in. Shadowtype is the alternative for real continuous inline prediction in every app, guaranteed on-device, with model choice." />
+  <meta name="twitter:image" content="https://shadowtype.app/assets/og-apple-intelligence-alternative.png" />
+  <meta name="twitter:image:alt" content="A focused alternative to Apple Intelligence for writing on Mac" />
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Shadowtype",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "macOS 14+ (Apple Silicon)",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "availability": "https://schema.org/InStock", "url": "https://github.com/dario-valles/shadowtype/releases" },
+    "isAccessibleForFree": true, "license": "https://github.com/dario-valles/shadowtype",
+    "description": "Private, on-device AI text completion for macOS. Ghost-text autocomplete in any app, fully local and offline. Free and open source.",
+    "dateModified": "2026-06-06"
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      { "@type": "ListItem", "position": 1, "name": "Shadowtype", "item": "https://shadowtype.app/" },
+      { "@type": "ListItem", "position": 2, "name": "Apple Intelligence alternative", "item": "https://shadowtype.app/apple-intelligence-alternative" }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      { "@type": "Question", "name": "Is Apple Intelligence free?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Apple Intelligence and its Writing Tools are free and built into macOS 15.1+ on Apple Silicon Macs. You would choose Shadowtype only if you want what Apple Intelligence doesn't offer: continuous multi-sentence inline prediction in every app, a guarantee that nothing ever leaves your Mac, model choice, and macOS 14 support." } },
+      { "@type": "Question", "name": "Isn't inline predictive text the same as Apple Intelligence?", "acceptedAnswer": { "@type": "Answer", "text": "No, they are separate features. macOS inline predictive text (the short ghost-text suggestion that shipped in Sonoma 14) is a small on-device autocomplete that works mostly in Apple's own apps like Notes, Mail and Pages. Apple Intelligence Writing Tools is a select-then-transform feature (Proofread, Rewrite, tone, Summarize), not continuous inline prediction. Shadowtype combines continuous multi-sentence inline ghost text with on-device rewrite in any app." } },
+      { "@type": "Question", "name": "Is Apple Intelligence fully on-device?", "acceptedAnswer": { "@type": "Answer", "text": "Partly. Some Apple Intelligence requests run on-device, but Writing Tools can route to Private Cloud Compute, which runs on Apple servers. It is not guaranteed to stay on your Mac or to work offline. Shadowtype runs every completion 100% on-device with zero network, so it works on a plane and your text never leaves the machine." } },
+      { "@type": "Question", "name": "Does Apple Intelligence give ghost-text prediction in every app?", "acceptedAnswer": { "@type": "Answer", "text": "No. macOS inline predictive text is short-range and is not reliable in third-party or web text fields — it works best in Apple's own apps. Shadowtype runs system-wide and predicts whole sentences as ghost text in any text field, then Tab accepts." } },
+      { "@type": "Question", "name": "Does Shadowtype expose a local API for developers?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Shadowtype runs an OpenAI-compatible HTTP endpoint on 127.0.0.1 with no key, so terminals, editor plugins, and AI agents can call /v1/chat/completions against the same on-device model. It also ships a built-in MCP server for Claude Code and other MCP clients, plus a BYOM picker for any GGUF. Apple Intelligence keeps its on-device models app-bound, with no developer-accessible local API or MCP server." } }
+    ]
+  }
+  </script>
+</head>
+<body>
+
+  <header class="site-header">
+    <div class="wrap site-header__inner">
+      <a class="brand" href="/" aria-label="Shadowtype home">
+        <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+        <span>Shadowtype</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a class="nav__link" href="/#how">How it works</a>
+        <a class="nav__link" href="/#features">Features</a>
+        <a class="nav__link" href="https://github.com/dario-valles/shadowtype">GitHub</a>
+        <a class="nav__link" href="/#faq">FAQ</a>
+        <a class="btn btn--primary nav__cta" href="https://github.com/dario-valles/shadowtype/releases">Download</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="section hero">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Apple Intelligence alternative</span>
+          <h1>A focused alternative to Apple Intelligence<br><span class="accent">for writing on Mac.</span></h1>
+          <p class="lead"><strong>The best Apple Intelligence alternative for inline autocomplete is Shadowtype</strong> — a free, open-source, fully on-device ghost-text app for Apple Silicon Macs. Apple Intelligence is free and built-in, but its inline prediction is short-range and mostly limited to Apple&rsquo;s own apps, its Writing Tools only <strong>transform text you select</strong>, and rewrites can route to <strong>Private Cloud Compute</strong>. Shadowtype gives you continuous multi-sentence inline prediction in <em>any</em> app, a hard guarantee that <strong>nothing leaves the Mac</strong>, model choice, and macOS 14 support.</p>
+          <p>If occasional rewrites in Apple&rsquo;s apps are all you need, Apple Intelligence is fine and free. Shadowtype is for people who want real inline prediction everywhere.</p>
+        </div>
+        <div class="hero__cta">
+          <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download Shadowtype free</a>
+          <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+        </div>
+        <ul class="hero__meta">
+          <li>Continuous inline ghost text</li>
+          <li>100% on-device · offline</li>
+          <li>Works in any app</li>
+          <li>Free &amp; open source</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="compare">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">The honest comparison</span>
+          <h2>Where Apple Intelligence stops, and what to use instead</h2>
+          <p class="lead">Apple Intelligence is free and well-integrated — credit where it&rsquo;s due. This is about the specific gaps a heavy writer runs into, and where a dedicated tool fills them.</p>
+        </div>
+        <div class="compare">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Capability</th>
+                <th scope="col" class="col-us">Shadowtype</th>
+                <th scope="col">Apple Intelligence</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Continuous multi-sentence inline prediction</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Select-to-rewrite only</td></tr>
+              <tr><td>Works in any app (third-party &amp; web fields)</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Apple apps only</td></tr>
+              <tr><td>Guaranteed 100% on-device for completion</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes · zero network</span></td><td class="no">May use Private Cloud Compute</td></tr>
+              <tr><td>Works fully offline</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Not guaranteed</td></tr>
+              <tr><td>Model choice (Qwen3 / Gemma 3 / MoE GGUF · BYOM)</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Fixed model</td></tr>
+              <tr><td>On-device selection rewrite (⌥⌘K)</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Writing Tools</span></td></tr>
+              <tr><td>Local API + MCP server (OpenAI-compatible)</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Not exposed</td></tr>
+              <tr><td>Per-app instructions &amp; personalization</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Fixed tone presets</td></tr>
+              <tr><td>Quick proofread / tone rewrites built-in</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>Price</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Free &amp; open source</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Free, built-in</span></td></tr>
+              <tr><td>Requirements</td><td class="col-us">macOS 14+ · Apple Silicon</td><td class="no">macOS 15.1+ · Apple Silicon</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="rewrite__meta" style="margin-top:1rem">Worth noting: Apple Intelligence requires <strong>macOS 15.1+</strong> and gives you one fixed model, while Shadowtype runs on <strong>macOS 14</strong>, completes in roughly 150&nbsp;ms on an M2, and lets you pick from a catalog of GGUF models (Qwen3, Gemma 3, MoE) or bring your own. &ldquo;The gap Apple left is continuous, everywhere, guaranteed-local prediction — that&rsquo;s exactly what Shadowtype is built to fill,&rdquo; says Shadowtype&rsquo;s developer.</p>
+        <p class="rewrite__meta" style="margin-top:.5rem">Figures reflect Apple&rsquo;s public documentation as of June 2026. Apple Intelligence is genuinely good and free — this page is about which trade-offs fit how you write.</p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Why people switch</span>
+          <h2>Built for people who type all day, everywhere.</h2>
+        </div>
+        <div class="features">
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h10M4 17h7"/></svg></div>
+            <h3>Real inline prediction, in every app</h3>
+            <p>macOS inline predictive text is short-range and mostly limited to Apple&rsquo;s own apps; Writing Tools only acts on text you select. Shadowtype runs system-wide and predicts whole sentences as ghost text in any field — Slack, your IDE, the browser — and <kbd>Tab</kbd> accepts.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+            <h3>A guarantee, not a maybe</h3>
+            <p>Apple Intelligence rewrites can route to Private Cloud Compute on Apple servers, so it&rsquo;s not guaranteed to stay on your Mac or work offline. Shadowtype runs every completion 100% on-device with zero network — it works on a plane, and your words never leave the machine.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg></div>
+            <h3>Your model, your rules</h3>
+            <p>Apple Intelligence gives you one fixed model and fixed tone presets. Shadowtype lets you pick from a catalog (Qwen3 Base, Gemma 3, MoE variants — or bring your own GGUF), set per-app instructions, and personalize completions — plus on-device rewrite with <kbd>⌥⌘K</kbd>. And it runs on macOS 14, a release earlier than Apple Intelligence requires.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-6 6 6 6M16 6l6 6-6 6M14 4l-4 16"/></svg></div>
+            <h3>Local API + MCP for developers</h3>
+            <p>An OpenAI-compatible HTTP endpoint runs on <code>127.0.0.1</code> so your scripts, editors, and agents can call the same on-device model — no key, no cloud. A built-in MCP bridge plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF. Apple keeps its on-device models app-bound; Shadowtype hands you the endpoint.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="faq">
+      <div class="wrap">
+        <div class="section-head center"><span class="eyebrow">Questions</span><h2>Apple Intelligence alternative FAQ</h2></div>
+        <div class="faq">
+          <details><summary>Is Apple Intelligence free?</summary><div class="faq__a">Yes — Apple Intelligence and its Writing Tools are free and built into macOS 15.1+ on Apple Silicon. You&rsquo;d only choose Shadowtype if you want what Apple Intelligence doesn&rsquo;t offer: continuous multi-sentence inline prediction in every app, a guarantee that nothing ever leaves your Mac, model choice, and macOS 14 support. If occasional rewrites in Apple&rsquo;s apps are all you need, Apple Intelligence is a fine choice and costs nothing.</div></details>
+          <details><summary>Isn&rsquo;t inline predictive text the same as Apple Intelligence?</summary><div class="faq__a">No — they&rsquo;re separate features. macOS inline predictive text (the short ghost suggestion that shipped in Sonoma 14) is a small on-device autocomplete that works mostly in Apple&rsquo;s own apps like Notes, Mail and Pages. Apple Intelligence Writing Tools is select-then-transform — Proofread, Rewrite, tone, Summarize — not continuous inline prediction. Shadowtype combines continuous multi-sentence inline ghost text with on-device rewrite in any app.</div></details>
+          <details><summary>Is Apple Intelligence fully on-device?</summary><div class="faq__a">Partly. Some requests run on-device, but Writing Tools can route to Private Cloud Compute, which runs on Apple servers — so it isn&rsquo;t guaranteed to stay on your Mac or to work offline. Shadowtype runs every completion 100% on-device with zero network, so it works offline and your text never leaves the machine.</div></details>
+          <details><summary>Do we support the same Macs?</summary><div class="faq__a">Both require Apple Silicon. Apple Intelligence requires macOS 15.1 or later; Shadowtype runs on macOS 14 or later, so it covers a release Apple Intelligence doesn&rsquo;t. Neither supports Intel Macs.</div></details>
+          <details><summary>Can my own scripts, editors, and agents use Shadowtype's local model?</summary><div class="faq__a">Yes. Shadowtype exposes an OpenAI-compatible HTTP endpoint on <code>127.0.0.1</code> with no key required, so your terminal, editor plugins, and AI agents can call <code>/v1/chat/completions</code> against the same on-device model. A built-in MCP server plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF you drop in. Apple Intelligence keeps its on-device models locked to Apple&rsquo;s own apps and Writing Tools — there&rsquo;s no localhost API or MCP server for your code.</div></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="cta-band">
+          <span class="eyebrow" style="justify-content:center">Ready when you are</span>
+          <h2>Keep Apple Intelligence. Add the inline autocomplete it&rsquo;s missing.</h2>
+          <p>Download Shadowtype free, accept your first sentence with <kbd>Tab</kbd> in any app, and upgrade once — never monthly.</p>
+          <div class="hero__cta">
+            <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download for macOS</a>
+            <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+          </div>
+          <ul class="risk-reversal" style="justify-content:center" aria-label="Purchase reassurance">
+            <li>Works in any app</li><li>100% on-device</li><li>No account</li><li>Free forever</li><li>Open source</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="site-footer__grid">
+        <div class="site-footer__brand">
+          <a class="brand" href="/" aria-label="Shadowtype home">
+            <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+            <span>Shadowtype</span>
+          </a>
+          <p>Private, on-device AI text completion for macOS. Your words stay yours.</p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="/#how">How it works</a></li>
+            <li><a href="/#features">Features</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype">Free &amp; open source</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/releases">Download</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Compare</h4>
+          <ul>
+            <li><a href="/shadowtype-vs-cotypist">vs Cotypist</a></li>
+            <li><a href="/shadowtype-vs-cotabby">vs Cotabby</a></li>
+            <li><a href="/shadowtype-vs-apple-intelligence">vs Apple Intelligence</a></li>
+            <li><a href="/cotypist-alternative">Cotypist alternative</a></li>
+            <li><a href="/cotabby-alternative">Cotabby alternative</a></li>
+            <li><a href="/apple-intelligence-alternative">Apple Intelligence alternative</a></li>
+            <li><a href="/grammarly-alternative-mac">Grammarly alternative</a></li>
+            <li><a href="/ai-writing-assistant-mac">AI writing assistant</a></li>
+            <li><a href="/local-ai-autocomplete-mac">Local AI autocomplete</a></li>
+            <li><a href="/offline-text-prediction-macos">Offline text prediction</a></li>
+            <li><a href="/private-autocomplete-mac">Private autocomplete</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Legal</h4>
+          <ul>
+            <li><a href="/privacy">Privacy</a></li>
+            <li><a href="/terms">Terms</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/issues">Contact</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="site-footer__bottom">
+        <span>© 2026 Shadowtype. All rights reserved.</span>
+        <span>macOS 14+ · Apple Silicon · 100% on-device</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    window.__TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{ "ctaColor": "amber" }/*EDITMODE-END*/;
+  </script>
+  <script src="/tweaks.js"></script>
+</body>
+</html>

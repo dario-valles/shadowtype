@@ -1,0 +1,22 @@
+{
+  "name": "shadowtype-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shadowtype static marketing + SEO site (Cloudflare Worker serving Workers Assets — no backend).",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "og": "bun scripts/gen-og.ts && bun scripts/inject-og.ts"
+  },
+  "dependencies": {
+    "hono": "^4.9.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.0.0"
+  }
+}

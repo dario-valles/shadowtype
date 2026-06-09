@@ -1,0 +1,12 @@
+{
+  "name": "Shadowtype",
+  "short_name": "Shadowtype",
+  "description": "Private, on-device AI text completion for macOS.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0b0e",
+  "theme_color": "#0a0b0e",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

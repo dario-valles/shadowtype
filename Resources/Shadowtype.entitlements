@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Hardened Runtime entitlements for the notarized Developer ID build (RELEASE=1 in make-app.sh).
+         Accessibility / Input-Monitoring are TCC-gated, NOT entitlement-gated, so they keep working under
+         the hardened runtime with no entitlement here.
+
+         disable-library-validation: the executable links libllama / libggml / libggml-base from the
+         Homebrew formulae, which are signed by a DIFFERENT team (or ad-hoc) than our Developer ID. Without
+         this, hardened-runtime library validation refuses to load them and the app crashes on launch. The
+         proper long-term fix is to copy those dylibs into Contents/Frameworks and re-sign them with our own
+         identity (install_name_tool + codesign), after which this entitlement can be removed. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

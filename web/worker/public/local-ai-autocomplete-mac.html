@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Local AI Autocomplete for Mac — on-device, no cloud | Shadowtype</title>
+  <meta name="description" content="Local AI autocomplete for Mac: a real LLM runs on-device with llama.cpp + Metal on Apple Silicon. Inline ghost-text in any app, Tab to accept, no cloud call ever." />
+  <meta name="theme-color" content="#0a0b0e" />
+  <link rel="canonical" href="https://shadowtype.app/local-ai-autocomplete-mac" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <link rel="stylesheet" href="/landing.css" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Local AI autocomplete for Mac — on-device, no cloud" />
+  <meta property="og:description" content="A real LLM runs on your Apple Silicon Mac with llama.cpp + Metal. Inline ghost-text autocomplete in any app, Tab to accept — no cloud inference call ever." />
+  <meta property="og:url" content="https://shadowtype.app/local-ai-autocomplete-mac" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta property="og:site_name" content="Shadowtype" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:image" content="https://shadowtype.app/assets/og-local-ai-autocomplete-mac.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:alt" content="Local AI autocomplete for Mac — on-device, no cloud — 100% on-device, free, no subscription." />
+  <meta name="twitter:title" content="Local AI autocomplete for Mac — on-device, no cloud" />
+  <meta name="twitter:description" content="A real LLM runs on your Apple Silicon Mac with llama.cpp + Metal. Inline ghost-text autocomplete in any app, Tab to accept — no cloud inference call ever." />
+  <meta name="twitter:image" content="https://shadowtype.app/assets/og-local-ai-autocomplete-mac.png" />
+  <meta name="twitter:image:alt" content="Local AI autocomplete for Mac — on-device, no cloud" />
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Shadowtype",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "macOS 14+ (Apple Silicon)",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "availability": "https://schema.org/InStock", "url": "https://github.com/dario-valles/shadowtype/releases" },
+    "isAccessibleForFree": true, "license": "https://github.com/dario-valles/shadowtype",
+    "description": "Local AI autocomplete for macOS. A real LLM runs on-device with llama.cpp and Metal, predicting your next words as inline ghost text in any app. Free and open source.",
+      "dateModified": "2026-06-06"
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      { "@type": "ListItem", "position": 1, "name": "Shadowtype", "item": "https://shadowtype.app/" },
+      { "@type": "ListItem", "position": 2, "name": "Local AI autocomplete for Mac", "item": "https://shadowtype.app/local-ai-autocomplete-mac" }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      { "@type": "Question", "name": "What is local AI autocomplete?", "acceptedAnswer": { "@type": "Answer", "text": "Local AI autocomplete uses a real language model that runs entirely on your own Mac to predict and complete your next words inline, as ghost text. Unlike cloud autocomplete, no keystrokes ever leave the device — inference happens on your Apple Silicon chip via llama.cpp and Metal, so it works offline and sends nothing to a server." } },
+      { "@type": "Question", "name": "Does local AI autocomplete need an internet connection?", "acceptedAnswer": { "@type": "Answer", "text": "No. Once the model is downloaded, Shadowtype runs 100% on-device. There is no cloud inference call, so completions work on a plane, behind a firewall, or fully offline — and they keep working with no account and no subscription server to phone home to." } },
+      { "@type": "Question", "name": "Which models does Shadowtype run locally?", "acceptedAnswer": { "@type": "Answer", "text": "Shadowtype ships a catalog of free GGUF models including Qwen3 Base (sharp fill-in-the-middle continuation), Gemma 3, and MoE / small-MoE variants — and you can drop in your own GGUF too. They run with llama.cpp accelerated by Metal on Apple Silicon. Lighter models give the fastest ghost text; larger ones give richer completions. You pick the trade-off." } },
+      { "@type": "Question", "name": "Is local AI autocomplete private?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Because inference is on-device, your text is never transmitted for completion. Shadowtype ships with zero telemetry and no analytics backend, requires no account, and works offline — so private autocomplete is the default, not a setting you have to find." } }
+    ]
+  }
+  </script>
+</head>
+<body>
+
+  <header class="site-header">
+    <div class="wrap site-header__inner">
+      <a class="brand" href="/" aria-label="Shadowtype home">
+        <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+        <span>Shadowtype</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a class="nav__link" href="/#how">How it works</a>
+        <a class="nav__link" href="/#features">Features</a>
+        <a class="nav__link" href="https://github.com/dario-valles/shadowtype">GitHub</a>
+        <a class="nav__link" href="/#faq">FAQ</a>
+        <a class="btn btn--primary nav__cta" href="https://github.com/dario-valles/shadowtype/releases">Download</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="section hero">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Local AI autocomplete · macOS</span>
+          <h1>Local AI autocomplete for Mac —<br><span class="accent">a real LLM, running on-device.</span></h1>
+          <p class="lead">Shadowtype runs an actual language model <strong>on your Apple Silicon chip</strong> — not in the cloud. It reads what you&rsquo;re typing and predicts the rest as inline ghost text in any app; <kbd>Tab</kbd> accepts a word, <kbd>⌥Tab</kbd> a whole line. Inference happens locally with <strong>llama.cpp + Metal</strong>, so completions land in under ~150ms on an M2 and <strong>no keystroke is ever sent to a server</strong>.</p>
+        </div>
+        <div class="hero__cta">
+          <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download Shadowtype free</a>
+          <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+        </div>
+        <ul class="hero__meta">
+          <li>100% on-device</li>
+          <li>No cloud inference</li>
+          <li>Model choice</li>
+          <li>Zero telemetry</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="how">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">What &ldquo;local AI autocomplete&rdquo; means</span>
+          <h2>The model lives on your Mac</h2>
+          <p class="lead">Cloud autocomplete streams your keystrokes to a server, runs the model there, and sends predictions back. Local AI autocomplete flips that: the model is downloaded once and every prediction is computed on your own silicon. Here&rsquo;s the loop.</p>
+        </div>
+        <div class="steps">
+          <article class="step">
+            <span class="step__n">1</span>
+            <h3>You type, on-device context is read</h3>
+            <p>As you write in any text field, Shadowtype reads the surrounding text locally through macOS accessibility — never by uploading it anywhere.</p>
+          </article>
+          <article class="step">
+            <span class="step__n">2</span>
+            <h3>llama.cpp + Metal runs the LLM</h3>
+            <p>A GGUF model from the built-in catalog (Qwen3 Base, Gemma 3, MoE variants — or bring your own) runs through llama.cpp with Metal acceleration on your Apple Silicon GPU. No API call, no round-trip latency.</p>
+          </article>
+          <article class="step">
+            <span class="step__n">3</span>
+            <h3>Ghost text appears at the caret</h3>
+            <p>The prediction shows as dimmed inline ghost text right where you&rsquo;re typing — typically in under ~150ms on an M2, fast enough to feel like part of the keyboard.</p>
+          </article>
+          <article class="step">
+            <span class="step__n">4</span>
+            <h3>Tab to accept, keep typing to ignore</h3>
+            <p><kbd>Tab</kbd> accepts a word, <kbd>⌥Tab</kbd> a whole line. Don&rsquo;t like it? Just keep typing and it dissolves. You stay in control of every character.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="features">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Why on-device matters</span>
+          <h2>Real local inference, real advantages</h2>
+        </div>
+        <div class="features">
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg></div>
+            <h3>Local = fast</h3>
+            <p>No network round-trip means no waiting on a server. Ghost text typically lands in under ~150ms on an M2 because the LLM runs right on your GPU via Metal. Lighter models go faster still.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+            <h3>Local = private</h3>
+            <p>Because nothing is sent for completion, your words can&rsquo;t leak. Shadowtype is <a href="/private-autocomplete-mac">private</a> by design with zero telemetry and no account — the model simply never talks to the internet.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12.5 3 12a9 9 0 0 1 18 0l-2 .5"/><path d="M12 3v4M7 21h10"/><circle cx="12" cy="13" r="3"/></svg></div>
+            <h3>Local = no cloud bill</h3>
+            <p>There&rsquo;s no inference API metering tokens behind the scenes, so there&rsquo;s no per-use cost and no subscription to fund a server. Shadowtype is <strong>free and open source</strong>.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="m9 12 2 2 4-4"/></svg></div>
+            <h3>Your model, your trade-off</h3>
+            <p>Pick from a catalog of free GGUF models — Qwen3 Base, Gemma 3, MoE and small-MoE variants — or drop in your own. Choose a small model for instant ghost text or a larger one for richer completions. Swap any time.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16M4 12h10M4 19h16"/></svg></div>
+            <h3>Works in every app</h3>
+            <p>Mail, Slack, Notes, your editor, the browser — continuous inline completion anywhere you can type, plus selection rewrite on <kbd>⌥⌘K</kbd> when you want to reshape text you&rsquo;ve already written.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12a10 10 0 0 1 20 0M2 12a10 10 0 0 0 20 0M12 2v20"/></svg></div>
+            <h3>Always offline-ready</h3>
+            <p>Once the model is on disk, completion <a href="/offline-text-prediction-macos">works offline</a> — on a plane, behind a firewall, anywhere. There&rsquo;s no server to be down and no account to expire.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Beyond the buzzword</span>
+          <h2>Local that&rsquo;s actually local</h2>
+          <p class="lead">Plenty of apps say &ldquo;AI&rdquo; while quietly calling a cloud API. Shadowtype runs the whole model on your machine and personalizes to <em>you</em> — locally. You can add per-app instructions (a different voice for Mail than for Slack), and it adapts to your phrasing over time, all without sending a single byte off-device. If you&rsquo;re weighing it against a hosted-completion tool, see <a href="/shadowtype-vs-cotypist">how it compares</a> or the <a href="/#features">full feature list</a>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="faq">
+      <div class="wrap">
+        <div class="section-head center"><span class="eyebrow">Questions</span><h2>Local AI autocomplete FAQ</h2></div>
+        <div class="faq">
+          <details><summary>What is local AI autocomplete?</summary><div class="faq__a">It&rsquo;s autocomplete powered by a real language model that runs entirely on your own Mac, predicting your next words inline as ghost text. Unlike cloud autocomplete, no keystrokes leave the device — inference happens on your Apple Silicon chip via llama.cpp and Metal, so it&rsquo;s fast, private, and works offline.</div></details>
+          <details><summary>Does it need internet?</summary><div class="faq__a">No. After the model downloads once, Shadowtype runs 100% on-device with no cloud inference call. Completions work on a plane, behind a firewall, or fully offline — and there&rsquo;s no account or subscription server to phone home to.</div></details>
+          <details><summary>Which models does it run?</summary><div class="faq__a">A catalog of free GGUF models you choose from — Qwen3 Base (sharp fill-in-the-middle), Gemma 3, MoE and small-MoE variants — all running through llama.cpp with Metal acceleration. You can also drop in your own GGUF via the BYOM picker. Lighter models give the fastest ghost text; larger ones give richer completions — pick the trade-off that fits your Mac.</div></details>
+          <details><summary>Can my own scripts and editors use the same local model?</summary><div class="faq__a">Yes. Shadowtype exposes an OpenAI-compatible HTTP endpoint on <code>127.0.0.1</code> with no key required, so your terminal, editor plugins, and agents can call <code>/v1/chat/completions</code> against the same on-device model. There&rsquo;s also a built-in MCP server for Claude Code and other MCP clients. Everything is bound to localhost — nothing leaves your Mac.</div></details>
+          <details><summary>Is it private?</summary><div class="faq__a">Yes. Because inference is on-device, your text is never transmitted for completion. Shadowtype ships with zero telemetry and no analytics backend, needs no account, and works offline — so privacy is the default, not a setting to hunt for.</div></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="cta-band">
+          <span class="eyebrow" style="justify-content:center">Ready when you are</span>
+          <h2>Run the LLM on your Mac, not someone&rsquo;s server.</h2>
+          <p>Download Shadowtype free, accept your first word with <kbd>Tab</kbd>, and upgrade once — never monthly.</p>
+          <div class="hero__cta">
+            <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download for macOS</a>
+            <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+          </div>
+          <ul class="risk-reversal" style="justify-content:center" aria-label="Purchase reassurance">
+            <li>100% on-device</li><li>No subscription</li><li>No account</li><li>Zero telemetry</li><li>Open source</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="site-footer__grid">
+        <div class="site-footer__brand">
+          <a class="brand" href="/" aria-label="Shadowtype home">
+            <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+            <span>Shadowtype</span>
+          </a>
+          <p>Private, on-device AI text completion for macOS. Your words stay yours.</p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="/#how">How it works</a></li>
+            <li><a href="/#features">Features</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype">Free &amp; open source</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/releases">Download</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Compare</h4>
+          <ul>
+            <li><a href="/shadowtype-vs-cotypist">vs Cotypist</a></li>
+            <li><a href="/shadowtype-vs-cotabby">vs Cotabby</a></li>
+            <li><a href="/shadowtype-vs-apple-intelligence">vs Apple Intelligence</a></li>
+            <li><a href="/cotypist-alternative">Cotypist alternative</a></li>
+            <li><a href="/cotabby-alternative">Cotabby alternative</a></li>
+            <li><a href="/apple-intelligence-alternative">Apple Intelligence alternative</a></li>
+            <li><a href="/grammarly-alternative-mac">Grammarly alternative</a></li>
+            <li><a href="/ai-writing-assistant-mac">AI writing assistant</a></li>
+            <li><a href="/local-ai-autocomplete-mac">Local AI autocomplete</a></li>
+            <li><a href="/offline-text-prediction-macos">Offline text prediction</a></li>
+            <li><a href="/private-autocomplete-mac">Private autocomplete</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Legal</h4>
+          <ul>
+            <li><a href="/privacy">Privacy</a></li>
+            <li><a href="/terms">Terms</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/issues">Contact</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="site-footer__bottom">
+        <span>© 2026 Shadowtype. All rights reserved.</span>
+        <span>macOS 14+ · Apple Silicon · 100% on-device</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    window.__TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{ "ctaColor": "amber" }/*EDITMODE-END*/;
+  </script>
+  <script src="/tweaks.js"></script>
+</body>
+</html>

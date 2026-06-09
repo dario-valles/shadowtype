@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Privacy Policy — Shadowtype</title>
+  <meta name="description" content="How Shadowtype handles your data: 100% on-device text completion, zero telemetry, no account. The only data that leaves your Mac is licensing and update checks." />
+  <meta name="robots" content="index,follow" />
+  <link rel="canonical" href="https://shadowtype.app/privacy" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <link rel="stylesheet" href="/landing.css" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Shadowtype" />
+  <meta property="og:title" content="Privacy Policy — Shadowtype" />
+  <meta property="og:description" content="How Shadowtype handles your data: 100% on-device text completion, zero telemetry, no account. The only data that leaves your Mac is licensing and update checks." />
+  <meta property="og:url" content="https://shadowtype.app/privacy" />
+  <meta property="og:image" content="https://shadowtype.app/assets/og.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:image" content="https://shadowtype.app/assets/og.png" />
+  <style>
+    /* Scoped prose for the legal pages — built on landing.css design tokens. */
+    .legal { padding: var(--s-9) 0 var(--s-10); }
+    .legal__inner { max-width: 70ch; margin-inline: auto; }
+    .legal__eyebrow { color: var(--accent); font-size: var(--t-sm); font-weight: 600;
+      letter-spacing: .04em; text-transform: uppercase; }
+    .legal h1 { font-size: var(--t-2xl); margin: var(--s-2) 0 var(--s-3); }
+    .legal__meta { color: var(--text-faint); font-size: var(--t-sm); margin-bottom: var(--s-7); }
+    .legal h2 { font-size: var(--t-lg); margin: var(--s-8) 0 var(--s-3); }
+    .legal h3 { font-size: var(--t-md); margin: var(--s-5) 0 var(--s-2); color: var(--text); }
+    .legal p, .legal li { color: var(--text-dim); line-height: 1.7; }
+    .legal p { margin-bottom: var(--s-4); }
+    .legal ul { margin: 0 0 var(--s-4) 1.2em; }
+    .legal li { margin-bottom: var(--s-2); }
+    .legal a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+    .legal strong { color: var(--text); font-weight: 620; }
+    .legal__callout { border: 1px solid var(--line); background: var(--bg-1);
+      border-radius: 14px; padding: var(--s-4) var(--s-5); margin: var(--s-5) 0; }
+    .legal__toc { border: 1px solid var(--line); border-radius: 14px; padding: var(--s-4) var(--s-5);
+      margin-bottom: var(--s-7); background: var(--bg-1); }
+    .legal__toc ul { margin: var(--s-2) 0 0 1.2em; columns: 2; column-gap: var(--s-6); }
+  </style>
+</head>
+<body>
+
+  <!-- ===================== HEADER ===================== -->
+  <header class="site-header">
+    <div class="wrap site-header__inner">
+      <a class="brand" href="/" aria-label="Shadowtype home">
+        <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+        <span>Shadowtype</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a class="nav__link" href="/#how">How it works</a>
+        <a class="nav__link" href="/#features">Features</a>
+        <a class="nav__link" href="https://github.com/dario-valles/shadowtype">GitHub</a>
+        <a class="nav__link" href="/#faq">FAQ</a>
+        <a class="btn btn--primary nav__cta" href="https://github.com/dario-valles/shadowtype/releases">Download</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="legal">
+      <div class="wrap">
+        <div class="legal__inner">
+          <p class="legal__eyebrow">Legal</p>
+          <h1>Privacy Policy</h1>
+          <p class="legal__meta">Last updated 2 June 2026</p>
+
+          <div class="legal__callout">
+            <p style="margin:0"><strong>The short version.</strong> Shadowtype runs entirely on your Mac.
+            Your keystrokes, the text you write, your clipboard, and what's on your screen are processed
+            locally and <strong>never sent anywhere</strong>. There is no account, no login, and no usage
+            tracking. The only data that ever leaves your device is what's needed to update the app and
+            download a model — described in full below.</p>
+          </div>
+
+          <div class="legal__toc" aria-label="Contents">
+            <strong>Contents</strong>
+            <ul>
+              <li><a href="#scope">1. Who this covers</a></li>
+              <li><a href="#ondevice">2. On-device by design</a></li>
+              <li><a href="#stored">3. Data stored on your Mac</a></li>
+              <li><a href="#offdevice">4. What leaves your device</a></li>
+              <li><a href="#website">5. This website</a></li>
+              <li><a href="#rights">6. Your rights</a></li>
+              <li><a href="#retention">7. Retention &amp; security</a></li>
+              <li><a href="#children">8. Children</a></li>
+              <li><a href="#changes">9. Changes</a></li>
+              <li><a href="#contact">10. Contact</a></li>
+            </ul>
+          </div>
+
+          <h2 id="scope">1. Who this covers</h2>
+          <p>This policy explains how the Shadowtype macOS application (the “app”) and the
+          <a href="/">shadowtype.app</a> website handle information. Shadowtype is free and open source.
+          It applies to everyone who downloads or uses Shadowtype. By using Shadowtype you agree to this policy.</p>
+
+          <h2 id="ondevice">2. On-device by design</h2>
+          <p>Shadowtype’s text completion runs as a local language model on your Apple Silicon Mac. The
+          inputs to that model — the text before your cursor, optional on-screen text read via local OCR,
+          and (if you enable it) recent clipboard text — are processed <strong>only in memory on your
+          device</strong> and are never transmitted, logged, or stored on a server. There is:</p>
+          <ul>
+            <li><strong>No telemetry</strong> — the app does not phone home with usage, analytics, or crash
+            data about how you type or what you write.</li>
+            <li><strong>No account</strong> — you never create a login, and we hold no profile about you.</li>
+            <li><strong>No network call to generate a suggestion</strong> — completions work fully offline.</li>
+          </ul>
+          <p>Password and secure-entry fields are detected and <strong>never read</strong>. Screen OCR and
+          clipboard reads are throttled, kept transiently in memory, never written to disk, and never sent
+          off the device. Every context source is individually toggleable in Settings.</p>
+
+          <h2 id="stored">3. Data stored on your Mac</h2>
+          <p>Some data is saved locally on your Mac so the app can function. It stays on your device and is
+          under your control:</p>
+          <ul>
+            <li><strong>Personalization profile</strong> — n-gram frequencies and recent
+            phrasings used to bias suggestions toward your style. Stored <strong>encrypted</strong> in
+            Application Support. You can wipe it at any time in Settings.</li>
+            <li><strong>Settings</strong> — your preferences. Local only, never transmitted.</li>
+          </ul>
+          <p>Uninstalling the app and deleting its Application Support folder removes all of this.</p>
+
+          <h2 id="offdevice">4. What leaves your device</h2>
+          <p>To be fully transparent, here is the <em>complete</em> list of outbound network traffic the app
+          makes, and what each one sends:</p>
+          <ul>
+            <li><strong>Software updates.</strong> The app periodically checks an update feed for a newer
+            version. Your request carries no personal content and no identifier — it asks only “is there a
+            newer build?”. You can also grab releases directly from GitHub instead.</li>
+            <li><strong>Model download.</strong> The first time a model is needed, the app downloads it once
+            from a content-delivery host. This transfers the model file to you; it sends no personal data.</li>
+          </ul>
+          <p>That’s everything. There is no inference network call, no account, and no licensing server —
+          ever.</p>
+
+          <p><strong>Developer API &amp; MCP — local-only.</strong> Shadowtype can expose an OpenAI-compatible HTTP endpoint
+          and an MCP server so your own scripts, editors, and agents can call the on-device model. Both are
+          bound to <code>127.0.0.1</code> (localhost) only — they don’t accept connections from outside your
+          Mac, no traffic crosses the network, and no telemetry is generated.</p>
+
+          <h2 id="website">5. This website</h2>
+          <p>The shadowtype.app website is a static site. We may use privacy-respecting, cookieless
+          aggregate analytics (no cross-site tracking, no advertising identifiers, no sale of data) solely to
+          count visits and understand which pages are useful. The website does not set advertising cookies.</p>
+
+          <h2 id="rights">6. Your rights</h2>
+          <p>Because the app holds no account, has no backend, and collects no personal data, there is no
+          information about you for us to access or erase. Depending on where you live, you may have rights
+          under the GDPR, UK GDPR, or CCPA/CPRA; we honor valid requests under applicable law.</p>
+
+          <h2 id="retention">7. Retention &amp; security</h2>
+          <p>We keep no personal data, so there is nothing to retain. Data in transit to the update endpoint
+          and model host is protected with HTTPS/TLS. On-device data security relies on macOS protections
+          and, for the personalization profile, local encryption.</p>
+
+          <h2 id="children">8. Children</h2>
+          <p>Shadowtype is a productivity tool for general audiences and is not directed to children under 13
+          (or the equivalent age in your jurisdiction). We do not knowingly collect personal data from
+          children.</p>
+
+          <h2 id="changes">9. Changes</h2>
+          <p>We may update this policy as the product evolves. Material changes will be reflected by the
+          “Last updated” date above and, where appropriate, surfaced in the app or on this page.</p>
+
+          <h2 id="contact">10. Contact</h2>
+          <p>Questions about privacy? Open an issue on the project's
+          <a href="https://github.com/dario-valles/shadowtype/issues">GitHub repository</a>.</p>
+
+          <p style="margin-top:var(--s-7)"><a href="/terms">Terms of Service →</a></p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===================== FOOTER ===================== -->
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="site-footer__grid">
+        <div class="site-footer__brand">
+          <a class="brand" href="/" aria-label="Shadowtype home">
+            <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+            <span>Shadowtype</span>
+          </a>
+          <p>Private, on-device AI text completion for macOS. Your words stay yours.</p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="/#how">How it works</a></li>
+            <li><a href="/#features">Features</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype">Free &amp; open source</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/releases">Download</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Project</h4>
+          <ul>
+            <li><a href="https://github.com/dario-valles/shadowtype">GitHub</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/releases">Releases</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/issues">Issues</a></li>
+            <li><a href="/#faq">FAQ</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Legal</h4>
+          <ul>
+            <li><a href="/privacy">Privacy</a></li>
+            <li><a href="/terms">Terms</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/issues">Contact</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="site-footer__bottom">
+        <span>© 2026 Shadowtype. All rights reserved.</span>
+        <span>macOS 14+ · Apple Silicon · 100% on-device</span>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>

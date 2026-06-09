@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shadowtype vs Cotabby — Polished App vs Open-Source Beta</title>
+  <meta name="description" content="Shadowtype and Cotabby both run a local LLM for system-wide ghost-text autocomplete on Mac. Cotabby is free and open source but beta; Shadowtype is a stable, notarized, supported product. Honest comparison." />
+  <meta name="theme-color" content="#0a0b0e" />
+  <link rel="canonical" href="https://shadowtype.app/shadowtype-vs-cotabby" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <link rel="stylesheet" href="/landing.css" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Shadowtype vs Cotabby — a finished product vs an open-source beta" />
+  <meta property="og:description" content="Both are free, open source, on-device Mac autocomplete. Cotabby is beta; Shadowtype is a stable, notarized, finished release. Side-by-side comparison." />
+  <meta property="og:url" content="https://shadowtype.app/shadowtype-vs-cotabby" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta property="og:site_name" content="Shadowtype" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:image" content="https://shadowtype.app/assets/og-shadowtype-vs-cotabby.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:alt" content="Shadowtype vs Cotabby — a finished product vs an open-source beta — 100% on-device, free, no subscription." />
+  <meta name="twitter:title" content="Shadowtype vs Cotabby — a finished product vs an open-source beta" />
+  <meta name="twitter:description" content="Both are free, open source, on-device Mac autocomplete. Cotabby is beta; Shadowtype is a stable, notarized, finished release. Side-by-side comparison." />
+  <meta name="twitter:image" content="https://shadowtype.app/assets/og-shadowtype-vs-cotabby.png" />
+  <meta name="twitter:image:alt" content="Shadowtype vs Cotabby — a finished product vs an open-source beta" />
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Shadowtype",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "macOS 14+ (Apple Silicon)",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "availability": "https://schema.org/InStock", "url": "https://github.com/dario-valles/shadowtype/releases" },
+    "isAccessibleForFree": true, "license": "https://github.com/dario-valles/shadowtype",
+    "description": "Private, on-device AI text completion for macOS. Ghost-text autocomplete in any app, fully local and offline. Free and open source.",
+    "dateModified": "2026-06-06"
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      { "@type": "ListItem", "position": 1, "name": "Shadowtype", "item": "https://shadowtype.app/" },
+      { "@type": "ListItem", "position": 2, "name": "Shadowtype vs Cotabby", "item": "https://shadowtype.app/shadowtype-vs-cotabby" }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      { "@type": "Question", "name": "What is the main difference between Shadowtype and Cotabby?", "acceptedAnswer": { "@type": "Answer", "text": "Both run a local LLM on Apple Silicon for system-wide ghost-text autocomplete, and both are free and open source. Cotabby is currently beta software under AGPL-3.0. Shadowtype is a stable, notarized, finished release with a homegrown auto-updater and no daily cap." } },
+      { "@type": "Question", "name": "Is Cotabby free?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Cotabby is free and 100% open source under AGPL-3.0, with optional Ko-fi donations. Shadowtype is also free and open source — the difference is that Shadowtype is a stable, notarized, finished release, while Cotabby is still beta." } },
+      { "@type": "Question", "name": "Are both Shadowtype and Cotabby fully on-device?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Both run inference locally and work offline after the model is downloaded, with no account and no servers. Cotabby uses local GGUF models via llama.cpp and can optionally use Apple's on-device Foundation Models on macOS 26+. Shadowtype runs llama.cpp with Metal on Gemma and Qwen GGUF models." } },
+      { "@type": "Question", "name": "What permissions does each app require?", "acceptedAnswer": { "@type": "Answer", "text": "Cotabby requires Accessibility, Input Monitoring, and Screen Recording (for visual/OCR context via ScreenCaptureKit). Shadowtype requires Accessibility and Input Monitoring; its screen-aware context is optional, so Screen Recording is not mandatory." } },
+      { "@type": "Question", "name": "Can my own scripts and editors use Shadowtype's local model?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Shadowtype runs an OpenAI-compatible HTTP endpoint on 127.0.0.1 with no key, so terminals, editor plugins, and AI agents can call /v1/chat/completions against the same on-device model. It also ships a built-in MCP server for Claude Code and other MCP clients, plus a BYOM picker for any GGUF. Cotabby does not offer a local API or MCP server." } }
+    ]
+  }
+  </script>
+</head>
+<body>
+
+  <header class="site-header">
+    <div class="wrap site-header__inner">
+      <a class="brand" href="/" aria-label="Shadowtype home">
+        <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+        <span>Shadowtype</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a class="nav__link" href="/#how">How it works</a>
+        <a class="nav__link" href="/#features">Features</a>
+        <a class="nav__link" href="https://github.com/dario-valles/shadowtype">GitHub</a>
+        <a class="nav__link" href="/#faq">FAQ</a>
+        <a class="btn btn--primary nav__cta" href="https://github.com/dario-valles/shadowtype/releases">Download</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="section hero">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Comparison · Shadowtype vs Cotabby</span>
+          <h1>Shadowtype vs Cotabby:<br><span class="accent">a finished product, or an open-source beta.</span></h1>
+          <p class="lead"><strong>The short answer:</strong> Shadowtype and Cotabby both run a local LLM on Apple Silicon for system-wide ghost-text autocomplete, fully offline and account-free, and both are <strong>free and open source</strong>. Cotabby is <strong>AGPL-3.0</strong> but currently <strong>beta (v0.4.2)</strong> and requires Screen Recording. Shadowtype is a <strong>stable, notarized release</strong> with a homegrown auto-updater, no daily cap, and optional (not required) screen access.</p>
+          <p>If you don&rsquo;t mind beta software, Cotabby is genuinely great. Shadowtype&rsquo;s case is for people who want a polished, notarized, finished release — also free and open source.</p>
+        </div>
+        <div class="hero__cta">
+          <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download Shadowtype free</a>
+          <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+        </div>
+        <ul class="hero__meta">
+          <li>Stable &amp; notarized</li>
+          <li>Dedicated support</li>
+          <li>All your Macs</li>
+          <li>Open source</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="compare">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">The honest comparison</span>
+          <h2>How is Shadowtype different from Cotabby?</h2>
+          <p class="lead">Where they tie, we say so — both are private, local, offline, and account-free. Cotabby wins on price and openness; Shadowtype wins on being a polished, supported, notarized release with optional (not required) screen access.</p>
+        </div>
+        <div class="compare">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Capability</th>
+                <th scope="col" class="col-us">Shadowtype</th>
+                <th scope="col">Cotabby</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>System-wide inline ghost-text completion</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>On-device LLM · offline · no account</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>Tab-to-accept word / whole line</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>Open source (AGPL-3.0)</td><td class="col-us no">No</td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>Custom GGUF model import</td><td class="col-us">Curated catalog</td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>Apple Foundation Models engine</td><td class="col-us no">No</td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes (macOS 26+)</span></td></tr>
+              <tr><td>Per-app instructions &amp; personalization</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Length presets only</td></tr>
+              <tr><td>Selection rewrite (⌥⌘K, on-device)</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Completion only</td></tr>
+              <tr><td>Local API + MCP server (OpenAI-compatible)</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">No</td></tr>
+              <tr><td>Screen Recording permission</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Optional</span></td><td class="no">Required</td></tr>
+              <tr><td>Release maturity</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Stable · notarized</span></td><td class="no">Beta (v0.4.2)</td></tr>
+              <tr><td>Support</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Dedicated email</span></td><td class="no">GitHub issues</td></tr>
+              <tr><td>Pricing model</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Free &amp; open source</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Free · AGPL</span></td></tr>
+              <tr><td>Requirements</td><td class="col-us">macOS 14+ · Apple Silicon</td><td>macOS 15+ · Apple Silicon</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="rewrite__meta" style="margin-top:1rem">Key difference in permissions: Cotabby requires <strong>three</strong> system grants — Accessibility, Input Monitoring, <em>and</em> Screen Recording — while Shadowtype needs only <strong>two</strong> (its screen-aware context is opt-in). &ldquo;A finished autocomplete shouldn&rsquo;t make Screen Recording mandatory or ship as a beta — that&rsquo;s the line Shadowtype draws,&rdquo; says Shadowtype&rsquo;s developer.</p>
+        <p class="rewrite__meta" style="margin-top:.5rem">Figures reflect each product&rsquo;s public repo and docs as of June 2026. Cotabby is a genuinely good open-source project — this page is about which trade-offs fit you.</p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Why people pick Shadowtype</span>
+          <h2>Same local autocomplete. A finished product.</h2>
+        </div>
+        <div class="features">
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 12l2 2 4-4"/><path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9c1.74 0 3.36.49 4.74 1.35"/></svg></div>
+            <h3>Stable, notarized, signed</h3>
+            <p>Cotabby is beta software (latest v0.4.2-beta). Shadowtype ships as a notarized, signed release you can install with confidence — and it&rsquo;s free and open source, so you can read the code and <a href="https://github.com/dario-valles/shadowtype/issues">file issues</a> too.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+            <h3>Screen access is optional</h3>
+            <p>Cotabby requires Accessibility, Input Monitoring <em>and</em> Screen Recording for its visual context. Shadowtype needs only Accessibility and Input Monitoring; screen-aware OCR context is opt-in, so you can run it without ever granting Screen Recording.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></div>
+            <h3>Personalization &amp; selection rewrite</h3>
+            <p>Beyond completion, Shadowtype adds per-app instructions, a personalization style profile, and on-device selection rewrite with <kbd>⌥⌘K</kbd>. Cotabby focuses on ghost-text completion with length presets.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-6 6 6 6M16 6l6 6-6 6M14 4l-4 16"/></svg></div>
+            <h3>Local API + MCP for developers</h3>
+            <p>An OpenAI-compatible HTTP endpoint runs on <code>127.0.0.1</code> so your scripts, editors, and agents can call the same on-device model — no key, no cloud. A built-in MCP bridge plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="faq">
+      <div class="wrap">
+        <div class="section-head center"><span class="eyebrow">Questions</span><h2>Shadowtype vs Cotabby FAQ</h2></div>
+        <div class="faq">
+          <details><summary>They&rsquo;re both free — why pick Shadowtype?</summary><div class="faq__a">Both are free and open source, so it comes down to maturity. Cotabby is still beta and needs Screen Recording. Shadowtype is a stable, notarized release with a homegrown auto-updater, no daily cap, optional screen access, and a curated tuned-model catalog.</div></details>
+          <details><summary>Is Cotabby on-device and private too?</summary><div class="faq__a">Yes. Cotabby runs local GGUF models via llama.cpp (and optionally Apple&rsquo;s Foundation Models on macOS 26+), works offline after download, uses no account or servers, and states it has no telemetry. On the local-and-private axis it&rsquo;s very similar to Shadowtype.</div></details>
+          <details><summary>Can I import my own GGUF model into Shadowtype?</summary><div class="faq__a">Shadowtype ships a curated catalog of tuned Gemma and Qwen GGUF models rather than arbitrary custom-model import. If importing any GGUF you like is a hard requirement, Cotabby supports that and Shadowtype doesn&rsquo;t.</div></details>
+          <details><summary>What permissions and macOS version do they need?</summary><div class="faq__a">Cotabby requires Accessibility, Input Monitoring, and Screen Recording, and runs on macOS 15+. Shadowtype requires Accessibility and Input Monitoring (Screen Recording is optional) and runs on macOS 14+. Both want Apple Silicon.</div></details>
+          <details><summary>Can my own scripts, editors, and agents use the same local model?</summary><div class="faq__a">Yes. Shadowtype exposes an OpenAI-compatible HTTP endpoint on <code>127.0.0.1</code> with no key required, so your terminal, editor plugins, and AI agents can call <code>/v1/chat/completions</code> against the same on-device model. A built-in MCP server plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF you drop in. Everything is bound to localhost — nothing leaves your Mac. Cotabby doesn&rsquo;t offer a local API or MCP server.</div></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="cta-band">
+          <span class="eyebrow" style="justify-content:center">Ready when you are</span>
+          <h2>Try the polished local autocomplete.</h2>
+          <p>Download Shadowtype free, accept your first word with <kbd>Tab</kbd> — a finished, notarized product, free and open source.</p>
+          <div class="hero__cta">
+            <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download for macOS</a>
+            <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+          </div>
+          <ul class="risk-reversal" style="justify-content:center" aria-label="Purchase reassurance">
+            <li>Free forever</li><li>Notarized release</li><li>No account</li><li>No subscription</li><li>Open source</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="site-footer__grid">
+        <div class="site-footer__brand">
+          <a class="brand" href="/" aria-label="Shadowtype home">
+            <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+            <span>Shadowtype</span>
+          </a>
+          <p>Private, on-device AI text completion for macOS. Your words stay yours.</p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="/#how">How it works</a></li>
+            <li><a href="/#features">Features</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype">Free &amp; open source</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/releases">Download</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Compare</h4>
+          <ul>
+            <li><a href="/shadowtype-vs-cotypist">vs Cotypist</a></li>
+            <li><a href="/shadowtype-vs-cotabby">vs Cotabby</a></li>
+            <li><a href="/shadowtype-vs-apple-intelligence">vs Apple Intelligence</a></li>
+            <li><a href="/cotypist-alternative">Cotypist alternative</a></li>
+            <li><a href="/cotabby-alternative">Cotabby alternative</a></li>
+            <li><a href="/apple-intelligence-alternative">Apple Intelligence alternative</a></li>
+            <li><a href="/grammarly-alternative-mac">Grammarly alternative</a></li>
+            <li><a href="/ai-writing-assistant-mac">AI writing assistant</a></li>
+            <li><a href="/local-ai-autocomplete-mac">Local AI autocomplete</a></li>
+            <li><a href="/offline-text-prediction-macos">Offline text prediction</a></li>
+            <li><a href="/private-autocomplete-mac">Private autocomplete</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Legal</h4>
+          <ul>
+            <li><a href="/privacy">Privacy</a></li>
+            <li><a href="/terms">Terms</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/issues">Contact</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="site-footer__bottom">
+        <span>© 2026 Shadowtype. All rights reserved.</span>
+        <span>macOS 14+ · Apple Silicon · 100% on-device</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    window.__TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{ "ctaColor": "amber" }/*EDITMODE-END*/;
+  </script>
+  <script src="/tweaks.js"></script>
+</body>
+</html>

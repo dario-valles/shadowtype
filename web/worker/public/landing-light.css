@@ -1,0 +1,211 @@
+/* ============================================================================
+   Shadowtype — LIGHT theme (Apple-clean, monochrome)
+   Loaded AFTER styles.css as an override layer. Off-white surfaces, generous
+   air, ink-black accent + CTAs, soft shadows, no gradient washes. Functional
+   color only (green = on/yes, amber = scarcity). Scoped to .theme-light.
+   ========================================================================== */
+
+.theme-light {
+  --bg:            #ffffff;
+  --bg-1:          #ffffff;
+  --bg-2:          #ffffff;
+  --bg-3:          #f5f5f7;   /* apple gray — chips / inputs / hover */
+  --line:          #e4e4ea;
+  --line-soft:     #ededf1;
+
+  --text:          #1d1d1f;   /* apple near-black */
+  --text-dim:      #4b4b52;
+  --text-faint:    #86868b;
+  --ghost:         #b9b9c2;
+
+  /* accent is ink — monochrome, not a brand hue */
+  --accent:        #1d1d1f;
+  --accent-bright: #33333a;
+  --accent-deep:   #000000;
+  --accent-glow:   rgba(0,0,0,0.18);
+
+  --violet:        #1d1d1f;
+  --violet-bright: #33333a;
+  --violet-deep:   #000000;
+  --violet-glow:   rgba(0,0,0,0.16);
+
+  --good:          #1a9e5f;
+  --warn:          #b1740f;
+  --bad:           #d83a3a;
+
+  /* reserved ACTION color — amber, primary CTAs ONLY. Dark text for contrast
+     on the amber fill; pops against the neutral white page. */
+  --action:        #f59e0b;
+  --action-bright: #f5a623;
+  --action-deep:   #d98a08;
+  --action-fg:     #1a1200;
+  --action-glow:   rgba(245,158,11,0.38);
+
+  --shadow: 0 1px 0 rgba(0,0,0,0.02) inset,
+            0 18px 40px -24px rgba(20,20,30,0.18);
+
+  color: var(--text);
+  background: #ffffff;
+}
+
+/* ---- ambient: pure white, no wash, no grid --------------------------- */
+body.theme-light::before { background: none; }
+body.theme-light::after  { background-image: none; }
+
+::selection { background: rgba(0,0,0,0.1); color: #1d1d1f; }
+.theme-light ::selection { background: rgba(0,0,0,0.1); color: #1d1d1f; }
+
+/* ---- type --------------------------------------------------------------*/
+.theme-light .eyebrow { color: var(--text-faint); }
+.theme-light .eyebrow::before { background: linear-gradient(90deg, transparent, var(--text-faint)); }
+.theme-light .hero h1 { font-weight: 640; letter-spacing: -0.035em; }
+.theme-light .hero h1 .accent {
+  background: linear-gradient(96deg, #1d1d1f, #6e6e73);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.theme-light .hero-eyebrow { color: var(--text-dim); background: #f5f5f7; border-color: var(--line); }
+
+/* ---- header ----------------------------------------------------------- */
+.theme-light .site-header { border-bottom-color: var(--line); }
+
+/* ---- buttons: Apple pills, amber reserved action ---------------------- */
+.theme-light .btn { border-radius: 980px; border-color: var(--line); background: #fff; }
+.theme-light .btn:hover { border-color: #cfcfd6; }
+.theme-light .btn--primary {
+  background: linear-gradient(180deg, var(--action-bright), var(--action));
+  color: var(--action-fg);
+  border-color: transparent;
+  box-shadow: 0 8px 20px -10px var(--action-glow);
+}
+.theme-light .btn--primary:hover { background: linear-gradient(180deg, var(--action), var(--action-deep)); box-shadow: 0 12px 26px -10px var(--action-glow); }
+.theme-light .btn--ghost { background: transparent; border-color: var(--line); }
+.theme-light .btn--ghost:hover { background: #f5f5f7; }
+
+/* ---- section rhythm: alternating gray bands --------------------------- */
+.theme-light #how,
+.theme-light #compare,
+.theme-light #faq { background: #f5f5f7; }
+
+/* ---- demo window (white macOS text field) ----------------------------- */
+.theme-light .demo {
+  background: #fff;
+  border-color: var(--line);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 36px 70px -40px rgba(20,20,40,0.28);
+}
+.theme-light .demo__bar { background: #fbfbfd; border-bottom-color: var(--line); }
+.theme-light .demo__dots span { background: #d6d6dd; }
+.theme-light .demo__app { background: #f5f5f7; border-color: var(--line); color: var(--text); }
+.theme-light .demo__net { border-color: var(--line); }
+.theme-light .demo__net:hover { border-color: #cfcfd6; }
+.theme-light .demo__hint { background: #f5f5f7; border-color: var(--line); }
+.theme-light kbd { background: #f0f0f3; border-color: #dcdce2; color: var(--text); }
+.theme-light .keycap { background: #f0f0f3; border-color: #dcdce2; }
+.theme-light .keycap.press { background: #1d1d1f; color: #fff; box-shadow: 0 0 14px rgba(0,0,0,0.25); }
+.theme-light .demo__caret { background: #1d1d1f; box-shadow: none; }
+.theme-light .step__demo .mini-caret,
+.theme-light .demo__caret { box-shadow: none; }
+.theme-light .demo-badge {
+  background: rgba(255,255,255,0.92);
+  border-color: var(--line);
+  box-shadow: 0 14px 30px -16px rgba(20,20,40,0.22);
+}
+.theme-light .demo-badge svg { color: var(--text); }
+.theme-light .trust { border-block-color: var(--line); }
+.theme-light .trust svg { color: var(--text); }
+
+/* ---- how it works ----------------------------------------------------- */
+.theme-light .step { background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+.theme-light .step::before { background: #f0f0f3; border-color: var(--line); color: var(--text); }
+.theme-light .step__demo { background: #fbfbfd; border-color: var(--line); }
+.theme-light .step__demo .mini-caret { background: #1d1d1f; }
+
+/* ---- features --------------------------------------------------------- */
+.theme-light .feature { background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+.theme-light .feature:hover { border-color: #cfcfd6; box-shadow: 0 24px 48px -32px rgba(20,20,40,0.3); }
+.theme-light .feature--feat {
+  background: #fbfbfd;
+  border-color: var(--line);
+}
+.theme-light .feature__icon { background: #f0f0f3; border-color: var(--line); color: var(--text); }
+.theme-light .feature__chips span { background: #f5f5f7; border-color: var(--line); color: var(--text-dim); }
+
+/* ---- offline band ----------------------------------------------------- */
+.theme-light .offline {
+  background:
+    radial-gradient(620px 300px at 88% 120%, rgba(177,116,15,0.07), transparent 60%),
+    #fbfbfd;
+  border-color: rgba(177,116,15,0.22);
+  box-shadow: 0 30px 64px -44px rgba(20,20,40,0.24);
+}
+.theme-light .offline__plane { background: #fff; border-color: var(--line); box-shadow: 0 12px 30px -18px rgba(0,0,0,0.14); }
+.theme-light .offline__val.off { color: var(--warn); background: rgba(177,116,15,0.1); border-color: rgba(177,116,15,0.3); }
+.theme-light .offline__val.on  { color: var(--good); background: rgba(26,158,95,0.1); border-color: rgba(26,158,95,0.3); }
+
+/* ---- comparison ------------------------------------------------------- */
+.theme-light .compare { background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+.theme-light .compare thead th.col-us { color: var(--text); }
+.theme-light .compare .col-us { background: #f5f5f7; }
+.theme-light .compare tbody .col-us { box-shadow: inset 1px 0 0 var(--line), inset -1px 0 0 var(--line); }
+
+/* ---- founders ladder -------------------------------------------------- */
+.theme-light .ladder {
+  background: #fbfbfd;
+  border-color: var(--line);
+  box-shadow: 0 30px 70px -44px rgba(20,20,40,0.26);
+}
+.theme-light .rung__bar { background: linear-gradient(180deg, #f3f3f6, #e9e9ee); border-color: var(--line); }
+.theme-light .rung[data-state="done"] .rung__bar { background: linear-gradient(180deg, rgba(26,158,95,0.14), rgba(26,158,95,0.04)); border-color: rgba(26,158,95,0.32); }
+.theme-light .rung[data-state="done"] .rung__price { text-decoration-color: var(--good); }
+.theme-light .rung[data-state="done"] .rung__tag { color: var(--good); }
+.theme-light .rung[data-state="live"] .rung__bar {
+  background: linear-gradient(180deg, #2c2c31, #000);
+  border-color: transparent;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.5), 0 18px 40px -20px rgba(0,0,0,0.5);
+}
+.theme-light .rung[data-state="live"] .rung__price { color: #fff; }
+.theme-light .rung[data-state="live"] .rung__tag { color: var(--text); font-weight: 600; }
+.theme-light .rung[data-state="live"] .rung__bar::after { color: var(--text); }
+.theme-light .rung[data-state="ga"] .rung__bar { background: repeating-linear-gradient(135deg, #f3f3f6 0 8px, #e9e9ee 8px 16px); }
+.theme-light .rung[data-state="ga"] .rung__tag { color: var(--text); }
+.theme-light .ladder__track { background: #ececf0; border-color: var(--line); }
+.theme-light .ladder__fill { background: #1d1d1f; box-shadow: none; }
+
+/* ---- pricing ---------------------------------------------------------- */
+.theme-light .price-card { background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
+.theme-light .price-card--hero {
+  background: #fbfbfd;
+  border-color: #d7d7dd;
+  box-shadow: 0 30px 70px -44px rgba(20,20,40,0.28);
+}
+.theme-light .price-card__flag { color: #fff; background: #1d1d1f; }
+.theme-light .price-list svg { color: var(--text); }
+.theme-light .beta-pill { color: var(--warn); background: rgba(177,116,15,0.08); border-color: rgba(177,116,15,0.25); }
+.theme-light .risk-reversal li { background: #f5f5f7; border-color: var(--line); }
+.theme-light .founders-stat { color: var(--text); background: #f5f5f7; border-color: var(--line); }
+
+/* ---- wall of love ----------------------------------------------------- */
+.theme-light .love-card { background: #fff; border-color: var(--line); box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+
+/* ---- faq -------------------------------------------------------------- */
+.theme-light .faq details { background: #fff; border-color: var(--line); box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+.theme-light .faq summary:hover { background: #fafafb; }
+.theme-light .faq summary::after { color: var(--text); }
+.theme-light .faq .faq__a a { color: var(--text); }
+
+/* ---- cta band --------------------------------------------------------- */
+.theme-light .cta-band {
+  background: #fbfbfd;
+  border-color: #d7d7dd;
+  box-shadow: 0 30px 70px -44px rgba(20,20,40,0.26);
+}
+
+/* ---- footer + sticky bar --------------------------------------------- */
+.theme-light .site-footer { border-top-color: var(--line); }
+.theme-light .founders-bar {
+  background: rgba(255,255,255,0.9);
+  border-top-color: var(--line);
+  box-shadow: 0 -10px 40px -20px rgba(0,0,0,0.12);
+}
+
+/* the periwinkle hero "accent" line + caret elsewhere default to ink via
+   tokens; nothing else references a brand hue in this theme. */

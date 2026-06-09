@@ -1,0 +1,187 @@
+{
+  "model": "gemma-3-1b-pt-q4_k_m",
+  "scenarios": [
+    {
+      "id": "email-thanks",
+      "cat": "email",
+      "text": "your interest in this matter.",
+      "flags": []
+    },
+    {
+      "id": "email-open",
+      "cat": "email",
+      "text": "The 2013 Annual Meeting of the American Society for Engineering ",
+      "flags": []
+    },
+    {
+      "id": "email-signoff",
+      "cat": "email",
+      "text": "M.",
+      "flags": []
+    },
+    {
+      "id": "email-meeting",
+      "cat": "email",
+      "text": "week?",
+      "flags": []
+    },
+    {
+      "id": "email-apology",
+      "cat": "email",
+      "text": "The Last of Us Part II, but the wait is ",
+      "flags": []
+    },
+    {
+      "id": "chat-plans",
+      "cat": "chat",
+      "text": "12th?",
+      "flags": []
+    },
+    {
+      "id": "chat-lol",
+      "cat": "chat",
+      "text": "2014 when i made this post. ",
+      "flags": []
+    },
+    {
+      "id": "chat-q",
+      "cat": "chat",
+      "text": "1st of the month start?",
+      "flags": []
+    },
+    {
+      "id": "mid-because",
+      "cat": "midline",
+      "text": "2019 was a really busy year for us, and we wanted ",
+      "flags": []
+    },
+    {
+      "id": "mid-the",
+      "cat": "midline",
+      "text": "design. The design is the ",
+      "flags": []
+    },
+    {
+      "id": "list-shopping",
+      "cat": "list",
+      "text": "1/2 cup of flour",
+      "flags": []
+    },
+    {
+      "id": "list-todo",
+      "cat": "list",
+      "text": "fix the login bug",
+      "flags": [
+        "ECHO?"
+      ]
+    },
+    {
+      "id": "es-saludo",
+      "cat": "spanish",
+      "text": "5 estrellas. Nos alegra mucho que hayas disfrutado de nuestro restaurante y ",
+      "flags": []
+    },
+    {
+      "id": "es-email",
+      "cat": "spanish",
+      "text": "se ha producido un error en la entrega de los productos.",
+      "flags": []
+    },
+    {
+      "id": "es-casual",
+      "cat": "spanish",
+      "text": "15:00 hrs.",
+      "flags": [
+        "LANG-DRIFT(es?)"
+      ]
+    },
+    {
+      "id": "ar-greet",
+      "cat": "rtl",
+      "text": "500 مشاهدة.",
+      "flags": []
+    },
+    {
+      "id": "num-invoice",
+      "cat": "numbers",
+      "text": "695.40",
+      "flags": []
+    },
+    {
+      "id": "num-date",
+      "cat": "numbers",
+      "text": "21, 2018 for the submission of abstracts for the ",
+      "flags": []
+    },
+    {
+      "id": "echo-repeat",
+      "cat": "echo",
+      "text": "bring your passport. The Passport Office is now open 7 days ",
+      "flags": [
+        "ECHO?"
+      ]
+    },
+    {
+      "id": "echo-list",
+      "cat": "echo",
+      "text": "1apple banana apple bananaapple banana appleapple banana apple ",
+      "flags": [
+        "ECHO?"
+      ]
+    },
+    {
+      "id": "code-fn",
+      "cat": "code",
+      "text": "",
+      "flags": [
+        "EMPTY"
+      ]
+    },
+    {
+      "id": "code-import",
+      "cat": "code",
+      "text": "\"react\";",
+      "flags": []
+    },
+    {
+      "id": "edge-empty",
+      "cat": "edge",
+      "text": "import { Component, OnInit } from '@angular/core';",
+      "flags": []
+    },
+    {
+      "id": "edge-space",
+      "cat": "edge",
+      "text": "",
+      "flags": [
+        "EMPTY"
+      ]
+    },
+    {
+      "id": "edge-url",
+      "cat": "edge",
+      "text": "sbraggs/python-pycparser/tree/master/example",
+      "flags": []
+    },
+    {
+      "id": "edge-emoji",
+      "cat": "edge",
+      "text": "📷: @joshua_stewart",
+      "flags": []
+    },
+    {
+      "id": "edge-long",
+      "cat": "edge",
+      "text": "withdraw the proposed resolution and reconsider our position.",
+      "flags": []
+    },
+    {
+      "id": "chatapi-hi",
+      "cat": "chatapi",
+      "text": "",
+      "flags": [
+        "EMPTY"
+      ]
+    }
+  ]
+}

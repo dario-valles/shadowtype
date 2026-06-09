@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Private AI Autocomplete for Mac — Keystrokes Never Leave Your Mac</title>
+  <meta name="description" content="A private AI typing assistant for Mac that runs 100% on-device. Keystrokes never leave your Mac, no telemetry, no account, password fields are never read. Free and open source." />
+  <meta name="theme-color" content="#0a0b0e" />
+  <link rel="canonical" href="https://shadowtype.app/private-autocomplete-mac" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <link rel="stylesheet" href="/landing.css" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Private AI autocomplete for Mac — your keystrokes never leave your device" />
+  <meta property="og:description" content="On-device AI autocomplete for Mac with zero telemetry, no account, and no cloud keyboard reading your typing. Password fields are never read. Free and open source." />
+  <meta property="og:url" content="https://shadowtype.app/private-autocomplete-mac" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta property="og:site_name" content="Shadowtype" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:image" content="https://shadowtype.app/assets/og-private-autocomplete-mac.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:alt" content="Private AI autocomplete for Mac — your keystrokes never leave your device — 100% on-device, free, no subscription." />
+  <meta name="twitter:title" content="Private AI autocomplete for Mac — your keystrokes never leave your device" />
+  <meta name="twitter:description" content="On-device AI autocomplete for Mac with zero telemetry, no account, and no cloud keyboard reading your typing. Password fields are never read. Free and open source." />
+  <meta name="twitter:image" content="https://shadowtype.app/assets/og-private-autocomplete-mac.png" />
+  <meta name="twitter:image:alt" content="Private AI autocomplete for Mac — your keystrokes never leave your device" />
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Shadowtype",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "macOS 14+ (Apple Silicon)",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "availability": "https://schema.org/InStock", "url": "https://github.com/dario-valles/shadowtype/releases" },
+    "isAccessibleForFree": true, "license": "https://github.com/dario-valles/shadowtype",
+    "description": "Private, on-device AI text completion for macOS. Ghost-text autocomplete in any app, fully local with zero telemetry and no account. Free and open source.",
+      "dateModified": "2026-06-06"
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      { "@type": "ListItem", "position": 1, "name": "Shadowtype", "item": "https://shadowtype.app/" },
+      { "@type": "ListItem", "position": 2, "name": "Private autocomplete for Mac", "item": "https://shadowtype.app/private-autocomplete-mac" }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      { "@type": "Question", "name": "How private is it really?", "acceptedAnswer": { "@type": "Answer", "text": "Completely. Shadowtype runs the language model entirely on your Mac. Your keystrokes, drafts, and predictions never leave the device — there is no completion server to send them to. It works with Wi-Fi off, and nothing about what you type is uploaded, logged, or shared. You keep full copyright of everything you write." } },
+      { "@type": "Question", "name": "Does it have telemetry or an account?", "acceptedAnswer": { "@type": "Answer", "text": "No. Shadowtype ships with zero telemetry and no analytics backend — there is nothing to opt out of, because nothing is collected or sent. You don't create an account or log in to use it; the app just runs locally on your Mac." } },
+      { "@type": "Question", "name": "Are password fields read?", "acceptedAnswer": { "@type": "Answer", "text": "No. Shadowtype never reads secure or password input fields. macOS marks those fields as secure, and the app ignores them entirely — no ghost text is generated there and nothing is captured. The same applies to any field the system flags as sensitive." } },
+      { "@type": "Question", "name": "Where is my personalization data stored?", "acceptedAnswer": { "@type": "Answer", "text": "On your Mac, encrypted. The optional style profile that learns your tone is stored locally and encrypted on-device — it is never uploaded. You can wipe it at any time with one click, and the app keeps working with a fresh profile." } },
+      { "@type": "Question", "name": "Can my own scripts and editors use Shadowtype's local model?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Shadowtype runs an OpenAI-compatible HTTP endpoint on 127.0.0.1 with no key, so terminals, editor plugins, and AI agents can call /v1/chat/completions against the same on-device model. It also ships a built-in MCP server for Claude Code and other MCP clients, plus a BYOM picker for any GGUF." } }
+    ]
+  }
+  </script>
+</head>
+<body>
+
+  <header class="site-header">
+    <div class="wrap site-header__inner">
+      <a class="brand" href="/" aria-label="Shadowtype home">
+        <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+        <span>Shadowtype</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a class="nav__link" href="/#how">How it works</a>
+        <a class="nav__link" href="/#features">Features</a>
+        <a class="nav__link" href="https://github.com/dario-valles/shadowtype">GitHub</a>
+        <a class="nav__link" href="/#faq">FAQ</a>
+        <a class="btn btn--primary nav__cta" href="https://github.com/dario-valles/shadowtype/releases">Download</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="section hero">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Private autocomplete · macOS</span>
+          <h1>Private AI autocomplete for Mac —<br><span class="accent">your keystrokes never leave your device.</span></h1>
+          <p class="lead">Shadowtype is an AI typing assistant that predicts your next words as inline ghost text in any app — and runs <strong>100% on your Mac</strong>. There is no cloud keyboard reading what you type, no telemetry, and no account. Your drafts, your style, and your copyright stay entirely yours.</p>
+        </div>
+        <div class="hero__cta">
+          <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download Shadowtype free</a>
+          <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+        </div>
+        <ul class="hero__meta">
+          <li>100% on-device</li>
+          <li>Zero telemetry</li>
+          <li>No account</li>
+          <li>Free &amp; open source</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Built for privacy first</span>
+          <h2>A typing assistant that doesn&rsquo;t phone home</h2>
+          <p class="lead">Most AI autocomplete tools route your keystrokes to a server to predict the next word. Shadowtype doesn&rsquo;t — the model runs <a href="/local-ai-autocomplete-mac">on-device as a local LLM</a> and <a href="/offline-text-prediction-macos">works fully offline</a>. For privacy-conscious users, legal and compliance-sensitive workplaces, and anyone who doesn&rsquo;t want a cloud keyboard reading their typing, that&rsquo;s the whole point. Read our full <a href="/privacy">privacy policy</a>.</p>
+        </div>
+        <div class="features">
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2 4 6v6c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6z"/><path d="m9 12 2 2 4-4"/></svg></div>
+            <h3>Keystrokes never leave the Mac</h3>
+            <p>Inference happens locally on Apple Silicon. There is no completion server, so your keystrokes, drafts, and predictions are never uploaded, logged, or shared. Turn Wi-Fi off and it keeps working.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M5 5 19 19"/></svg></div>
+            <h3>No telemetry, no account</h3>
+            <p>Shadowtype ships with zero analytics backend — nothing to opt out of, because nothing is collected. You never sign up or log in. The app just runs locally, the moment you launch it.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></div>
+            <h3>Password fields are never read</h3>
+            <p>Secure and password input fields are ignored entirely. macOS flags them as sensitive, and Shadowtype generates no ghost text and captures nothing there — your credentials are off-limits by design.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3 4 7v5c0 5 3.5 8 8 9 4.5-1 8-4 8-9V7z"/><path d="M9 11h6M9 14h6"/></svg></div>
+            <h3>Personalization stays encrypted on-device</h3>
+            <p>The optional style profile that learns your tone is stored locally and encrypted on your Mac — never uploaded. Wipe it any time with one click and start fresh, no questions asked.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 12h6M12 9v6"/><circle cx="12" cy="12" r="9"/></svg></div>
+            <h3>You keep your copyright</h3>
+            <p>Because nothing you write is sent anywhere, there is no clause handing your text to a vendor for training. What you draft is yours — full copyright, full ownership, no fine print.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 17V5h16v12M2 21h20M9 9h6"/></svg></div>
+            <h3>Works in every app, privately</h3>
+            <p>Continuous inline ghost text in any text field — mail, docs, chat, code. <kbd>Tab</kbd> accepts a word, <kbd>⌥Tab</kbd> a whole line, and <kbd>⌥⌘K</kbd> rewrites a selection — all on-device.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-6 6 6 6M16 6l6 6-6 6M14 4l-4 16"/></svg></div>
+            <h3>Local API + MCP for developers</h3>
+            <p>An OpenAI-compatible HTTP endpoint runs on <code>127.0.0.1</code> so your scripts, editors, and agents can call the same on-device model — no key, no cloud. A built-in MCP bridge plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">How privacy is enforced</span>
+          <h2>Local by architecture, not by promise</h2>
+          <p class="lead">Privacy here isn&rsquo;t a setting you trust — it&rsquo;s how the app is built. There&rsquo;s simply no path for your text to leave the machine.</p>
+        </div>
+        <div class="steps">
+          <article class="step">
+            <h3>1. The model lives on your Mac</h3>
+            <p>You pick a GGUF model from the catalog (Qwen3 Base, Gemma 3, MoE variants — or bring your own) and it runs entirely on Apple Silicon. Predictions are computed locally — there is no API call to a completion server, ever. The optional developer-facing API binds to <code>127.0.0.1</code> only.</p>
+          </article>
+          <article class="step">
+            <h3>2. Sensitive fields are skipped</h3>
+            <p>Password and secure input fields are never read. The app respects the system&rsquo;s secure-field flag and produces no suggestions where you&rsquo;d type a credential.</p>
+          </article>
+          <article class="step">
+            <h3>3. Your style stays sealed on-device</h3>
+            <p>Any personalization is stored encrypted on your Mac and never uploaded. One click wipes it. With zero telemetry and no account, there&rsquo;s nothing about you on any server.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="faq">
+      <div class="wrap">
+        <div class="section-head center"><span class="eyebrow">Questions</span><h2>Private autocomplete FAQ</h2></div>
+        <div class="faq">
+          <details><summary>How private is it really?</summary><div class="faq__a">Completely. Shadowtype runs the language model entirely on your Mac. Your keystrokes, drafts, and predictions never leave the device — there&rsquo;s no completion server to send them to. It works with Wi-Fi off, nothing you type is uploaded or logged, and you keep full copyright of everything you write.</div></details>
+          <details><summary>Does it have telemetry or an account?</summary><div class="faq__a">No. Shadowtype ships with zero telemetry and no analytics backend — there&rsquo;s nothing to opt out of, because nothing is collected or sent. You don&rsquo;t create an account or log in; the app just runs locally on your Mac.</div></details>
+          <details><summary>Are password fields read?</summary><div class="faq__a">No. Shadowtype never reads secure or password input fields. macOS marks those fields as secure and the app ignores them entirely — no ghost text is generated there and nothing is captured. The same applies to any field the system flags as sensitive.</div></details>
+          <details><summary>Where is my personalization data stored?</summary><div class="faq__a">On your Mac, encrypted. The optional style profile that learns your tone is stored locally and encrypted on-device — it&rsquo;s never uploaded. You can wipe it at any time with one click, and the app keeps working with a fresh profile.</div></details>
+          <details><summary>Can my own scripts, editors, and agents use the same local model?</summary><div class="faq__a">Yes. Shadowtype exposes an OpenAI-compatible HTTP endpoint on <code>127.0.0.1</code> with no key required, so your terminal, editor plugins, and AI agents can call <code>/v1/chat/completions</code> against the same on-device model. A built-in MCP server plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF you drop in. Everything is bound to localhost — nothing leaves your Mac.</div></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="cta-band">
+          <span class="eyebrow" style="justify-content:center">Ready when you are</span>
+          <h2>Autocomplete that keeps your typing yours.</h2>
+          <p>Download Shadowtype free, accept your first word with <kbd>Tab</kbd>, and know nothing you type ever leaves your Mac.</p>
+          <div class="hero__cta">
+            <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download for macOS</a>
+            <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+          </div>
+          <ul class="risk-reversal" style="justify-content:center" aria-label="Purchase reassurance">
+            <li>100% on-device</li><li>Zero telemetry</li><li>No account</li><li>Free forever</li><li>Open source</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="site-footer__grid">
+        <div class="site-footer__brand">
+          <a class="brand" href="/" aria-label="Shadowtype home">
+            <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+            <span>Shadowtype</span>
+          </a>
+          <p>Private, on-device AI text completion for macOS. Your words stay yours.</p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="/#how">How it works</a></li>
+            <li><a href="/#features">Features</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype">Free &amp; open source</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/releases">Download</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Compare</h4>
+          <ul>
+            <li><a href="/shadowtype-vs-cotypist">vs Cotypist</a></li>
+            <li><a href="/shadowtype-vs-cotabby">vs Cotabby</a></li>
+            <li><a href="/shadowtype-vs-apple-intelligence">vs Apple Intelligence</a></li>
+            <li><a href="/cotypist-alternative">Cotypist alternative</a></li>
+            <li><a href="/cotabby-alternative">Cotabby alternative</a></li>
+            <li><a href="/apple-intelligence-alternative">Apple Intelligence alternative</a></li>
+            <li><a href="/grammarly-alternative-mac">Grammarly alternative</a></li>
+            <li><a href="/ai-writing-assistant-mac">AI writing assistant</a></li>
+            <li><a href="/local-ai-autocomplete-mac">Local AI autocomplete</a></li>
+            <li><a href="/offline-text-prediction-macos">Offline text prediction</a></li>
+            <li><a href="/private-autocomplete-mac">Private autocomplete</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Legal</h4>
+          <ul>
+            <li><a href="/privacy">Privacy</a></li>
+            <li><a href="/terms">Terms</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/issues">Contact</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="site-footer__bottom">
+        <span>© 2026 Shadowtype. All rights reserved.</span>
+        <span>macOS 14+ · Apple Silicon · 100% on-device</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    window.__TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{ "ctaColor": "amber" }/*EDITMODE-END*/;
+  </script>
+  <script src="/tweaks.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+name = "shadowtype-web"
+main = "src/index.ts"
+compatibility_date = "2025-05-01"
+
+# Serve the Worker on the apex domain (matches SITE_ORIGIN). custom_domain=true auto-provisions the
+# DNS record + edge cert in the (already-active) shadowtype.app zone on deploy.
+[[routes]]
+pattern = "shadowtype.app"
+custom_domain = true
+
+# www host bound to the Worker so the in-Worker www → apex 301 (src/index.ts) can fire.
+[[routes]]
+pattern = "www.shadowtype.app"
+custom_domain = true
+
+# Workers Assets — serves the static landing + SEO site from ./public. No backend, no secrets.
+[assets]
+binding = "ASSETS"
+directory = "./public"
+# Run the Worker BEFORE static-asset serving so the www → apex 301 middleware (src/index.ts) fires on
+# every path; apex requests fall through to the catch-all `app.all("*") → env.ASSETS.fetch`.
+run_worker_first = true
+
+# Non-secret vars. Only the canonical origin (used by the www → apex redirect).
+[vars]
+SITE_ORIGIN = "https://shadowtype.app"

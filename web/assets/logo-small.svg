@@ -1,0 +1,21 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="sq"><rect width="1024" height="1024" rx="232" ry="232"/></clipPath>
+    <linearGradient id="bg" x1="120" y1="60" x2="920" y2="1000" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8466FF"/>
+      <stop offset="0.45" stop-color="#3B2A8C"/>
+      <stop offset="1" stop-color="#140C3A"/>
+    </linearGradient>
+  </defs>
+  <g clip-path="url(#sq)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+    <!-- hard offset ghost (no blur) -->
+    <g transform="translate(566 566)" opacity="0.85">
+      <path d="M-122 -250 H122 V-176 H34 V176 H122 V250 H-122 V176 H-34 V-176 H-122 Z" fill="#0C0730"/>
+    </g>
+    <!-- fat white I-beam, flat -->
+    <g transform="translate(462 470)">
+      <path d="M-122 -250 H122 V-176 H34 V176 H122 V250 H-122 V176 H-34 V-176 H-122 Z" fill="#FFFFFF"/>
+    </g>
+  </g>
+</svg>

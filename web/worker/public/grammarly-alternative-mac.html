@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Private Grammarly Alternative for Mac — On-Device & Offline</title>
+  <meta name="description" content="Want a private Grammarly alternative for Mac? Shadowtype gives you on-device, offline, free and open-source inline writing help — no cloud, no monthly fee, no account. Honest comparison." />
+  <meta name="theme-color" content="#0a0b0e" />
+  <link rel="canonical" href="https://shadowtype.app/grammarly-alternative-mac" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <link rel="stylesheet" href="/landing.css" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="A private, on-device Grammarly alternative for Mac" />
+  <meta property="og:description" content="Shadowtype is the private, local, free and open-source alternative for inline writing help on Mac — keystrokes never leave your machine. Not a deep-grammar clone; here's the honest take." />
+  <meta property="og:url" content="https://shadowtype.app/grammarly-alternative-mac" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta property="og:site_name" content="Shadowtype" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:image" content="https://shadowtype.app/assets/og-grammarly-alternative-mac.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:alt" content="A private, on-device Grammarly alternative for Mac — 100% on-device, free, no subscription." />
+  <meta name="twitter:title" content="A private, on-device Grammarly alternative for Mac" />
+  <meta name="twitter:description" content="Shadowtype is the private, local, free and open-source alternative for inline writing help on Mac — keystrokes never leave your machine. Not a deep-grammar clone; here's the honest take." />
+  <meta name="twitter:image" content="https://shadowtype.app/assets/og-grammarly-alternative-mac.png" />
+  <meta name="twitter:image:alt" content="A private, on-device Grammarly alternative for Mac" />
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Shadowtype",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "macOS 14+ (Apple Silicon)",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "availability": "https://schema.org/InStock", "url": "https://github.com/dario-valles/shadowtype/releases" },
+    "isAccessibleForFree": true, "license": "https://github.com/dario-valles/shadowtype",
+    "description": "Private, on-device AI text completion for macOS. Inline ghost-text autocomplete and selection rewrite in any app, fully local and offline. Free and open source.",
+      "dateModified": "2026-06-06"
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      { "@type": "ListItem", "position": 1, "name": "Shadowtype", "item": "https://shadowtype.app/" },
+      { "@type": "ListItem", "position": 2, "name": "Grammarly alternative for Mac", "item": "https://shadowtype.app/grammarly-alternative-mac" }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      { "@type": "Question", "name": "Is Shadowtype a full Grammarly replacement?", "acceptedAnswer": { "@type": "Answer", "text": "No, and we won't pretend otherwise. Shadowtype is the private, local, free and open-source alternative for inline writing help — continuous ghost-text autocomplete and on-device selection rewrite (improve, shorten, fix grammar, change tone). Grammarly is a deeper cloud writing assistant with exhaustive grammar and style checking, cross-platform apps, and enterprise features. If you want privacy, offline use, and no subscription for inline help, Shadowtype fits. If you need a comprehensive grammar checker across every device, Grammarly is the better tool." } },
+      { "@type": "Question", "name": "Does Grammarly work offline?", "acceptedAnswer": { "@type": "Answer", "text": "No. Grammarly is cloud-by-default: it requires an internet connection and sends your text to Grammarly's servers to analyze. A narrow on-device grammar-error model exists on desktop, but rewrite, tone, and generative AI all run in the cloud, so Grammarly is not an offline or fully on-device tool. Shadowtype runs 100% on-device with llama.cpp and Metal and works with no internet at all." } },
+      { "@type": "Question", "name": "Is my text sent to the cloud?", "acceptedAnswer": { "@type": "Answer", "text": "With Shadowtype, no. Inference runs locally on your Mac and your keystrokes never leave the device — there is no telemetry and no account. With Grammarly, yes: by default your text is sent to Grammarly's servers for analysis, and an account and sign-in are required." } },
+      { "@type": "Question", "name": "Does Grammarly still have inline autocomplete?", "acceptedAnswer": { "@type": "Answer", "text": "No. Grammarly officially deprecated its autocomplete feature and no longer offers inline ghost-text next-word prediction; it works reactively by underlining issues you click or Tab to accept. Shadowtype's core is continuous inline ghost-text completion in any app, with Tab to accept a word and Option-Tab for a whole line." } },
+      { "@type": "Question", "name": "Can my own scripts and editors use Shadowtype's local model?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Shadowtype runs an OpenAI-compatible HTTP endpoint on 127.0.0.1 with no key, so terminals, editor plugins, and AI agents can call /v1/chat/completions against the same on-device model. It also ships a built-in MCP server for Claude Code and other MCP clients, plus a BYOM picker for any GGUF. Grammarly is cloud-based and offers no local API or MCP server." } }
+    ]
+  }
+  </script>
+</head>
+<body>
+
+  <header class="site-header">
+    <div class="wrap site-header__inner">
+      <a class="brand" href="/" aria-label="Shadowtype home">
+        <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+        <span>Shadowtype</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a class="nav__link" href="/#how">How it works</a>
+        <a class="nav__link" href="/#features">Features</a>
+        <a class="nav__link" href="https://github.com/dario-valles/shadowtype">GitHub</a>
+        <a class="nav__link" href="/#faq">FAQ</a>
+        <a class="btn btn--primary nav__cta" href="https://github.com/dario-valles/shadowtype/releases">Download</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="section hero">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Grammarly alternative</span>
+          <h1>A private, on-device<br><span class="accent">Grammarly alternative for Mac.</span></h1>
+          <p class="lead">Let&rsquo;s be honest: Grammarly is a deep, cloud-based grammar and writing assistant — and for exhaustive grammar checking across every device it&rsquo;s still excellent. Shadowtype is a different thing. If what you want is <strong>private, local, free and open-source</strong> inline writing help — predictive ghost-text completion plus on-device rewrite — <strong>without sending your text to the cloud, paying monthly, or signing in</strong>, this is the alternative for you. It is not a full replacement for Grammarly&rsquo;s grammar engine or its cross-platform reach, and we&rsquo;ll say exactly where Grammarly still wins.</p>
+        </div>
+        <div class="hero__cta">
+          <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download Shadowtype free</a>
+          <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+        </div>
+        <ul class="hero__meta">
+          <li>100% on-device</li>
+          <li>Works offline</li>
+          <li>No account</li>
+          <li>Free &amp; open source</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="compare">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">The honest comparison</span>
+          <h2>Shadowtype vs Grammarly: how do they compare?</h2>
+          <p class="lead">Two different categories. Shadowtype wins on privacy, offline use, true inline completion, and being free and open source. Grammarly wins on deep grammar checking and cross-platform reach — and we mark those rows plainly.</p>
+        </div>
+        <div class="compare">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Capability</th>
+                <th scope="col" class="col-us">Shadowtype</th>
+                <th scope="col">Grammarly</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Inline ghost-text autocomplete</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Deprecated</td></tr>
+              <tr><td>Works fully offline</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">No</td></tr>
+              <tr><td>Text stays on device</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Cloud-processed</td></tr>
+              <tr><td>No account required</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Sign-in required</td></tr>
+              <tr><td>On-device selection rewrite</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Cloud</td></tr>
+              <tr><td>Local API + MCP server (OpenAI-compatible)</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">No · cloud-only</td></tr>
+              <tr><td>Deep grammar &amp; style checking</td><td class="col-us no">Basic</td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>Cross-platform (Win / iOS / Android / web)</td><td class="col-us no">Mac only</td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>Pricing</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Free &amp; open source</span></td><td class="badge-sub">$30 / mo · ~$144 / yr</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="rewrite__meta" style="margin-top:1rem">Figures reflect Grammarly&rsquo;s public pricing and docs as of June 2026 (Free tier; Pro $30/month, ~$144/year; Enterprise custom). Grammarly is a strong product in its category — this page is about which trade-offs fit you.</p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Where Shadowtype fits</span>
+          <h2>Private, local, and truly inline.</h2>
+        </div>
+        <div class="features">
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+            <h3>Your text never leaves the Mac</h3>
+            <p>Shadowtype runs 100% on-device with llama.cpp and Metal. Your keystrokes are never uploaded, there&rsquo;s zero telemetry, and no account. Grammarly, by default, sends your text to the cloud for analysis and requires sign-in.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+            <h3>Free, not every month</h3>
+            <p>Free and open source — versus Grammarly Pro at $30/month, roughly $144/year, recurring for as long as you use it. No bill, ever.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h10M4 17h7"/><path d="M15 15l3 3 4-5" opacity=".6"/></svg></div>
+            <h3>Real inline ghost-text completion</h3>
+            <p>Shadowtype predicts your next words as ghost text in any app — <kbd>Tab</kbd> accepts a word, <kbd>⌥Tab</kbd> a whole line — plus on-device selection rewrite with <kbd>⌥⌘K</kbd> (improve, shorten, formal, casual, fix grammar, summarize). Grammarly deprecated inline autocomplete and works reactively instead.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-6 6 6 6M16 6l6 6-6 6M14 4l-4 16"/></svg></div>
+            <h3>Local API + MCP for developers</h3>
+            <p>An OpenAI-compatible HTTP endpoint runs on <code>127.0.0.1</code> so your scripts, editors, and agents can call the same on-device model — no key, no cloud. A built-in MCP bridge plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="faq">
+      <div class="wrap">
+        <div class="section-head center"><span class="eyebrow">Questions</span><h2>Grammarly alternative FAQ</h2></div>
+        <div class="faq">
+          <details><summary>Is Shadowtype a full Grammarly replacement?</summary><div class="faq__a">No, and we won&rsquo;t pretend otherwise. Shadowtype is the private, local, free and open-source alternative for <em>inline</em> writing help — continuous ghost-text completion and on-device selection rewrite. Grammarly is a deeper cloud writing assistant with exhaustive grammar and style checking, cross-platform apps, and team/enterprise compliance. If you want privacy, offline use, and no subscription for inline help, Shadowtype fits. If you need a comprehensive grammar checker on every device, Grammarly stays the better tool.</div></details>
+          <details><summary>Does Grammarly work offline?</summary><div class="faq__a">No. Grammarly is cloud-by-default and needs an internet connection — your text is sent to its servers to be analyzed. A narrow on-device grammar-error model exists on the desktop app, but rewrite, tone, and generative AI all run in the cloud, so it isn&rsquo;t an offline or fully on-device tool. Shadowtype runs entirely on your Mac and works with no internet at all.</div></details>
+          <details><summary>Is my text sent to the cloud?</summary><div class="faq__a">With Shadowtype, no — inference is local, keystrokes never leave the device, there&rsquo;s no telemetry and no account. With Grammarly, yes: by default your text is uploaded for analysis, and an account and sign-in are required.</div></details>
+          <details><summary>Does Shadowtype check grammar like Grammarly?</summary><div class="faq__a">Only lightly. Shadowtype&rsquo;s on-device rewrite includes a &ldquo;fix grammar&rdquo; action for a selection, but it is not a dedicated, exhaustive grammar-and-style engine. If deep grammar checking is your main need, Grammarly is built for that. Shadowtype is built for private, inline, offline writing help.</div></details>
+          <details><summary>Can my own scripts, editors, and agents use the same local model?</summary><div class="faq__a">Yes. Shadowtype exposes an OpenAI-compatible HTTP endpoint on <code>127.0.0.1</code> with no key required, so your terminal, editor plugins, and AI agents can call <code>/v1/chat/completions</code> against the same on-device model. A built-in MCP server plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF you drop in. Everything is bound to localhost — nothing leaves your Mac. Grammarly is cloud-based and offers no local API or MCP server.</div></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="cta-band">
+          <span class="eyebrow" style="justify-content:center">Ready when you are</span>
+          <h2>Private inline writing help that never leaves your Mac.</h2>
+          <p>Download Shadowtype free, accept your first word with <kbd>Tab</kbd>, and upgrade once — never monthly, never to the cloud.</p>
+          <div class="hero__cta">
+            <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download for macOS</a>
+            <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+          </div>
+          <ul class="risk-reversal" style="justify-content:center" aria-label="Purchase reassurance">
+            <li>100% on-device</li><li>Works offline</li><li>No account</li><li>Zero telemetry</li><li>Open source</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="site-footer__grid">
+        <div class="site-footer__brand">
+          <a class="brand" href="/" aria-label="Shadowtype home">
+            <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+            <span>Shadowtype</span>
+          </a>
+          <p>Private, on-device AI text completion for macOS. Your words stay yours.</p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="/#how">How it works</a></li>
+            <li><a href="/#features">Features</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype">Free &amp; open source</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/releases">Download</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Compare</h4>
+          <ul>
+            <li><a href="/shadowtype-vs-cotypist">vs Cotypist</a></li>
+            <li><a href="/shadowtype-vs-cotabby">vs Cotabby</a></li>
+            <li><a href="/shadowtype-vs-apple-intelligence">vs Apple Intelligence</a></li>
+            <li><a href="/cotypist-alternative">Cotypist alternative</a></li>
+            <li><a href="/cotabby-alternative">Cotabby alternative</a></li>
+            <li><a href="/apple-intelligence-alternative">Apple Intelligence alternative</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Legal</h4>
+          <ul>
+            <li><a href="/privacy">Privacy</a></li>
+            <li><a href="/terms">Terms</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/issues">Contact</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="site-footer__bottom">
+        <span>© 2026 Shadowtype. All rights reserved.</span>
+        <span>macOS 14+ · Apple Silicon · 100% on-device</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    window.__TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{ "ctaColor": "amber" }/*EDITMODE-END*/;
+  </script>
+  <script src="/tweaks.js"></script>
+</body>
+</html>

@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Writing Assistant for Mac — on-device completion + rewrite | Shadowtype</title>
+  <meta name="description" content="A complete AI writing assistant for Mac that runs 100% on-device: inline ghost-text completion in any app plus selection rewrite (⌥⌘K). Private, free and open source." />
+  <meta name="theme-color" content="#0a0b0e" />
+  <link rel="canonical" href="https://shadowtype.app/ai-writing-assistant-mac" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <link rel="stylesheet" href="/landing.css" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="AI writing assistant for Mac — on-device completion + rewrite" />
+  <meta property="og:description" content="A full AI writing assistant for macOS: continuous inline completion in any app plus on-device selection rewrite. 100% local, private, free and open source — no cloud." />
+  <meta property="og:url" content="https://shadowtype.app/ai-writing-assistant-mac" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta property="og:site_name" content="Shadowtype" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:image" content="https://shadowtype.app/assets/og-ai-writing-assistant-mac.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:alt" content="AI writing assistant for Mac — on-device completion + rewrite — 100% on-device, free, no subscription." />
+  <meta name="twitter:title" content="AI writing assistant for Mac — on-device completion + rewrite" />
+  <meta name="twitter:description" content="A full AI writing assistant for macOS: continuous inline completion in any app plus on-device selection rewrite. 100% local, private, free and open source — no cloud." />
+  <meta name="twitter:image" content="https://shadowtype.app/assets/og-ai-writing-assistant-mac.png" />
+  <meta name="twitter:image:alt" content="AI writing assistant for Mac — on-device completion + rewrite" />
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Shadowtype",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "macOS 14+ (Apple Silicon)",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "availability": "https://schema.org/InStock", "url": "https://github.com/dario-valles/shadowtype/releases" },
+    "isAccessibleForFree": true, "license": "https://github.com/dario-valles/shadowtype",
+    "description": "A complete on-device AI writing assistant for macOS. Continuous inline ghost-text completion in any app plus selection rewrite — improve, shorten, formalize, fix grammar and more — all running locally with llama.cpp and Metal. Free and open source.",
+      "dateModified": "2026-06-06"
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      { "@type": "ListItem", "position": 1, "name": "Shadowtype", "item": "https://shadowtype.app/" },
+      { "@type": "ListItem", "position": 2, "name": "AI writing assistant for Mac", "item": "https://shadowtype.app/ai-writing-assistant-mac" }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      { "@type": "Question", "name": "What can the AI writing assistant do?", "acceptedAnswer": { "@type": "Answer", "text": "Shadowtype does two things across every app on your Mac. First, it completes your sentences as you type — a real language model predicts your next words and shows them as inline ghost text; Tab accepts a word, ⌥Tab a whole line. Second, it rewrites text you select: press ⌥⌘K to improve, shorten, make formal, make casual, fix grammar, or summarize. It also expands emoji shortcodes (:smi → 😄), writes in multiple languages, and personalizes to your voice with per-app instructions." } },
+      { "@type": "Question", "name": "Is the AI writing assistant on-device and private?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Both completion and rewrite run 100% on-device with llama.cpp and Metal on Apple Silicon — no cloud inference call ever. Unlike cloud writing assistants, your text is never transmitted. Shadowtype ships with zero telemetry, requires no account, and works fully offline, so privacy is the default rather than a setting." } },
+      { "@type": "Question", "name": "Does it work in any app?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Completion and rewrite work system-wide through macOS accessibility — Mail, Slack, Notes, your code editor, the browser, anywhere you can type. You can also give per-app instructions so the assistant uses a different tone in Mail than in Slack." } },
+      { "@type": "Question", "name": "Is it a subscription?", "acceptedAnswer": { "@type": "Answer", "text": "No. Shadowtype is free and open source. There's no monthly fee, no account, and no server to fund — because all inference runs on your own Mac. Use it on as many of your Macs as you like." } },
+      { "@type": "Question", "name": "Can my own scripts and editors use Shadowtype's local model?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Shadowtype runs an OpenAI-compatible HTTP endpoint on 127.0.0.1 with no key, so terminals, editor plugins, and AI agents can call /v1/chat/completions against the same on-device model. It also ships a built-in MCP server for Claude Code and other MCP clients, plus a BYOM picker for any GGUF." } }
+    ]
+  }
+  </script>
+</head>
+<body>
+
+  <header class="site-header">
+    <div class="wrap site-header__inner">
+      <a class="brand" href="/" aria-label="Shadowtype home">
+        <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+        <span>Shadowtype</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a class="nav__link" href="/#how">How it works</a>
+        <a class="nav__link" href="/#features">Features</a>
+        <a class="nav__link" href="https://github.com/dario-valles/shadowtype">GitHub</a>
+        <a class="nav__link" href="/#faq">FAQ</a>
+        <a class="btn btn--primary nav__cta" href="https://github.com/dario-valles/shadowtype/releases">Download</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="section hero">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">AI writing assistant · macOS</span>
+          <h1>An AI writing assistant for Mac —<br><span class="accent">completion and rewrite, fully on-device.</span></h1>
+          <p class="lead">Shadowtype is a complete writing assistant that runs a real language model <strong>on your Apple Silicon chip</strong> — not in the cloud. It does two things everywhere you type: it <strong>finishes your sentences</strong> as inline ghost text (<kbd>Tab</kbd> a word, <kbd>⌥Tab</kbd> a line), and it <strong>rewrites text you select</strong> with <kbd>⌥⌘K</kbd> — improve, shorten, make formal, make casual, fix grammar, or summarize. All of it is local, private, and <strong>free and open source</strong>.</p>
+        </div>
+        <div class="hero__cta">
+          <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download Shadowtype free</a>
+          <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+        </div>
+        <ul class="hero__meta">
+          <li>Completion + rewrite</li>
+          <li>100% on-device</li>
+          <li>Works in any app</li>
+          <li>Free &amp; open source</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="how">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">What a full writing assistant looks like</span>
+          <h2>Two ways to write faster</h2>
+          <p class="lead">Most writing tools do one thing. Shadowtype covers the whole arc of writing — drafting the next words for you, then reshaping what you&rsquo;ve already written — and it does both without your text ever leaving the Mac. Here&rsquo;s the loop.</p>
+        </div>
+        <div class="steps">
+          <article class="step">
+            <span class="step__n">1</span>
+            <h3>You type, context is read on-device</h3>
+            <p>As you write in any text field, Shadowtype reads the surrounding text locally through macOS accessibility — never by uploading it anywhere.</p>
+          </article>
+          <article class="step">
+            <span class="step__n">2</span>
+            <h3>Ghost text predicts your next words</h3>
+            <p>A GGUF model from the built-in catalog (Qwen3 Base, Gemma 3, MoE variants — or bring your own) runs via llama.cpp + Metal and shows the continuation as dimmed inline text. <kbd>Tab</kbd> accepts a word, <kbd>⌥Tab</kbd> a whole line.</p>
+          </article>
+          <article class="step">
+            <span class="step__n">3</span>
+            <h3>Select &amp; rewrite with ⌥⌘K</h3>
+            <p>Highlight any text and press <kbd>⌥⌘K</kbd> to pick an action — improve, shorten, make formal, make casual, fix grammar, or summarize — and Shadowtype rewrites it in place, on-device.</p>
+          </article>
+          <article class="step">
+            <span class="step__n">4</span>
+            <h3>It learns your voice</h3>
+            <p>Add per-app instructions and let it adapt to your phrasing over time, plus emoji shortcodes (<kbd>:smi</kbd> → 😄) and multiple languages — all without sending a byte off-device.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="features">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Everything it does</span>
+          <h2>A writing assistant, not a single trick</h2>
+        </div>
+        <div class="features">
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16M4 12h10M4 19h16"/></svg></div>
+            <h3>Inline completion, everywhere</h3>
+            <p>A real LLM predicts your next words as ghost text in Mail, Slack, Notes, your editor, the browser — anywhere you type. <kbd>Tab</kbd> accepts a word, <kbd>⌥Tab</kbd> a whole line, and it&rsquo;s pure <a href="/local-ai-autocomplete-mac">local autocomplete</a>.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></div>
+            <h3>Selection rewrite on ⌥⌘K</h3>
+            <p>Highlight a sentence, paragraph, or email and press <kbd>⌥⌘K</kbd> to <strong>improve, shorten, make formal, make casual, fix grammar, or summarize</strong>. The rewrite runs on-device and replaces your selection in place.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9h.01M15 9h.01"/></svg></div>
+            <h3>Emoji &amp; multi-language</h3>
+            <p>Type <kbd>:smi</kbd> and get 😄 inline. Write in English (sharpest), Norwegian, Hinglish, and more — the model completes and rewrites in the language you&rsquo;re already typing.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg></div>
+            <h3>Personalized to your voice</h3>
+            <p>Give per-app instructions — a crisp voice for Mail, looser for Slack — and let Shadowtype adapt to your phrasing over time. Your tone, not a generic model&rsquo;s.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+            <h3>100% on-device &amp; private</h3>
+            <p>Completion and rewrite both run locally with llama.cpp + Metal — no cloud call ever. <a href="/private-autocomplete-mac">Private</a> by design with zero telemetry and no account, and it keeps working <a href="/offline-text-prediction-macos">offline</a>.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12.5 3 12a9 9 0 0 1 18 0l-2 .5"/><path d="M12 3v4M7 21h10"/><circle cx="12" cy="13" r="3"/></svg></div>
+            <h3>Free, not a subscription</h3>
+            <p>Shadowtype is <strong>free and open source</strong>. There&rsquo;s no monthly fee and no server to fund — use it on as many of your Macs as you like.</p>
+          </article>
+          <article class="feature">
+            <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-6 6 6 6M16 6l6 6-6 6M14 4l-4 16"/></svg></div>
+            <h3>Local API + MCP for developers</h3>
+            <p>An OpenAI-compatible HTTP endpoint runs on <code>127.0.0.1</code> so your scripts, editors, and agents can call the same on-device model — no key, no cloud. A built-in MCP bridge plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Beyond cloud writing assistants</span>
+          <h2>A full assistant that happens to be local</h2>
+          <p class="lead">Cloud writing assistants stream your drafts to a server and bill you monthly for the privilege. Shadowtype gives you the same breadth — drafting, rewriting, summarizing, tone control — but runs the whole model on your machine and personalizes to <em>you</em> locally, sending nothing off-device. If you&rsquo;re comparing it to the built-in option, see how it stacks up <a href="/shadowtype-vs-apple-intelligence">vs Apple&rsquo;s Writing Tools</a>, or read the <a href="/#features">full feature list</a>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight" id="faq">
+      <div class="wrap">
+        <div class="section-head center"><span class="eyebrow">Questions</span><h2>AI writing assistant FAQ</h2></div>
+        <div class="faq">
+          <details><summary>What can the AI writing assistant do?</summary><div class="faq__a">Two core things, everywhere you type. It <strong>completes your sentences</strong> as inline ghost text — <kbd>Tab</kbd> accepts a word, <kbd>⌥Tab</kbd> a line — and it <strong>rewrites text you select</strong> on <kbd>⌥⌘K</kbd>: improve, shorten, make formal, make casual, fix grammar, or summarize. It also expands emoji shortcodes (<kbd>:smi</kbd> → 😄), writes in multiple languages, and personalizes to your voice with per-app instructions.</div></details>
+          <details><summary>Is it on-device and private?</summary><div class="faq__a">Yes. Both completion and rewrite run 100% on-device with llama.cpp + Metal on Apple Silicon — no cloud inference call ever. Unlike cloud writing assistants, your text is never transmitted. Shadowtype ships with zero telemetry, needs no account, and works fully offline, so privacy is the default.</div></details>
+          <details><summary>Does it work in any app?</summary><div class="faq__a">Yes. Completion and rewrite work system-wide through macOS accessibility — Mail, Slack, Notes, your code editor, the browser, anywhere you can type. You can even set per-app instructions so it uses a different tone in Mail than in Slack.</div></details>
+          <details><summary>Is it a subscription?</summary><div class="faq__a">No. Shadowtype is free and open source. No monthly fee, no account, no server to fund — all inference runs on your own Mac. Use it on as many of your Macs as you like.</div></details>
+          <details><summary>Can my own scripts, editors, and agents use the same local model?</summary><div class="faq__a">Yes. Shadowtype exposes an OpenAI-compatible HTTP endpoint on <code>127.0.0.1</code> with no key required, so your terminal, editor plugins, and AI agents can call <code>/v1/chat/completions</code> against the same on-device model. A built-in MCP server plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF you drop in. Everything is bound to localhost — nothing leaves your Mac.</div></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <div class="wrap">
+        <div class="cta-band">
+          <span class="eyebrow" style="justify-content:center">Ready when you are</span>
+          <h2>A writing assistant that runs on your Mac, not someone&rsquo;s server.</h2>
+          <p>Download Shadowtype free, accept your first word with <kbd>Tab</kbd>, rewrite a paragraph with <kbd>⌥⌘K</kbd>, and upgrade once — never monthly.</p>
+          <div class="hero__cta">
+            <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases">Download for macOS</a>
+            <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
+          </div>
+          <ul class="risk-reversal" style="justify-content:center" aria-label="Purchase reassurance">
+            <li>100% on-device</li><li>No subscription</li><li>No account</li><li>Zero telemetry</li><li>Open source</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="site-footer__grid">
+        <div class="site-footer__brand">
+          <a class="brand" href="/" aria-label="Shadowtype home">
+            <img class="brand__mark" src="/assets/logo-small.svg" width="30" height="30" alt="" />
+            <span>Shadowtype</span>
+          </a>
+          <p>Private, on-device AI text completion for macOS. Your words stay yours.</p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="/#how">How it works</a></li>
+            <li><a href="/#features">Features</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype">Free &amp; open source</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/releases">Download</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Compare</h4>
+          <ul>
+            <li><a href="/shadowtype-vs-cotypist">vs Cotypist</a></li>
+            <li><a href="/shadowtype-vs-cotabby">vs Cotabby</a></li>
+            <li><a href="/shadowtype-vs-apple-intelligence">vs Apple Intelligence</a></li>
+            <li><a href="/cotypist-alternative">Cotypist alternative</a></li>
+            <li><a href="/cotabby-alternative">Cotabby alternative</a></li>
+            <li><a href="/apple-intelligence-alternative">Apple Intelligence alternative</a></li>
+            <li><a href="/grammarly-alternative-mac">Grammarly alternative</a></li>
+            <li><a href="/ai-writing-assistant-mac">AI writing assistant</a></li>
+            <li><a href="/local-ai-autocomplete-mac">Local AI autocomplete</a></li>
+            <li><a href="/offline-text-prediction-macos">Offline text prediction</a></li>
+            <li><a href="/private-autocomplete-mac">Private autocomplete</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Legal</h4>
+          <ul>
+            <li><a href="/privacy">Privacy</a></li>
+            <li><a href="/terms">Terms</a></li>
+            <li><a href="https://github.com/dario-valles/shadowtype/issues">Contact</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="site-footer__bottom">
+        <span>© 2026 Shadowtype. All rights reserved.</span>
+        <span>macOS 14+ · Apple Silicon · 100% on-device</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    window.__TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{ "ctaColor": "amber" }/*EDITMODE-END*/;
+  </script>
+  <script src="/tweaks.js"></script>
+</body>
+</html>

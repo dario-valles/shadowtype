@@ -1,0 +1,65 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="squircle">
+      <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232"/>
+    </clipPath>
+
+    <linearGradient id="bg" x1="120" y1="60" x2="920" y2="1000" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8466FF"/>
+      <stop offset="0.42" stop-color="#3B2A8C"/>
+      <stop offset="1" stop-color="#0C0822"/>
+    </linearGradient>
+
+    <radialGradient id="glow" cx="0.32" cy="0.2" r="0.85">
+      <stop offset="0" stop-color="#B7A6FF" stop-opacity="0.6"/>
+      <stop offset="0.55" stop-color="#B7A6FF" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="caret" x1="512" y1="280" x2="512" y2="744" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E4DCFF"/>
+    </linearGradient>
+
+    <linearGradient id="ghost" x1="512" y1="300" x2="512" y2="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1A0F4A"/>
+      <stop offset="1" stop-color="#0A0626"/>
+    </linearGradient>
+
+    <filter id="ghostBlur" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+
+    <filter id="caretGlow" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="20" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+    <rect width="1024" height="1024" fill="url(#glow)"/>
+
+    <!-- subtle baseline text rows -->
+    <g opacity="0.22" fill="#FFFFFF">
+      <rect x="300" y="678" width="424" height="30" rx="15"/>
+      <rect x="300" y="730" width="268" height="30" rx="15"/>
+    </g>
+
+    <!-- I-beam path reused: width 196, height 460, serif depth 50 -->
+    <!-- Ghost / cast shadow: offset down-right -->
+    <g transform="translate(556 558)" filter="url(#ghostBlur)" opacity="0.9">
+      <path d="M-98 -230 H98 V-180 H26 V180 H98 V230 H-98 V180 H-26 V-180 H-98 Z" fill="url(#ghost)"/>
+    </g>
+
+    <!-- Glowing white I-beam caret -->
+    <g transform="translate(472 478)" filter="url(#caretGlow)">
+      <path d="M-98 -230 H98 V-180 H26 V180 H98 V230 H-98 V180 H-26 V-180 H-98 Z" fill="url(#caret)"/>
+    </g>
+
+    <!-- top inner highlight -->
+    <rect x="0" y="0" width="1024" height="1024" rx="232" fill="none" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="3"/>
+  </g>
+</svg>
