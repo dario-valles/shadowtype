@@ -115,11 +115,11 @@ PRE_FLAG=(); [[ "$CHANNEL" == "beta" ]] && PRE_FLAG=(--prerelease)
 if gh release view "$TAG" --repo "$GITHUB_REPO" >/dev/null 2>&1; then
   # Tag already exists (e.g. a new build at the same VERSION): clobber the assets + refresh metadata.
   gh release upload "$TAG" "$ZIP" "$DMG" "$MANIFEST_FILE" --repo "$GITHUB_REPO" --clobber
-  gh release edit   "$TAG" --repo "$GITHUB_REPO" --title "$TITLE" --notes "$BODY" "${PRE_FLAG[@]}"
+  gh release edit   "$TAG" --repo "$GITHUB_REPO" --title "$TITLE" --notes "$BODY" "${PRE_FLAG[@]+"${PRE_FLAG[@]}"}"
   echo "    updated existing release $TAG"
 else
   gh release create "$TAG" "$ZIP" "$DMG" "$MANIFEST_FILE" --repo "$GITHUB_REPO" \
-    --title "$TITLE" --notes "$BODY" "${PRE_FLAG[@]}"
+    --title "$TITLE" --notes "$BODY" "${PRE_FLAG[@]+"${PRE_FLAG[@]}"}"
   echo "    created release $TAG"
 fi
 
