@@ -90,8 +90,14 @@ final class M1CaptureTests: XCTestCase {
     // focusedElement() backs the coordinator's direct-AX inject path. Headless (no AX trust / no
     // focused field) it must return nil gracefully — the Injector then uses the Unicode fallback —
     // never crash. The live AX-insert behavior itself needs TCC + a focused field (manual M2 check).
-    func testFocusedElementIsNilGracefullyWhenUntrusted() {
+    func testFocusedElementIsNilGracefullyWhenUntrusted() throws {
         let tracker = EditContextTracker()
+        if AXIsProcessTrusted() {
+            // Trusted dev machine: a real focused field may exist, so nil can't be asserted.
+            // The no-crash contract still ran; the nil contract only holds headless.
+            _ = tracker.focusedElement()
+            throw XCTSkip("AX-trusted environment — nil contract only verifiable headless/CI")
+        }
         XCTAssertNil(tracker.focusedElement(), "no focused field / untrusted -> nil, no crash")
     }
 
