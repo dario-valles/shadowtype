@@ -15,6 +15,15 @@ struct LocalAPISettingsPane: View {
     @State private var statusText: String = "Stopped"
     @State private var portText: String = "—"
     @State private var copyConfirmation: String? = nil
+    // True between flipping the toggle on and the next .shadowtypeLocalAPIDidChange — the server
+    // bind is async, so without this the pane claims "Stopped" while the server is coming up.
+    @State private var starting = false
+    // Failure reason AppDelegate persisted to UserDefaults "shadowtype.localAPI.lastError" when the
+    // server could not start (cleared on success). Shown when the toggle is on but no port is bound.
+    @State private var startError: String? = nil
+    // Key-rotation warning — separate from the transient copy-confirmation label: it must persist
+    // until the user dismisses it (or closes the pane), because stale keys break existing clients.
+    @State private var rotationWarning: String? = nil
 
     var body: some View {
         ScrollView {
@@ -33,7 +42,10 @@ struct LocalAPISettingsPane: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear { refresh() }
-        .onReceive(NotificationCenter.default.publisher(for: .shadowtypeLocalAPIDidChange)) { _ in refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: .shadowtypeLocalAPIDidChange)) { _ in
+            starting = false   // AppDelegate posts this even on failure; the start attempt is over
+            refresh()
+        }
     }
 
     // MARK: - Sections
@@ -56,7 +68,9 @@ struct LocalAPISettingsPane: View {
                     .font(.body.weight(.medium))
             }
             .toggleStyle(.switch)
-            .onChange(of: serverEnabled) { _, _ in
+            .onChange(of: serverEnabled) { _, newValue in
+                starting = newValue        // bind is async; show "Starting…" until DidChange lands
+                startError = nil
                 NotificationCenter.default.post(name: .shadowtypeToggleLocalAPI, object: nil)
             }
             Text("Starts on launch as long as this toggle is on. The server listens on 127.0.0.1 only — never on your local network.")
@@ -67,17 +81,34 @@ struct LocalAPISettingsPane: View {
     }
 
     @ViewBuilder private var statusSection: some View {
-        HStack(spacing: 16) {
-            Label(statusText, systemImage: "circle.fill")
-                .labelStyle(.titleAndIcon)
-                .font(.callout.weight(.medium))
-                .foregroundStyle(statusText.contains("Running") ? .green : .secondary)
-            Text("Port \(portText)")
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(.secondary)
-            Spacer()
-            Button("Copy URL") { copy(serverURL, label: "URL") }
-                .disabled(portText == "—")
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 16) {
+                if starting {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Starting…")
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Label(statusText, systemImage: "circle.fill")
+                        .labelStyle(.titleAndIcon)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(statusText.contains("Running") ? .green : .secondary)
+                }
+                Text("Port \(portText)")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Copy URL") { copy(serverURL, label: "URL") }
+                    .disabled(portText == "—")
+            }
+            if let err = startError, !starting {
+                Label("The server failed to start: \(err)", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(12)
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
@@ -103,8 +134,31 @@ struct LocalAPISettingsPane: View {
                     .disabled(apiKey.isEmpty)
                 Button("Regenerate") {
                     apiKey = APIKeyStore.regenerateAPIKey()
-                    copyConfirmation = "Rotated — existing clients will need the new key."
+                    rotationWarning = "API key rotated — every client still using the old key will be rejected until you paste the new one."
                 }
+            }
+            if let warning = rotationWarning {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(warning)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button {
+                        rotationWarning = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Dismiss")
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.30), lineWidth: 1))
             }
         }
     }
@@ -178,9 +232,15 @@ struct LocalAPISettingsPane: View {
            p > 0 {
             statusText = "Running"
             portText = String(p)
+            startError = nil
         } else {
             statusText = "Stopped"
             portText = "—"
+            // Toggle on but nothing bound → the start attempt failed. AppDelegate persists the
+            // reason to "shadowtype.localAPI.lastError" (cleared on success); surface it here.
+            startError = serverEnabled
+                ? UserDefaults.standard.string(forKey: "shadowtype.localAPI.lastError")
+                : nil
         }
     }
 

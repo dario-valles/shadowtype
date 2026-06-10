@@ -114,6 +114,25 @@ enum HFResolver {
         return URL(string: "https://huggingface.co/\(owner)/\(repo)/resolve/main/\(encoded)")
     }
 
+    // Picker ordering: ascending by size so the cheapest download reads first; unknown sizes sink
+    // to the bottom; filename breaks ties for a stable order. Pure + testable.
+    static func sortedBySizeAscending(_ list: [Sibling]) -> [Sibling] {
+        list.sorted { a, b in
+            switch (a.sizeBytes, b.sizeBytes) {
+            case let (x?, y?): return x != y ? x < y : a.filename < b.filename
+            case (.some, .none): return true
+            case (.none, .some): return false
+            case (.none, .none): return a.filename < b.filename
+            }
+        }
+    }
+
+    // Default pick for the import picker: a Q4_K_M quant when the repo has one (the recommended
+    // quality/size balance, matching the curated catalog), else the first file. Pure + testable.
+    static func preferredImportFile(in list: [Sibling]) -> Sibling? {
+        list.first { $0.filename.lowercased().contains("q4_k_m") } ?? list.first
+    }
+
     // Best-effort short label for a sibling row in the picker UI.
     static func displaySize(_ bytes: Int64?) -> String {
         guard let b = bytes else { return "" }

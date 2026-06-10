@@ -137,6 +137,61 @@ final class UpdateManagerTests: XCTestCase {
         XCTAssertFalse(mgr.isMandatory(optional))
     }
 
+    // MARK: - Mandatory-pending flag (persisted across launches)
+
+    func testCheckSetsMandatoryPendingForMinBuildForcedUpdate() async {
+        let suite = "shadowtype.tests.updatemgr.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let assetURL = "https://github.test/dl/latest.json"
+        StubProtocol.routes = [
+            "/repos/dario-valles/shadowtype/releases/latest": singleReleaseJSON(assetURL: assetURL),
+            "/dl/latest.json": sampleManifestJSON(build: UpdateManager.currentBuild() + 10,
+                                                  minBuild: UpdateManager.currentBuild() + 10),
+        ]
+        let mgr = UpdateManager(apiBase: apiBase, session: Self.stubSession(), defaults: defaults)
+        _ = await mgr.check(channel: .stable, manual: true)
+        XCTAssertTrue(defaults.bool(forKey: UpdateManager.mandatoryPendingKey))
+
+        // An optional newer build (minBuild already satisfied) clears the flag.
+        StubProtocol.routes["/dl/latest.json"] =
+            sampleManifestJSON(build: UpdateManager.currentBuild() + 10, minBuild: 0)
+        _ = await mgr.check(channel: .stable, manual: true)
+        XCTAssertFalse(defaults.bool(forKey: UpdateManager.mandatoryPendingKey))
+    }
+
+    func testCheckClearsMandatoryPendingWhenUpToDate() async {
+        let suite = "shadowtype.tests.updatemgr.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: UpdateManager.mandatoryPendingKey)
+
+        let assetURL = "https://github.test/dl/latest.json"
+        StubProtocol.routes = [
+            "/repos/dario-valles/shadowtype/releases/latest": singleReleaseJSON(assetURL: assetURL),
+            "/dl/latest.json": sampleManifestJSON(build: 0),   // never newer → up to date
+        ]
+        let mgr = UpdateManager(apiBase: apiBase, session: Self.stubSession(), defaults: defaults)
+        _ = await mgr.check(channel: .stable, manual: true)
+        XCTAssertFalse(defaults.bool(forKey: UpdateManager.mandatoryPendingKey))
+    }
+
+    // MARK: - Failure state carries a human-readable message
+
+    func testFailedDownloadStateCarriesMessage() async {
+        let mgr = UpdateManager(apiBase: apiBase, session: Self.stubSession())
+        // Non-https URL is rejected before any network I/O.
+        let manifest = UpdateManifest(version: "9.9.9", build: UpdateManager.currentBuild() + 1,
+                                      channel: "stable", url: "ftp://github.test/x.zip",
+                                      sha256: String(repeating: "a", count: 64), minBuild: 0, notes: "")
+        await mgr.downloadAndStage(manifest)
+        guard case .failed(let message) = mgr.state else {
+            return XCTFail("expected .failed, got \(mgr.state)")
+        }
+        XCTAssertFalse(message.isEmpty)
+    }
+
     // MARK: - TCC continuity guard (isSignatureContinuous)
 
     func testSignatureContinuityAllowsSameIdentity() {

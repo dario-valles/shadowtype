@@ -37,6 +37,7 @@ final class SelectionRewriteController: NSObject {
     // the HUD-hint wait and a stuck generation. Installed for the whole active flow, torn down on exit.
     private var mouseMonitor: Any?
     private var workspaceObserver: NSObjectProtocol?
+    private var spaceObserver: NSObjectProtocol?
     private var watchdog: Timer?
     private static let watchdogSeconds: TimeInterval = 30
 
@@ -58,6 +59,11 @@ final class SelectionRewriteController: NSObject {
         keyTap.onUndo = { [weak self] in self?.undo() }
         keyTap.onRegenerate = { [weak self] in self?.regenerate() }
         keyTap.onOtherKey = { [weak self] in self?.keep() }
+        // ⌘R is only OURS on native sessions (the HUD offers "⌘R redo" there). On web sessions the
+        // HUD never offers redo, so swallowing ⌘R would dead-key the browser's reload — let the tap
+        // treat it as "other key" (commit + pass through) instead. While generating (no session yet)
+        // keep swallowing: regenerate() no-ops and Reload mid-rewrite would yank the field away.
+        keyTap.shouldSwallowRegenerate = { [weak self] in self?.session?.native ?? true }
     }
 
     // MARK: - Entry (global hotkey)
@@ -115,6 +121,12 @@ final class SelectionRewriteController: NSObject {
     // MARK: - Generate + place
 
     private func run(action: RewriteAction, selection sel: EditContextTracker.CurrentSelection) {
+        // A generic "Couldn't rewrite" when the model simply hasn't finished loading reads like a
+        // bug; tell the user the real reason and bail before arming any flow state.
+        guard coordinator.isEngineLoaded else {
+            toast("Model not ready — still loading")
+            return
+        }
         coordinator.rewriteActive = true
         hud.showWorking(at: anchor)
         // Arm the key tap NOW, before the async decode — otherwise a Return pressed during "Rewriting…"
@@ -237,21 +249,29 @@ final class SelectionRewriteController: NSObject {
         coordinator.rewriteActive = false
     }
 
-    private func fail() {
+    private func fail(message: String = "Couldn't rewrite — try again") {
         keyTap.disarm()           // armed in run(); must come down on the failure path too
         removeDismissGuards()
         coordinator.rewriteActive = false
         session = nil
-        hud.showHint(at: anchor, text: "Couldn't rewrite — try again")
+        hud.showHint(at: anchor, text: message)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in self?.hud.hide() }
     }
 
     // Hard timeout backstop: started when generation begins so `rewriteActive` (which suppresses ALL
     // ghost completions) can never stay set if a decode hangs or every dismissal path is missed.
+    // No session yet means generation never finished — that's an error the user should hear about,
+    // not a silent keep() of nothing. With a session up (result showing), committing is correct.
     private func startWatchdog() {
         watchdog?.invalidate()
         watchdog = Timer.scheduledTimer(withTimeInterval: Self.watchdogSeconds, repeats: false) {
-            [weak self] _ in self?.keep()
+            [weak self] _ in
+            guard let self else { return }
+            if self.session == nil {
+                self.fail(message: "Rewrite timed out — try again")
+            } else {
+                self.keep()
+            }
         }
     }
 
@@ -269,11 +289,20 @@ final class SelectionRewriteController: NSObject {
                     [weak self] _ in self?.keep()
                 }
         }
+        // A Spaces switch (Ctrl-←/→, Mission Control) moves the user away without an app activation,
+        // leaving the HUD floating over the wrong Space's content. Treat it exactly like app switch.
+        if spaceObserver == nil {
+            spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) {
+                    [weak self] _ in self?.keep()
+                }
+        }
     }
 
     private func removeDismissGuards() {
         if let m = mouseMonitor { NSEvent.removeMonitor(m); mouseMonitor = nil }
         if let o = workspaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(o); workspaceObserver = nil }
+        if let o = spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(o); spaceObserver = nil }
         watchdog?.invalidate(); watchdog = nil
     }
 

@@ -121,7 +121,7 @@ final class StatusItemController: NSObject {
 
         enableItem.target = self
         enableItem.action = #selector(toggleEnabled)
-        enableItem.state = isEnabled ? .on : .off
+        setEnabled(isEnabled)   // sync title + checkmark with the initial enabled state
         menu.addItem(enableItem)
 
         menu.addItem(.separator())

@@ -3,6 +3,7 @@
 // flicker gate, prompt section budget, RTL detection, insertion strategy, insertion safety, and the
 // inference engine router scaffold. No AX/llama/AppKit runtime needed — runs under `swift test`.
 import XCTest
+import AppKit
 import CoreGraphics
 @testable import Shadowtype
 
@@ -29,6 +30,19 @@ final class CotabbyGrabsTests: XCTestCase {
         _ = s.stabilizedCaretHeight(18, focusSessionKey: 7)
         XCTAssertEqual(s.stabilizedCaretHeight(0, focusSessionKey: 7), 0)     // a bad poll can't pin the min to 0
         XCTAssertEqual(s.stabilizedCaretHeight(18, focusSessionKey: 7), 18)
+    }
+
+    func testStabilizerIgnoresImplausiblySmallReadings() {
+        // Plausibility floor: a sub-8pt caret height is AX noise (collapsed rect mid-relayout) — it
+        // passes through unchanged and must NOT lower the session minimum.
+        var s = GhostFontSizeStabilizer()
+        XCTAssertEqual(s.stabilizedCaretHeight(18, focusSessionKey: 9), 18)
+        XCTAssertEqual(s.stabilizedCaretHeight(5, focusSessionKey: 9), 5)     // noise passes through…
+        XCTAssertEqual(s.stabilizedCaretHeight(40, focusSessionKey: 9), 18)   // …but the min held at 18
+        // Exactly at the floor is a plausible tiny line and DOES participate.
+        XCTAssertEqual(s.stabilizedCaretHeight(GhostFontSizeStabilizer.minPlausibleCaretHeight,
+                                               focusSessionKey: 9), 8)
+        XCTAssertEqual(s.stabilizedCaretHeight(18, focusSessionKey: 9), 8)
     }
 
     // MARK: - #2 OverlayStabilityGate
@@ -181,6 +195,34 @@ final class CotabbyGrabsTests: XCTestCase {
             totalChars: 200)
         XCTAssertTrue(p.hasSuffix("Text:\nmy real sentence so far"))   // caret text never starved
         XCTAssertLessThanOrEqual(p.count, 260)                         // budget + framing overhead
+    }
+
+    // MARK: - OverlayRenderer pure geometry/colors (RTL clamp + appearance-adaptive palette)
+
+    func testRTLOriginClampsToScreenLeftEdge() {
+        // Right edge anchored at the caret when it fits…
+        XCTAssertEqual(OverlayRenderer.rtlOriginX(caretMinX: 500, width: 120, screenMinX: 0), 380)
+        // …clamped to the screen's minX when the panel would slide off the left bezel.
+        XCTAssertEqual(OverlayRenderer.rtlOriginX(caretMinX: 80, width: 120, screenMinX: 0), 0)
+        // Multi-monitor: a screen left of the main one has a negative minX — clamp to THAT edge.
+        XCTAssertEqual(OverlayRenderer.rtlOriginX(caretMinX: -1400, width: 200, screenMinX: -1440), -1440)
+    }
+
+    func testAdaptiveOverlayColors() {
+        // Light-mode values are exactly the historical hardcoded ones (no visual change for light users).
+        XCTAssertEqual(OverlayRenderer.ghostTextColor(dark: false),
+                       NSColor(white: 0.55, alpha: 0.6))
+        XCTAssertEqual(OverlayRenderer.hintBackgroundColor(dark: false), NSColor(white: 0.5, alpha: 0.10))
+        XCTAssertEqual(OverlayRenderer.hintBorderColor(dark: false), NSColor(white: 0.5, alpha: 0.38))
+        XCTAssertEqual(OverlayRenderer.hintLabelColor(dark: false), NSColor(white: 0.42, alpha: 0.95))
+        // Dark variants are LIGHTER (legible on dark backgrounds) at comparable alpha.
+        XCTAssertGreaterThan(OverlayRenderer.ghostTextColor(dark: true).whiteComponent,
+                             OverlayRenderer.ghostTextColor(dark: false).whiteComponent)
+        XCTAssertEqual(OverlayRenderer.ghostTextColor(dark: true).alphaComponent, 0.6)
+        XCTAssertGreaterThan(OverlayRenderer.hintLabelColor(dark: true).whiteComponent,
+                             OverlayRenderer.hintLabelColor(dark: false).whiteComponent)
+        XCTAssertGreaterThan(OverlayRenderer.hintBorderColor(dark: true).whiteComponent,
+                             OverlayRenderer.hintBorderColor(dark: false).whiteComponent)
     }
 
     // MARK: - #11 TextDirectionDetector

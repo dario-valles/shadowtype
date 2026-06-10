@@ -19,8 +19,11 @@
 // on the same session still propagates after `requiredConsecutiveMisses` so real focus-loss isn't
 // perceptibly delayed.
 struct FocusCapabilityFlickerGate {
-    // Consecutive no-context reads on the same focus session before the gate releases the teardown.
-    // Two is enough to swallow the single-poll flicker without delaying real focus loss perceptibly.
+    // RELEASE THRESHOLD: the gate tears down on the Nth consecutive no-context read of the same focus
+    // session, i.e. it swallows exactly N-1 bad reads. At 2 it suppresses the single-poll flicker (the
+    // observed Catalyst failure mode) and releases on the 2nd miss. Deliberately NOT higher: each
+    // "read" is a full fire() after a typing pause, so every extra swallowed miss keeps a stale ghost
+    // over a genuinely dead field for one more pause cycle.
     static let requiredConsecutiveMisses = 2
 
     enum Decision: Equatable {

@@ -26,7 +26,11 @@ final class BadgeRenderer {
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: size, height: size),
                         styleMask: [.nonactivatingPanel, .borderless],
                         backing: .buffered, defer: false)
-        panel.level = .statusBar
+        // floating+1, NOT .statusBar: this panel is CLICKABLE (unlike the click-through ghost), and at
+        // .statusBar level it can sit invisible-but-clickable behind the system menu-bar icons,
+        // swallowing clicks meant for them. floating+1 keeps it above normal windows and the ghost's
+        // anchor field while staying below the system status bar layer.
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true                          // a floating chip, unlike the shadowless ghost

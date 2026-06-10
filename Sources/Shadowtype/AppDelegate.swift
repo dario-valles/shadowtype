@@ -84,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let instructionStore = InstructionStore.shared
     private var lengthObserver: NSObjectProtocol?
     private var selectModelObserver: NSObjectProtocol?
+    private var rewriteHotkeyObserver: NSObjectProtocol?
     // FR-LM-1: the currently-loaded model, tracked so a failed live swap can fall back to it.
     private var currentModelURL: URL?
 
@@ -169,7 +170,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Auto-update: a silent launch check (gated by the "Automatically check for updates" toggle).
         // The repeating timer is set up by syncToggles (already run inside wireCoordinator above).
-        if autoCheckUpdatesEnabled {
+        // A pending MANDATORY update bypasses the toggle: the previous session saw a min_build force
+        // and the user deferred ("Later") or quit before staging — re-check immediately so the
+        // install prompt rides the start of this session, not minutes in.
+        if autoCheckUpdatesEnabled || UpdateManager.hasPendingMandatoryUpdate {
             Task { @MainActor in
                 await UpdateManager.shared.checkThenStage(channel: self.currentUpdateChannel(), manual: false)
             }
@@ -249,8 +253,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                            domain: self.contextTracker.frontmostDomainHost())
         }
         rewriteHotKey.onPress = { [weak self] in self?.rewriteController.trigger() }
-        rewriteHotKey.start(keyCode: UInt32(kVK_ANSI_K),
-                            modifiers: UInt32(cmdKey | optionKey), id: 2)
+        registerRewriteHotkey()
+        // The General pane's "Rewrite shortcut" picker posts this after writing the chord key —
+        // GlobalHotKey.start() tears down the old registration first, so a single call rebinds.
+        rewriteHotkeyObserver = NotificationCenter.default.addObserver(
+            forName: Notification.Name("shadowtypeRewriteHotkeyChanged"), object: nil, queue: .main
+        ) { [weak self] _ in self?.registerRewriteHotkey() }
         // TabSwallowTap.start() registers the active tap but it only swallows while a suggestion
         // is visible (gated on setSuggestionVisible, driven by onSuggestionVisibleChanged below).
         tabSwallow.start()
@@ -407,9 +415,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !localAPI.isRunning else { return }
         _ = APIKeyStore.ensureAPIKey()   // create the bearer key on first enable so the UI can show it
         if localAPI.start() != nil {
+            UserDefaults.standard.removeObject(forKey: "shadowtype.localAPI.lastError")
             NotificationCenter.default.post(name: .shadowtypeLocalAPIDidChange, object: nil)
             Diag.log("localAPI: started on port \(localAPI.boundPort ?? -1)")
         } else {
+            // Surface the failure to the settings pane (toggle stays ON but nothing bound — without
+            // this the user flips the switch and the API silently never starts).
+            UserDefaults.standard.set(localAPI.lastError ?? "Could not start the local API server.",
+                                      forKey: "shadowtype.localAPI.lastError")
+            NotificationCenter.default.post(name: .shadowtypeLocalAPIDidChange, object: nil)
             Diag.log("localAPI: start failed (\(localAPI.lastError ?? "unknown"))")
         }
         refreshLocalAPIMenu()
@@ -607,7 +621,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Mark the engine busy for the WHOLE swap (download + reload) so the idle-unload timer can't tear
         // the model down mid-swap (and a pending idle-reload won't clobber it). Reset on every exit path.
         modelReloadInFlight = true
+        // Stream download progress to the Models pane (its row renders a determinate bar when the
+        // fraction is known). DownloadDelegate calls this off-main; observers render UI, so hop.
+        modelManager.onDownloadProgress = { fraction in
+            DispatchQueue.main.async {
+                var info: [String: Any] = ["id": entry.id]
+                if let fraction { info["fraction"] = fraction }
+                NotificationCenter.default.post(
+                    name: Notification.Name("shadowtypeModelDownloadProgress"), object: nil, userInfo: info)
+            }
+        }
         Task {
+            defer { self.modelManager.onDownloadProgress = nil }
             do {
                 let url = try await modelManager.ensureModel(entry)
                 // Hand the actual unload/load to the coordinator, which serializes it on the inference
@@ -640,11 +665,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Reset the busy flag AND post on main, matching the success path above — the catch
                 // body runs on a cooperative thread, so the off-main post would deliver to observers
                 // off-main (AppKit-touching ones would SIGTRAP).
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 await MainActor.run {
                     self.modelReloadInFlight = false
                     NotificationCenter.default.post(
                         name: .shadowtypeModelDidChange, object: nil,
-                        userInfo: ["id": entry.id, "ok": false])
+                        userInfo: ["id": entry.id, "ok": false, "error": message])
                 }
             }
         }
@@ -683,7 +709,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard Date().timeIntervalSince(lastInputAt) >= Double(idleUnloadMinutes) * 60 else { return }
         coordinator.unloadModel()
         modelIdleUnloaded = true
-        statusItem.setModelName("idle — sleeps to save memory")
+        statusItem.setModelName("idle — wakes on your next keystroke")
         Diag.log("idle: unloaded model after \(idleUnloadMinutes) min")
     }
 
@@ -696,7 +722,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let ocrSettingObserver {
             NotificationCenter.default.removeObserver(ocrSettingObserver)
         }
-        for obs in [lengthObserver, selectModelObserver, appSettingsObserver].compactMap({ $0 }) {
+        for obs in [lengthObserver, selectModelObserver, appSettingsObserver, rewriteHotkeyObserver].compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(obs)
         }
         idleTimer?.invalidate()
@@ -853,7 +879,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
-        let hide = NSMenuItem(title: "Hide this Button", action: #selector(hideBadgeButton), keyEquivalent: "")
+        let hide = NSMenuItem(title: "Hide this Button (restore in Settings → General)",
+                              action: #selector(hideBadgeButton), keyEquivalent: "")
         hide.target = self
         menu.addItem(hide)
 
@@ -939,6 +966,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.post(name: .shadowtypeAppRulesDidChange, object: nil)
         refreshBadge()
         rescheduleReEnableTimer()
+    }
+
+    // Map the persisted chord choice (General pane picker) onto Carbon keycode+modifiers and
+    // (re)register. ⌥⌘K stays the default; alternates exist because it collides with Apple
+    // Writing Tools in some first-party apps on macOS 15+.
+    private func registerRewriteHotkey() {
+        let chord = UserDefaults.standard.string(forKey: "shadowtype.rewriteHotkeyChord") ?? "opt-cmd-k"
+        let keyCode: UInt32
+        let modifiers: UInt32
+        switch chord {
+        case "ctrl-cmd-k": keyCode = UInt32(kVK_ANSI_K); modifiers = UInt32(cmdKey | controlKey)
+        case "opt-cmd-j":  keyCode = UInt32(kVK_ANSI_J); modifiers = UInt32(cmdKey | optionKey)
+        default:           keyCode = UInt32(kVK_ANSI_K); modifiers = UInt32(cmdKey | optionKey)
+        }
+        if !rewriteHotKey.start(keyCode: keyCode, modifiers: modifiers, id: 2) {
+            // Registration failures are otherwise invisible — record for the settings pane.
+            UserDefaults.standard.set("Couldn't register the rewrite shortcut (in use by another app).",
+                                      forKey: "shadowtype.rewriteHotkey.lastError")
+            Diag.log("rewriteHotkey: registration failed for \(chord) (status \(rewriteHotKey.lastStatus))")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "shadowtype.rewriteHotkey.lastError")
+        }
     }
 
     @objc private func hideBadgeButton() {

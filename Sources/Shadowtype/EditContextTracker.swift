@@ -400,6 +400,22 @@ final class EditContextTracker {
         return isSecure(element)
     }
 
+    // IME composition probe (best-effort): a non-empty "AXMarkedTextRange" on the focused element means
+    // the user is mid-composition (CJK/preedit), where an inline ghost fights the candidate UI and an
+    // accept would corrupt the composition buffer. There is no public kAX… constant for it; Cocoa text
+    // views (NSTextView / NSTextInputClient hosts) expose the attribute by this name. Known limitation:
+    // many hosts (Chromium/Electron web fields, Catalyst) don't surface marked text through AX at all —
+    // there this returns false and callers behave as today (fail-open). Single AX call, no descend.
+    func hasMarkedText() -> Bool {
+        guard let element = currentFocusedElement() else { return false }
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, "AXMarkedTextRange" as CFString, &ref) == .success,
+              let v = ref, CFGetTypeID(v) == AXValueGetTypeID() else { return false }
+        var range = CFRange()
+        guard AXValueGetValue(v as! AXValue, .cfRange, &range) else { return false }
+        return range.length > 0
+    }
+
     // FR-IN-2: the live focused AX element, for direct-AX text injection at accept time. nil when
     // nothing editable is focused or AX is untrusted (Injector then falls back to Unicode posting).
     // Injection into secure fields is gated upstream — the coordinator never shows, and so never

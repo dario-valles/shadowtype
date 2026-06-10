@@ -26,6 +26,10 @@ struct HFImportSheet: View {
     @State private var status: String = ""
     @State private var isError = false
     @State private var progress: Double? = nil
+    // The in-flight download, kept so Cancel can actually abort the transfer (cooperative
+    // cancellation propagates into ModelManager's URLSession download) instead of letting it
+    // finish + register behind the dismissed sheet.
+    @State private var downloadTask: Task<Void, Never>? = nil
 
     private enum Phase {
         case input, resolving, pickingFile, downloading, done
@@ -92,6 +96,9 @@ struct HFImportSheet: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("\(siblings.count) GGUF file\(siblings.count == 1 ? "" : "s") found in this repo. Pick one to import:")
                 .font(.callout)
+            Text("Q4_K_M is the recommended balance of quality and size.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
                     ForEach(siblings, id: \.filename) { s in
@@ -149,7 +156,10 @@ struct HFImportSheet: View {
 
     private var buttonBar: some View {
         HStack {
-            Button("Cancel") { dismiss() }
+            Button("Cancel") {
+                downloadTask?.cancel()
+                dismiss()
+            }
             Spacer()
             switch phase {
             case .input, .resolving:
@@ -195,8 +205,11 @@ struct HFImportSheet: View {
                 DispatchQueue.main.async {
                     switch result {
                     case .success(let list):
-                        siblings = list
-                        selectedSibling = list.first
+                        // Smallest-first ordering + Q4_K_M default (the recommended quant) so the
+                        // happy path is "paste URL, Resolve, Import" with no scrolling.
+                        let sorted = HFResolver.sortedBySizeAscending(list)
+                        siblings = sorted
+                        selectedSibling = HFResolver.preferredImportFile(in: sorted)
                         phase = .pickingFile
                         status = ""
                     case .failure(let err):
@@ -229,7 +242,7 @@ struct HFImportSheet: View {
         status = "Downloading \(filename)…"
         progress = nil
 
-        Task {
+        downloadTask = Task {
             let manager = ModelManager()
             manager.onDownloadProgress = { p in
                 DispatchQueue.main.async { progress = p }
@@ -244,6 +257,13 @@ struct HFImportSheet: View {
                 let target = importsDir.appendingPathComponent(filename)
                 let final = try await manager.downloadAuthenticated(
                     from: downloadURL, to: target, token: usedToken)
+
+                // Cancelled while (or right after) downloading: do NOT register the import — the
+                // user dismissed the sheet. Clean up the file so a half-meant import doesn't linger.
+                if Task.isCancelled {
+                    try? FileManager.default.removeItem(at: final)
+                    return
+                }
 
                 // Approximate RAM ≈ file size for quantized GGUFs.
                 let bytes = (try? FileManager.default.attributesOfItem(atPath: final.path)[.size] as? NSNumber)?.int64Value ?? 0
@@ -264,6 +284,9 @@ struct HFImportSheet: View {
                     onImported(entry)
                     dismiss()
                 }
+            } catch is CancellationError {
+                // User hit Cancel — the sheet is already dismissing; nothing to report.
+                return
             } catch {
                 await MainActor.run {
                     phase = .input

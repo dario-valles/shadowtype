@@ -148,7 +148,7 @@ final class AccessibilityNudgeController {
         self.panel = panel
 
         // Auto-dismiss so a stale banner doesn't linger after the user moved on.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 18) { [weak self, weak panel] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self, weak panel] in
             if self?.panel === panel { self?.dismissPanel() }
         }
     }
@@ -303,7 +303,7 @@ final class SmartComposeNudgeController {
         panel.orderFrontRegardless()
         self.panel = panel
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 18) { [weak self, weak panel] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self, weak panel] in
             if self?.panel === panel { self?.dismissPanel() }
         }
     }
@@ -374,6 +374,9 @@ private struct AXNudgeBanner: View {
                 HStack(spacing: 8) {
                     Button("How to enable", action: onHowTo)
                         .buttonStyle(.borderedProminent).controlSize(.small)
+                    // "Later" hides for this session only; "Don't show again" persists the dismissal.
+                    Button("Later", action: onClose)
+                        .buttonStyle(.bordered).controlSize(.small)
                     Button("Don't show again", action: onDismiss)
                         .buttonStyle(.bordered).controlSize(.small)
                 }

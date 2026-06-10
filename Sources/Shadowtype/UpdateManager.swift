@@ -57,18 +57,22 @@ final class UpdateManager: ObservableObject {
 
     private let apiBase: URL                  // https://api.github.com/repos/<owner>/<repo>
     private let session: URLSession
+    private let defaults: UserDefaults
     private var stagedAppURL: URL?            // unzipped, verified bundle waiting to be swapped in
 
     // Production: the public repo's GitHub API base. Tests inject a stub origin/session.
     private init() {
         self.apiBase = UpdateManager.defaultAPIBase
         self.session = .shared
+        self.defaults = .standard
     }
 
-    /// Test seam — inject a stub GitHub-API base + session so the check can be exercised hermetically.
-    init(apiBase: URL, session: URLSession = .shared) {
+    /// Test seam — inject a stub GitHub-API base + session (+ defaults) so the check can be
+    /// exercised hermetically.
+    init(apiBase: URL, session: URLSession = .shared, defaults: UserDefaults = .standard) {
         self.apiBase = apiBase
         self.session = session
+        self.defaults = defaults
     }
 
     /// The public repo that hosts releases (per the release/update contract).
@@ -76,6 +80,15 @@ final class UpdateManager: ObservableObject {
     static let defaultAPIBase = URL(string: "https://api.github.com/repos/\(repoSlug)")!
     /// GitHub's API requires a User-Agent on every request.
     static let userAgent = "Shadowtype-Updater"
+
+    /// Persisted across launches: a mandatory (minBuild-forced) update was detected but not yet
+    /// installed. AppDelegate reads `hasPendingMandatoryUpdate` at launch to prompt synchronously
+    /// instead of waiting minutes for the first periodic check. Set/cleared by check() (mandatory vs
+    /// optional/up-to-date) and cleared by installAndRelaunch() once the swap is handed off.
+    static let mandatoryPendingKey = "shadowtype.update.mandatoryPending"
+    static var hasPendingMandatoryUpdate: Bool {
+        UserDefaults.standard.bool(forKey: mandatoryPendingKey)
+    }
 
     // MARK: - Current build
 
@@ -102,12 +115,14 @@ final class UpdateManager: ObservableObject {
                   manifest.build > UpdateManager.currentBuild() else {
                 state = manual ? .upToDate : .idle
                 clearPending()
+                defaults.set(false, forKey: Self.mandatoryPendingKey)
                 return nil
             }
             // A newer build exists — but DON'T reveal the menu/"install" affordance yet: it isn't
             // installable until downloadAndStage succeeds (post .shadowtypeUpdateAvailable there).
             pendingManifest = manifest
             state = .available(manifest)
+            defaults.set(isMandatory(manifest), forKey: Self.mandatoryPendingKey)
             return manifest
         } catch {
             state = manual ? .failed(Self.message(for: error)) : .idle
@@ -341,6 +356,9 @@ final class UpdateManager: ObservableObject {
             // can't break out of quoting or be re-evaluated by the shell.
             p.arguments = [script, String(ProcessInfo.processInfo.processIdentifier), staged.path, installPath]
             try p.run()              // detached; survives our termination
+            // The swap is handed off — the mandatory update is no longer pending. (If the swap
+            // somehow fails post-termination, the next launch check re-sets the flag.)
+            defaults.set(false, forKey: Self.mandatoryPendingKey)
             NSApp.terminate(nil)
         } catch {
             state = .failed(Self.message(for: error))

@@ -124,3 +124,46 @@ final class DiagRedactionTests: XCTestCase {
                        "non-secret strings must round-trip unchanged")
     }
 }
+
+// MARK: - Import-picker helpers (sort + default selection)
+
+extension HFResolverTests {
+    private func sib(_ name: String, _ size: Int64?) -> HFResolver.Sibling {
+        HFResolver.Sibling(filename: name, sizeBytes: size,
+                           downloadURL: URL(string: "https://huggingface.co/o/r/resolve/main/\(name)")!)
+    }
+
+    func testSortedBySizeAscending() {
+        let sorted = HFResolver.sortedBySizeAscending([
+            sib("big.Q8_0.gguf", 8_000), sib("small.Q2_K.gguf", 2_000), sib("mid.Q4_K_M.gguf", 4_000),
+        ])
+        XCTAssertEqual(sorted.map(\.filename),
+                       ["small.Q2_K.gguf", "mid.Q4_K_M.gguf", "big.Q8_0.gguf"])
+    }
+
+    func testSortedBySizeUnknownSizesSinkToBottomAndOrderByName() {
+        let sorted = HFResolver.sortedBySizeAscending([
+            sib("z-unknown.gguf", nil), sib("a-unknown.gguf", nil), sib("known.gguf", 1_000),
+        ])
+        XCTAssertEqual(sorted.map(\.filename),
+                       ["known.gguf", "a-unknown.gguf", "z-unknown.gguf"])
+    }
+
+    func testSortedBySizeTiesBreakByFilename() {
+        let sorted = HFResolver.sortedBySizeAscending([sib("b.gguf", 100), sib("a.gguf", 100)])
+        XCTAssertEqual(sorted.map(\.filename), ["a.gguf", "b.gguf"])
+    }
+
+    func testPreferredImportFilePicksQ4KMCaseInsensitive() {
+        let list = [sib("model.Q2_K.gguf", 1), sib("model.q4_k_m.gguf", 2), sib("model.Q8_0.gguf", 3)]
+        XCTAssertEqual(HFResolver.preferredImportFile(in: list)?.filename, "model.q4_k_m.gguf")
+        let upper = [sib("model.Q2_K.gguf", 1), sib("Model.Q4_K_M.gguf", 2)]
+        XCTAssertEqual(HFResolver.preferredImportFile(in: upper)?.filename, "Model.Q4_K_M.gguf")
+    }
+
+    func testPreferredImportFileFallsBackToFirstWhenNoQ4KM() {
+        let list = [sib("model.Q2_K.gguf", 1), sib("model.Q8_0.gguf", 3)]
+        XCTAssertEqual(HFResolver.preferredImportFile(in: list)?.filename, "model.Q2_K.gguf")
+        XCTAssertNil(HFResolver.preferredImportFile(in: []))
+    }
+}

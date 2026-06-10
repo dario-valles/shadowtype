@@ -22,6 +22,11 @@ final class LocalAPIServer {
     static let portCandidates: [Int] = [5666, 5667, 5668, 5669, 5670]
     static let maxPendingDepth: Int = 4
 
+    // Human-readable all-ports-busy reason — surfaced verbatim in Settings, so phrase it for users.
+    static var allPortsBusyMessage: String {
+        "Ports \(portCandidates.first!)\u{2013}\(portCandidates.last!) are all in use"
+    }
+
     // The path matches what the MCP bridge looks for; keep them in sync.
     static var udsPath: String {
         let dir = (NSSearchPathForDirectoriesInDomains(.applicationSupportDirectory, .userDomainMask, true).first ?? NSHomeDirectory())
@@ -68,7 +73,9 @@ final class LocalAPIServer {
             }
         }
         guard boundPort != nil else {
-            lastError = "all TCP ports busy (\(Self.portCandidates.first!)\u{2013}\(Self.portCandidates.last!))"
+            // Leave state fully stopped: isRunning stays false, no FDs were kept, no accept sources
+            // started. Callers read `lastError` to tell the user why start() returned nil.
+            lastError = Self.allPortsBusyMessage
             return nil
         }
 
@@ -91,8 +98,9 @@ final class LocalAPIServer {
         tcpAcceptSource?.cancel(); tcpAcceptSource = nil
         udsAcceptSource?.cancel(); udsAcceptSource = nil
         if tcpFD >= 0 { close(tcpFD); tcpFD = -1 }
-        if udsFD >= 0 { close(udsFD); udsFD = -1 }
-        unlink(Self.udsPath)
+        // Only unlink the socket path if WE bound it — a server that never started (e.g. all ports
+        // busy) must not delete a live instance's UDS socket from its deinit.
+        if udsFD >= 0 { close(udsFD); udsFD = -1; unlink(Self.udsPath) }
         boundPort = nil
         NotificationCenter.default.removeObserver(self)
     }
