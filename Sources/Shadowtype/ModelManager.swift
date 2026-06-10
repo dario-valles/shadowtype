@@ -10,6 +10,7 @@ enum ModelManagerError: LocalizedError {
     case noDownloadedFile
     case checksumMismatch(expected: String, actual: String)
     case invalidModelFile(String)
+    case insufficientDiskSpace(neededGB: Double, availableGB: Double)
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +26,9 @@ enum ModelManagerError: LocalizedError {
             return "Model checksum mismatch (expected \(expected), got \(actual)). The file is corrupt or incomplete."
         case .invalidModelFile(let id):
             return "Downloaded model \(id) is not a valid GGUF file (corrupt, truncated, or not a model)."
+        case .insufficientDiskSpace(let neededGB, let availableGB):
+            return String(format: "Not enough disk space (need %.1f GB, %.1f GB available).",
+                          neededGB, availableGB)
         }
     }
 }
@@ -122,6 +126,10 @@ final class ModelManager {
         }
         try FileManager.default.createDirectory(at: modelsDirectory(),
                                                 withIntermediateDirectories: true)
+        // Disk-space preflight: fail fast with an actionable message instead of letting a multi-GB
+        // download die mid-flight (or fill the volume). Surfaces through the same error path as any
+        // other download failure (.shadowtypeModelDidChange userInfo["error"]).
+        try preflightDiskSpace(neededBytes: Int64(entry.downloadGB * 1e9))
         try await download(from: entry.url, to: destination)
 
         if let expected = entry.sha256 {
@@ -157,6 +165,26 @@ final class ModelManager {
         return actual.caseInsensitiveCompare(expected) == .orderedSame
     }
 
+    // MARK: - Disk-space preflight
+
+    /// Pure comparison, split out so it's unit-testable without touching the real volume.
+    /// Throws `.insufficientDiskSpace` with the human-facing GB figures when the download won't fit.
+    static func checkDiskSpace(neededBytes: Int64, availableBytes: Int64) throws {
+        guard availableBytes < neededBytes else { return }
+        throw ModelManagerError.insufficientDiskSpace(neededGB: Double(neededBytes) / 1e9,
+                                                      availableGB: Double(availableBytes) / 1e9)
+    }
+
+    /// Queries the models volume's `volumeAvailableCapacityForImportantUsage` and throws when the
+    /// expected download size won't fit. An unreadable capacity is treated as "unknown, proceed" —
+    /// the download itself will fail with a normal error if the disk really is full.
+    private func preflightDiskSpace(neededBytes: Int64) throws {
+        let dir = modelsDirectory()
+        guard let vals = try? dir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+              let available = vals.volumeAvailableCapacityForImportantUsage else { return }
+        try Self.checkDiskSpace(neededBytes: neededBytes, availableBytes: available)
+    }
+
     // MARK: - Paths
 
     private func modelsDirectory() -> URL {
@@ -177,6 +205,9 @@ final class ModelManager {
 
     private func download(from url: URL, to destination: URL,
                           authorization: String? = nil) async throws {
+        // Cooperative cancellation: a caller cancelling its Task (e.g. the HF import sheet's Cancel
+        // button) must abort the transfer instead of completing + registering the import.
+        try Task.checkCancellation()
         let delegate = DownloadDelegate(onProgress: onDownloadProgress)
         let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
@@ -201,6 +232,12 @@ final class ModelManager {
             try FileManager.default.moveItem(at: tempURL, to: destination)
         } catch let error as ModelManagerError {
             throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            // URLSession surfaces a cancelled Task as URLError(.cancelled); normalize so callers
+            // can distinguish a user cancel from a real failure.
+            throw CancellationError()
         } catch {
             // URLSession download resumes automatically from partial data on transient failures;
             // a thrown error here means the download could not complete.

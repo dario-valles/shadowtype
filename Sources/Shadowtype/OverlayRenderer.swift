@@ -37,19 +37,21 @@ final class OverlayRenderer {
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.clear.cgColor
 
-        textLayer.foregroundColor = NSColor(white: 0.55, alpha: 0.6).cgColor   // faint but readable gray
+        textLayer.foregroundColor = Self.ghostTextColor(dark: Self.isDarkAppearance()).cgColor
         textLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
         textLayer.anchorPoint = .zero
         textLayer.position = .zero
         applyFont(currentFont)
         view.layer?.addSublayer(textLayer)
 
-        // Keycap: a faint outlined key (hintBg) with a centered label (hintLabel). Tuned to read on the
-        // LIGHT backgrounds the gray ghost already assumes — a subtle gray fill + hairline outline so the
-        // key shape is legible without shouting. Hidden until show(showHint:).
+        // Keycap: a faint outlined key (hintBg) with a centered label (hintLabel) — a subtle fill +
+        // hairline outline so the key shape is legible without shouting. Colors are appearance-adaptive
+        // and re-resolved on every show() (see applyAdaptiveColors); these are just the initial values.
+        // Hidden until show(showHint:).
         let scale = NSScreen.main?.backingScaleFactor ?? 2
-        hintBg.backgroundColor = NSColor(white: 0.5, alpha: 0.10).cgColor
-        hintBg.borderColor = NSColor(white: 0.5, alpha: 0.38).cgColor
+        let dark = Self.isDarkAppearance()
+        hintBg.backgroundColor = Self.hintBackgroundColor(dark: dark).cgColor
+        hintBg.borderColor = Self.hintBorderColor(dark: dark).cgColor
         hintBg.borderWidth = 1
         hintBg.cornerRadius = 5
         hintBg.contentsScale = scale
@@ -57,7 +59,7 @@ final class OverlayRenderer {
         hintBg.isHidden = true
         view.layer?.addSublayer(hintBg)
 
-        hintLabel.foregroundColor = NSColor(white: 0.42, alpha: 0.95).cgColor
+        hintLabel.foregroundColor = Self.hintLabelColor(dark: dark).cgColor
         hintLabel.alignmentMode = .center
         hintLabel.contentsScale = scale
         hintLabel.anchorPoint = .zero
@@ -65,6 +67,46 @@ final class OverlayRenderer {
         view.layer?.addSublayer(hintLabel)
 
         panel.contentView = view
+    }
+
+    // MARK: - Appearance-adaptive colors
+    // The overlay panel is borderless + clear, so system dynamic colors would resolve against no real
+    // background — pick explicit per-appearance values instead. Pure (testable); the dark variants
+    // lighten text/borders so the ghost and keycap stay legible on dark host backgrounds, while the
+    // light-mode values are exactly the pre-adaptive ones.
+
+    // Faint but readable gray for the ghost text.
+    static func ghostTextColor(dark: Bool) -> NSColor {
+        dark ? NSColor(white: 0.70, alpha: 0.6) : NSColor(white: 0.55, alpha: 0.6)
+    }
+
+    static func hintBackgroundColor(dark: Bool) -> NSColor {
+        dark ? NSColor(white: 0.85, alpha: 0.12) : NSColor(white: 0.5, alpha: 0.10)
+    }
+
+    static func hintBorderColor(dark: Bool) -> NSColor {
+        dark ? NSColor(white: 0.85, alpha: 0.40) : NSColor(white: 0.5, alpha: 0.38)
+    }
+
+    static func hintLabelColor(dark: Bool) -> NSColor {
+        dark ? NSColor(white: 0.80, alpha: 0.95) : NSColor(white: 0.42, alpha: 0.95)
+    }
+
+    // Effective system appearance at resolve time. NSApp is nil under `swift test` (no app instance);
+    // fall back to light, matching the historical hardcoded colors.
+    private static func isDarkAppearance() -> Bool {
+        guard let appearance = NSApp?.effectiveAppearance else { return false }
+        return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
+    // Re-resolve the adaptive layer colors. Called on each show() so a light/dark switch takes effect
+    // on the next ghost without a relaunch (the panel never gets viewDidChangeEffectiveAppearance).
+    private func applyAdaptiveColors() {
+        let dark = Self.isDarkAppearance()
+        textLayer.foregroundColor = Self.ghostTextColor(dark: dark).cgColor
+        hintBg.backgroundColor = Self.hintBackgroundColor(dark: dark).cgColor
+        hintBg.borderColor = Self.hintBorderColor(dark: dark).cgColor
+        hintLabel.foregroundColor = Self.hintLabelColor(dark: dark).cgColor
     }
 
     // Keycap font tracks the ghost size but stays compact and never larger than the host text.
@@ -93,6 +135,7 @@ final class OverlayRenderer {
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        applyAdaptiveColors()   // re-resolve per show so a light/dark switch takes effect
         textLayer.string = display
         textLayer.opacity = Float(max(0, min(1, opacity)))
 
@@ -150,6 +193,11 @@ final class OverlayRenderer {
         panel.orderOut(nil)
     }
 
+    // Pure geometry for the RTL anchor: right edge at the caret, clamped to the screen's left edge.
+    static func rtlOriginX(caretMinX: CGFloat, width: CGFloat, screenMinX: CGFloat) -> CGFloat {
+        max(screenMinX, caretMinX - width)
+    }
+
     // Cap visible length so a runaway suggestion can't produce a 700px-wide panel; append an ellipsis.
     static func truncated(_ text: String, max: Int) -> String {
         guard text.count > max, max > 0 else { return text }
@@ -169,8 +217,19 @@ final class OverlayRenderer {
         }
         // caretRect.maxY is the caret baseline area; AppKit windows are bottom-left origin.
         // #11: in a right-to-left field the continuation flows leftward, so anchor the panel's RIGHT
-        // edge at the caret (origin shifted left by the panel width) instead of its left edge.
-        let x = rtl ? caretRect.minX - width : caretRect.minX
+        // edge at the caret (origin shifted left by the panel width) instead of its left edge — clamped
+        // to the caret's screen so a wide ghost near the left bezel can't slide off-screen (it then
+        // overlaps the caret's left side instead of disappearing). Screen resolved by containment of
+        // the caret point, the same way show() resolves the backing scale.
+        let x: CGFloat
+        if rtl {
+            let screen = NSScreen.screens
+                .first { $0.frame.contains(CGPoint(x: caretRect.minX, y: caretRect.maxY)) }?.frame
+                ?? NSScreen.main?.frame ?? .zero
+            x = Self.rtlOriginX(caretMinX: caretRect.minX, width: width, screenMinX: screen.minX)
+        } else {
+            x = caretRect.minX
+        }
         return CGPoint(x: x, y: caretRect.maxY - height)
     }
 }

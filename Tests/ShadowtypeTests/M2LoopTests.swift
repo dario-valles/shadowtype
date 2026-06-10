@@ -270,7 +270,22 @@ final class M2LoopTests: XCTestCase {
     }
 
     func testSanitizerRemovesMarkdownEmphasis() {
-        XCTAssertEqual(CompletionCoordinator.sanitizedSuggestion("**bold** and `code`"), "bold and code")
+        // `**` always stripped; the BALANCED backtick pair is inline code and survives.
+        XCTAssertEqual(CompletionCoordinator.sanitizedSuggestion("**bold** and `code`"), "bold and `code`")
+    }
+
+    func testSanitizerBacktickPairing() {
+        // Balanced pairs = inline code the user plausibly wants — kept verbatim.
+        XCTAssertEqual(CompletionCoordinator.sanitizedSuggestion("run `make test` to verify"),
+                       "run `make test` to verify")
+        XCTAssertEqual(CompletionCoordinator.sanitizedSuggestion("`a` and `b`"), "`a` and `b`")
+        // Odd count = a stray markup tick (or a pair still streaming in) — stripped.
+        XCTAssertEqual(CompletionCoordinator.sanitizedSuggestion("stray ` tick"), "stray  tick")
+        XCTAssertEqual(CompletionCoordinator.sanitizedSuggestion("run `make test` plus ` stray"),
+                       "run make test plus  stray")
+        // Idempotent either way (the post-accept remainder re-render runs the sanitizer again).
+        let balanced = CompletionCoordinator.sanitizedSuggestion("keep `this`")
+        XCTAssertEqual(CompletionCoordinator.sanitizedSuggestion(balanced), balanced)
     }
 
     func testSanitizerIsIdempotent() {

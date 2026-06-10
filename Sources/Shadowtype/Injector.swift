@@ -267,11 +267,15 @@ final class Injector {
 
         // Restore the user's clipboard after the paste has been delivered. The session-tap events are
         // queued FIFO ahead of this main-thread hop, so a short delay keeps us from clobbering the
-        // pasteboard before the host reads it. Residual race: a host that reads the pasteboard later than
-        // this delay would see the restored contents — unavoidable with synthetic paste, mitigated by the
-        // delay; the changeCount guard prevents stomping a NEWER user copy. Restoring [] (nothing was
-        // saved) clears our completion text rather than stranding it on the clipboard.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        // pasteboard before the host reads it. 350 ms (was 200): slow Electron/web hosts service the
+        // Cmd-V on their renderer loop well after the event lands, and a 200 ms restore raced them —
+        // the host then pasted the RESTORED clipboard and the accepted text was lost. Tradeoff: the
+        // longer delay widens the window where the user's clipboard briefly holds our completion text;
+        // the changeCount guard below still protects any NEWER copy they make meanwhile, and there is
+        // no general way to detect that the host actually consumed the paste. Residual race: a host
+        // that reads even later sees the restored contents — unavoidable with synthetic paste.
+        // Restoring [] (nothing was saved) clears our completion text rather than stranding it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
             guard pb.changeCount == ourChangeCount else { return }   // user/app copied since: leave it
             Self.restorePasteboard(pb, items: savedItems)
         }

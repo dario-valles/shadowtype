@@ -265,7 +265,9 @@ final class CompletionCoordinator {
     private var activePrefix: String = ""
     // Memo for applyGlueGuard: renderSuggestion runs on every streamed token snapshot, but for a fixed
     // prefix the trailing word and the suggestion's leading glue run are stable — so the language detect
-    // + two spell lookups should run once per generation, not per token. Keyed on (prefix, glue run).
+    // + two spell lookups should run once per generation, not per token. Keyed on (prefix, glue run,
+    // first 24 chars of the suggestion) — the suggestion slice disambiguates two different suggestions
+    // that share a prefix + leading-letter run (e.g. both space-leading).
     private var glueGuardMemoKey: String?
     private var glueGuardMemoResult: String?
     private var suggestionText: String = ""
@@ -570,6 +572,11 @@ final class CompletionCoordinator {
         // FR-KC-4 / disabled-app+domain gate: never suggest in a secure field or a suppressed
         // app/domain (FR-PA-1/2). AppRules default is on everywhere; nil rules == on everywhere.
         if context.isSecureField() { Diag.log("fire: skip secureField"); clearSuggestion(); return }
+        // IME composition guard: while marked (preedit) text is live — CJK composition — never fire,
+        // and clear any visible ghost (it overlaps the candidate window and an accept would splice into
+        // the composition buffer). Best-effort single AX read; hosts that don't expose AXMarkedTextRange
+        // return false and behave exactly as before (see EditContextTracker.hasMarkedText).
+        if context.hasMarkedText() { Diag.log("fire: skip markedText (IME composing)"); clearSuggestion(); return }
         if let appRules, !appRules.isEnabled(bundleId: context.frontmostBundleId,
                                              domain: context.frontmostDomainHost()) {
             Diag.log("fire: skip disabledApp/domain \(context.frontmostBundleId ?? "?")"); clearSuggestion(); return
@@ -1094,6 +1101,11 @@ final class CompletionCoordinator {
     // happened and a lazy reload is needed before the next suggestion.
     var isModelLoaded: Bool { engine.isLoaded }
 
+    // CONTRACT: exact name `isEngineLoaded` — another agent's code (rewrite/menu guards, see the
+    // engine.isLoaded gate in rewrite()) compiles against this property. Whether the inference engine
+    // is loaded and ready to generate. Alias of isModelLoaded; keep both stable.
+    var isEngineLoaded: Bool { engine.isLoaded }
+
     // MARK: - Accept (FR §M4 — Tab/word accept -> Injector)
 
     // Inject the next whole word of the live suggestion. Returns words injected (0 if none).
@@ -1128,9 +1140,12 @@ final class CompletionCoordinator {
             // rising-edge push doesn't fire here since visibility was already true).
             onCaretAtLineEndChanged?(context.caretAtLineEnd())
         }
+        // Return the REAL word count (0 allowed): a whitespace/punctuation-only accepted chunk is not a
+        // word and must not inflate the meter. Callers treat 0 as "nothing to count", never as failure
+        // (AppDelegate.applyAccept just skips the increment) — same contract as the 0-word emoji path.
         let n = WordMeter.wordCount(in: word)
         recordStyle(word)   // FR-CTX-3: learn from the accepted phrasing (gated inside).
-        return n > 0 ? n : 1
+        return n
     }
 
     // Inject the whole current line of the suggestion (up to the first newline).
@@ -1994,7 +2009,7 @@ final class CompletionCoordinator {
     //   • A trailing INCOMPLETE tag-like run during streaming (`<stro` before its `>` arrives) is
     //     dropped so it never flashes; it reappears stripped once the closing `>` streams in.
     //   • A bare `<` NOT followed by a letter/'/' (e.g. "a < b", "<3") is kept as a literal.
-    //   • `**` and backticks are removed (rare in prose autocomplete; the model uses them as markup).
+    //   • `**` is removed; backticks are removed only when UNPAIRED (balanced pairs = inline code, kept).
     static func sanitizedSuggestion(_ s: String) -> String {
         let chars = Array(s)
         var out = ""
@@ -2031,7 +2046,13 @@ final class CompletionCoordinator {
             i += 1
         }
         out = out.replacingOccurrences(of: "**", with: "")
-        out = out.replacingOccurrences(of: "`", with: "")
+        // Backticks: strip only when UNPAIRED (odd count — a stray markup tick, or the first half of a
+        // pair still streaming in). Balanced pairs are inline code the user plausibly wants verbatim
+        // ("run `make test`"); blanket-stripping mangled it to "run make test". Still idempotent: an
+        // odd count strips to zero, and an even count is left untouched.
+        if out.lazy.filter({ $0 == "`" }).count % 2 != 0 {
+            out = out.replacingOccurrences(of: "`", with: "")
+        }
         out = Self.strippingRuleRuns(out)
         // Strip detokenizer junk (U+FFFD, stray C0 controls/DEL; tab + line feed kept) so a single bad
         // scalar no longer hides the whole completion — the rest of the suggestion still shows (#1).
@@ -2219,7 +2240,10 @@ final class CompletionCoordinator {
     // (never breaks a good completion). Memoized per (prefix, glue) so the spell lookups run ~once per gen.
     private func applyGlueGuard(_ suggestion: String, prefix: String) -> String {
         let glueRun = String(suggestion.prefix(while: { $0.isLetter }))
-        let memoKey = prefix + "\u{0}" + glueRun
+        // Key on (prefix, glue run, suggestion head): prefix + glue run alone collide for two different
+        // suggestions whose leading letter run matches (e.g. any two space-leading suggestions share an
+        // empty run), so a stable slice of the suggestion itself disambiguates the memo.
+        let memoKey = prefix + "\u{0}" + glueRun + "\u{0}" + String(suggestion.prefix(24))
         let drop: String?
         if glueGuardMemoKey == memoKey {
             drop = glueGuardMemoResult

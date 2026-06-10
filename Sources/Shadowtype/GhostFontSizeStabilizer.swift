@@ -17,14 +17,20 @@
 import CoreGraphics
 
 struct GhostFontSizeStabilizer {
+    // Plausibility floor: no readable text line is shorter than ~8pt, so a caret-height reading below
+    // it is AX noise (a collapsed/zero rect mid-relayout), not a real smaller line. Such readings pass
+    // through untouched and never lower the session minimum — otherwise one bad poll would pin every
+    // later suggestion to the font-size floor for the rest of the focus session.
+    static let minPlausibleCaretHeight: CGFloat = 8
+
     private var sessionKey: UInt64?
     private var minCaretHeight: CGFloat?
 
     // Returns the caret height to derive the ghost font size from: the running per-session minimum.
-    // Non-positive heights (empty/unusable rects) pass through untouched so a transient bad poll can't
-    // pin the session minimum to zero and force every later suggestion to the font-size floor.
+    // Implausibly small heights (non-positive / sub-8pt — empty or collapsed rects) pass through
+    // untouched so a transient bad poll can't drag the session minimum down (see floor above).
     mutating func stabilizedCaretHeight(_ caretHeight: CGFloat, focusSessionKey: UInt64) -> CGFloat {
-        guard caretHeight > 0 else { return caretHeight }
+        guard caretHeight >= Self.minPlausibleCaretHeight else { return caretHeight }
 
         if sessionKey != focusSessionKey {
             sessionKey = focusSessionKey

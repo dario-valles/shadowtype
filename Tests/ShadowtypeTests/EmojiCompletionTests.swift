@@ -29,6 +29,24 @@ final class EmojiCompletionTests: XCTestCase {
         XCTAssertEqual(emoji.currentQuery(prefix: ":smile: then :joy"), "joy")
     }
 
+    // The colon must start a token (start of prefix or after whitespace) — mid-text colons like
+    // times, ratios, and "label: value" must not arm the emoji ghost.
+    func testColonMidTokenDoesNotTrigger() {
+        XCTAssertNil(emoji.currentQuery(prefix: "meeting at 3:smile"))
+        XCTAssertNil(emoji.currentQuery(prefix: "ratio is 1:1"))
+        XCTAssertNil(emoji.currentQuery(prefix: "see https://example"))
+        XCTAssertNil(emoji.currentQuery(prefix: "key:value"))
+        XCTAssertFalse(emoji.isTrigger(prefix: "meeting at 3:smile"))
+        XCTAssertTrue(emoji.matches(prefix: "meeting at 3:smile", limit: 5).isEmpty)
+    }
+
+    func testColonAtStartOrAfterWhitespaceTriggers() {
+        XCTAssertEqual(emoji.currentQuery(prefix: ":smile"), "smile")
+        XCTAssertEqual(emoji.currentQuery(prefix: "hello :smile"), "smile")
+        XCTAssertEqual(emoji.currentQuery(prefix: "line one\n:tada"), "tada")
+        XCTAssertEqual(emoji.currentQuery(prefix: "tabbed\t:fire"), "fire")
+    }
+
     // MARK: - isTrigger
 
     func testIsTrigger() {

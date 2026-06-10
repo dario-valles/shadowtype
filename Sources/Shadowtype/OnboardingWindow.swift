@@ -19,6 +19,9 @@ import SwiftUI
 
 final class OnboardingWindowController: NSObject, NSWindowDelegate {
     static let didCompleteKey = "shadowtype.didCompleteOnboarding"
+    /// Current step's raw value, written on every step change so closing the window mid-flow
+    /// resumes where the user left off on the next launch.
+    static let stepKey = "shadowtype.onboardingStep"
 
     private var window: NSWindow?
 
@@ -60,10 +63,28 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         AppActivation.shared.windowClosed()
+        // Closing on the final ("All set") step counts as completing the flow; a mid-flow close keeps
+        // the persisted step so the next onboarding launch resumes there instead of restarting.
+        if !UserDefaults.standard.bool(forKey: Self.didCompleteKey),
+           Self.closeCompletesOnboarding(stepRaw: UserDefaults.standard.integer(forKey: Self.stepKey)) {
+            UserDefaults.standard.set(true, forKey: Self.didCompleteKey)
+        }
+    }
+
+    /// Pure (testable): does closing the window at this persisted step complete onboarding?
+    static func closeCompletesOnboarding(stepRaw: Int) -> Bool {
+        stepRaw >= OBStep.done.rawValue
+    }
+
+    /// Pure (testable): clamp a persisted raw step into the valid range (stale or corrupt values
+    /// fall back to the nearest valid step; an absent key reads as 0 = welcome).
+    static func clampedResumeStep(_ raw: Int, stepCount: Int) -> Int {
+        min(max(0, raw), stepCount - 1)
     }
 
     private func finish() {
         UserDefaults.standard.set(true, forKey: Self.didCompleteKey)
+        UserDefaults.standard.removeObject(forKey: Self.stepKey)
         window?.close()
     }
 }
@@ -132,20 +153,39 @@ private enum OBStep: Int, CaseIterable {
 private struct OnboardingRootView: View {
     let onFinish: () -> Void
 
-    @State private var step: OBStep = .welcome
+    @State private var step: OBStep
+    @State private var modelInstalled = false
+    @State private var modelSkipped = false
     @StateObject private var perms = PermissionsManager()
     private let permTick = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
+
+    init(onFinish: @escaping () -> Void) {
+        self.onFinish = onFinish
+        // Resume a mid-flow close from the persisted step (0 = welcome when never persisted).
+        let raw = OnboardingWindowController.clampedResumeStep(
+            UserDefaults.standard.integer(forKey: OnboardingWindowController.stepKey),
+            stepCount: OBStep.allCases.count)
+        _step = State(initialValue: OBStep(rawValue: raw) ?? .welcome)
+    }
 
     private var requiredGranted: Bool {
         (perms.granted[.accessibility] ?? false) && (perms.granted[.inputMonitoring] ?? false)
     }
-    private var nextDisabled: Bool { step == .permissions && !requiredGranted }
+    private var nextDisabled: Bool {
+        switch step {
+        case .permissions: return !requiredGranted
+        case .model:       return !(modelInstalled || modelSkipped)
+        default:           return false
+        }
+    }
 
     var body: some View {
         HStack(spacing: 0) {
             OBRail(current: step) { tapped in
-                // Match the mock: you can jump back, or one step forward.
-                if tapped.rawValue <= step.rawValue || tapped.rawValue == step.rawValue + 1 {
+                // Match the mock: you can jump back, or one step forward — but a forward jump honors
+                // the same gate as the footer Continue (permissions granted / model installed-or-skipped).
+                if tapped.rawValue <= step.rawValue
+                    || (tapped.rawValue == step.rawValue + 1 && !nextDisabled) {
                     withAnimation(.easeOut(duration: 0.28)) { step = tapped }
                 }
             }
@@ -163,6 +203,9 @@ private struct OnboardingRootView: View {
         .onReceive(permTick) { _ in if step == .permissions { perms.refresh() } }
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didBecomeActiveNotification)) { _ in perms.refresh() }
+        .onChange(of: step) {
+            UserDefaults.standard.set(step.rawValue, forKey: OnboardingWindowController.stepKey)
+        }
     }
 
     @ViewBuilder private var stage: some View {
@@ -172,7 +215,10 @@ private struct OnboardingRootView: View {
                 case .welcome:     OBWelcome()
                 case .howItWorks:  OBHowItWorks()
                 case .permissions: OBPermissions(perms: perms)
-                case .model:       OBModelStep()
+                case .model:       OBModelStep(installed: $modelInstalled) {
+                                       modelSkipped = true
+                                       withAnimation(.easeOut(duration: 0.28)) { go(1) }
+                                   }
                 case .tryIt:       OBTryIt()
                 case .selectionRewrite: OBSelectionRewrite()
                 case .personalize: OBPersonalize()
@@ -205,7 +251,11 @@ private struct OnboardingRootView: View {
             }
             .buttonStyle(OBPrimaryButton(large: true))
             .disabled(nextDisabled)
-            .help(nextDisabled ? "Grant the two required permissions to continue" : "")
+            .help(nextDisabled
+                  ? (step == .permissions
+                     ? "Grant the two required permissions to continue"
+                     : "Download a model (or choose Skip for now) to continue")
+                  : "")
         }
         .padding(.horizontal, 30)
         .frame(height: 72)
@@ -548,6 +598,12 @@ private struct OBHowItWorks: View {
 private struct OBPermissions: View {
     @ObservedObject var perms: PermissionsManager
 
+    /// UserDefaults flag: this permission's system prompt has been fired once already. macOS only
+    /// shows each prompt once per app, so subsequent presses must fall back to System Settings.
+    static func requestedOnceKey(_ p: Permission) -> String {
+        "shadowtype.permRequestedOnce." + p.rawValue
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
             OBHeader(eyebrow: "Permissions",
@@ -596,9 +652,16 @@ private struct OBPermissions: View {
                 .foregroundStyle(OBTheme.good)
             } else {
                 Button(p.required ? "Grant access" : "Enable") {
+                    let key = Self.requestedOnceKey(p)
+                    let requestedBefore = UserDefaults.standard.bool(forKey: key)
                     perms.request(p)
-                    // The system prompt only fires once; also surface Settings for a prior denial.
-                    perms.openSettings(p)
+                    if requestedBefore {
+                        // The system prompt only fires once per app; on a repeat press Settings is
+                        // the only remaining path to the grant.
+                        perms.openSettings(p)
+                    } else {
+                        UserDefaults.standard.set(true, forKey: key)
+                    }
                 }
                 .buttonStyle(p.required ? AnyButtonStyle(OBPrimaryButton(small: true)) : AnyButtonStyle(OBGhostButton(small: true)))
             }
@@ -618,6 +681,11 @@ private struct AnyButtonStyle: ButtonStyle {
 // MARK: - Step 4: Language model (real ModelManager download)
 
 private struct OBModelStep: View {
+    /// Mirrors `phase == .installed` up to the root so the footer Continue can gate on it.
+    @Binding var installed: Bool
+    /// Advances past this step without a model ("Skip for now").
+    let onSkip: () -> Void
+
     private let manager = ModelManager()
     private let physicalBytes = ProcessInfo.processInfo.physicalMemory
 
@@ -630,7 +698,9 @@ private struct OBModelStep: View {
     @State private var progress: Double = 0     // 0...1
     @State private var phase: Phase = .idle
 
-    init() {
+    init(installed: Binding<Bool>, onSkip: @escaping () -> Void) {
+        _installed = installed
+        self.onSkip = onSkip
         let rec = ModelCatalog.recommended(
             physicalBytes: ProcessInfo.processInfo.physicalMemory)
         _selectedID = State(initialValue: rec.id)
@@ -701,8 +771,19 @@ private struct OBModelStep: View {
                     Button(primaryLabel) { startDownload() }
                         .buttonStyle(OBPrimaryButton())
                         .disabled(phase == .downloading || phase == .installed)
+                    if phase != .installed {
+                        Button("Skip for now") { onSkip() }
+                            .buttonStyle(OBGhostButton(small: true))
+                            .disabled(phase == .downloading)
+                    }
                 }
                 .padding(.top, 18)
+                if phase != .installed {
+                    Text("You can download a model later in Settings → Models — suggestions won't appear until then.")
+                        .font(.system(size: 11.5)).foregroundStyle(OBTheme.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 8)
+                }
             }
             .padding(20)
             .obCard()
@@ -717,7 +798,11 @@ private struct OBModelStep: View {
             }
             .padding(.top, 18)
         }
-        .onAppear { if isInstalled(selected) { phase = .installed; progress = 1 } }
+        .onAppear {
+            if isInstalled(selected) { phase = .installed; progress = 1 }
+            installed = (phase == .installed)
+        }
+        .onChange(of: phase) { installed = (phase == .installed) }
     }
 
     @ViewBuilder private func modelRow(_ entry: ModelCatalogEntry) -> some View {
@@ -882,9 +967,9 @@ private struct OBTryIt: View {
                 }
 
                 HStack(spacing: 6) {
-                    Text("Accepted").font(.system(size: 13)).foregroundStyle(OBTheme.textFaint)
                     Text("\(accepted)").font(.system(size: 13, weight: .semibold, design: .monospaced)).foregroundStyle(OBTheme.accentBright)
-                    Text("/ 100").font(.system(size: 13)).foregroundStyle(OBTheme.textFaint)
+                    Text(accepted == 1 ? "word accepted" : "words accepted")
+                        .font(.system(size: 13)).foregroundStyle(OBTheme.textFaint)
                     Text(flashText).font(.system(size: 13, weight: .semibold)).foregroundStyle(OBTheme.good)
                         .opacity(flash ? 1 : 0)
                         .padding(.leading, 8)
@@ -1057,6 +1142,13 @@ private struct OBPersonalize: View {
     @State private var name = ""
     @State private var languages = ""
     @State private var voice: InstructionStore.Voice = .friendly
+    // Debounced "Saved" feedback: the store writes live on every change; this flashes ~0.3s after
+    // typing stops so the user knows the edits stuck. Gated by didLoad so the onAppear prefill
+    // (which also fires onChange → seed) doesn't flash on entry.
+    @State private var savedFlash = false
+    @State private var didLoad = false
+    @State private var flashShowWork: DispatchWorkItem?
+    @State private var flashHideWork: DispatchWorkItem?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1082,8 +1174,14 @@ private struct OBPersonalize: View {
 
             // Live preview of the composed instruction so the user sees exactly what gets seeded.
             VStack(alignment: .leading, spacing: 6) {
-                Text("WHAT SHADOWTYPE WILL USE").font(.system(size: 10.5, weight: .semibold))
-                    .tracking(1.3).foregroundStyle(OBTheme.textFaint)
+                HStack {
+                    Text("WHAT SHADOWTYPE WILL USE").font(.system(size: 10.5, weight: .semibold))
+                        .tracking(1.3).foregroundStyle(OBTheme.textFaint)
+                    Spacer()
+                    Text("Saved").font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(OBTheme.good)
+                        .opacity(savedFlash ? 1 : 0)
+                }
                 Text(InstructionStore.composeDefault(name: name, languages: languages, voice: voice))
                     .font(.system(size: 13)).foregroundStyle(OBTheme.textDim).lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1098,6 +1196,8 @@ private struct OBPersonalize: View {
         .onAppear {
             let p = InstructionStore.shared.personalizationInputs()
             name = p.name; languages = p.languages; voice = p.voice ?? .friendly
+            // Let the prefill-triggered onChange/seed settle before flashes are allowed.
+            DispatchQueue.main.async { didLoad = true }
         }
         .onChange(of: name) { seed() }
         .onChange(of: languages) { seed() }
@@ -1107,6 +1207,22 @@ private struct OBPersonalize: View {
     private func seed() {
         InstructionStore.shared.seedGlobalFromPersonalization(
             name: name, languages: languages, voice: voice)
+        if didLoad { flashSaved() }
+    }
+
+    private func flashSaved() {
+        flashShowWork?.cancel()
+        flashHideWork?.cancel()
+        let show = DispatchWorkItem {
+            withAnimation(.easeIn(duration: 0.15)) { savedFlash = true }
+            let hide = DispatchWorkItem {
+                withAnimation(.easeOut(duration: 0.5)) { savedFlash = false }
+            }
+            flashHideWork = hide
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4, execute: hide)
+        }
+        flashShowWork = show
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: show)
     }
 
     private func voicePill(_ v: InstructionStore.Voice) -> some View {
@@ -1125,6 +1241,7 @@ private struct OBPersonalize: View {
 
 private struct OBDone: View {
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
+    @State private var launchError: String?
     @AppStorage("shadowtype.showWordCountInMenuBar") private var showWordCount = true
 
     var body: some View {
@@ -1150,7 +1267,20 @@ private struct OBDone: View {
 
             VStack(spacing: 0) {
                 optRow(title: "Launch at login", sub: "Always on, right when you sign in", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { LaunchAtLogin.setEnabled(launchAtLogin) }
+                    .onChange(of: launchAtLogin) {
+                        switch LaunchAtLogin.setEnabled(launchAtLogin) {
+                        case .success:
+                            launchError = nil
+                        case .failure:
+                            launchError = "Couldn't \(launchAtLogin ? "enable" : "disable") — check System Settings → General → Login Items."
+                        }
+                    }
+                if let launchError {
+                    Text(launchError)
+                        .font(.system(size: 12)).foregroundStyle(OBTheme.warn)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 10)
+                }
                 Divider().overlay(OBTheme.lineSoft)
                 optRow(title: "Show today's word count in menu bar",
                        sub: "See how many words you've accepted today at a glance", isOn: $showWordCount)

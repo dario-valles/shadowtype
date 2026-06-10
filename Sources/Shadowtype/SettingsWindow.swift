@@ -16,9 +16,16 @@ import ApplicationServices
 // AppDelegate observes it and downloads (if needed) + swaps the active model live on the inference queue.
 extension Notification.Name {
     static let shadowtypeSelectModel = Notification.Name("shadowtype.selectModel")
-    // Posted by AppDelegate after a live swap finishes; userInfo ["id": String, "ok": Bool].
+    // Posted by AppDelegate after a live swap finishes; userInfo ["id": String, "ok": Bool] plus
+    // an optional ["error": String] failure reason when ok == false.
     // The Models pane clears its download spinner and reverts the picker if the swap failed.
     static let shadowtypeModelDidChange = Notification.Name("shadowtype.modelDidChange")
+    // Posted by AppDelegate while a catalog download is in flight; userInfo ["id": String,
+    // "fraction": Double] — "fraction" absent while the total size is unknown (indeterminate).
+    static let shadowtypeModelDownloadProgress = Notification.Name("shadowtypeModelDownloadProgress")
+    // Posted by the General pane when the rewrite-hotkey chord (UserDefaults
+    // "shadowtype.rewriteHotkeyChord") changes; AppDelegate re-registers the global hotkey.
+    static let shadowtypeRewriteHotkeyChanged = Notification.Name("shadowtypeRewriteHotkeyChanged")
 }
 
 final class SettingsWindowController: NSObject, NSWindowDelegate {
@@ -325,6 +332,9 @@ private struct GeneralPane: View {
     // Real: AppDelegate.syncToggles mirrors this into the active-field badge (default on).
     @AppStorage("shadowtype.showActiveBadge") private var showActiveBadge = true
     @AppStorage("shadowtype.showTabHint") private var showTabHint = true
+    // Rewrite-selection hotkey chord. AppDelegate observes .shadowtypeRewriteHotkeyChanged and
+    // re-registers the global hotkey when this changes.
+    @AppStorage("shadowtype.rewriteHotkeyChord") private var rewriteHotkeyChord = "opt-cmd-k"
 
     // Reads/writes the real CompletionLength key; all lengths are available.
     private var lengthBinding: Binding<CompletionLength> {
@@ -409,6 +419,18 @@ private struct GeneralPane: View {
                 caption("Show a faint “⇥ Tab” keycap next to the ghost text so you remember the accept key. It fades away on its own once you've accepted a few suggestions.")
             }
 
+            Section("Rewrite") {
+                Picker("Rewrite shortcut", selection: $rewriteHotkeyChord) {
+                    Text("⌥⌘K (default)").tag("opt-cmd-k")
+                    Text("⌃⌘K").tag("ctrl-cmd-k")
+                    Text("⌥⌘J").tag("opt-cmd-j")
+                }
+                .onChange(of: rewriteHotkeyChord) {
+                    NotificationCenter.default.post(name: .shadowtypeRewriteHotkeyChanged, object: nil)
+                }
+                caption("⌥⌘K can conflict with Apple Writing Tools in some apps.")
+            }
+
             Section("Typo handling") {
                 Toggle("Hold back suggestions on likely typos", isOn: $holdBackOnTypos)
                 caption("Suppress ghost text when the last word looks mistyped, instead of completing nonsense.")
@@ -445,7 +467,15 @@ private struct ModelsPane: View {
     @State private var unlocked = Entitlement.isUnlocked
     @State private var installed: Set<String> = []
     @State private var downloading: String?
-    @State private var freeDisk = ""           // computed once on appear, not per-render
+    // Live download progress for `downloading` (0...1), nil while the total size is unknown.
+    // Fed by .shadowtypeModelDownloadProgress (posted by AppDelegate).
+    @State private var downloadFraction: Double?
+    // Last failed download/swap reason, from .shadowtypeModelDidChange userInfo["error"].
+    // Cleared on the next apply()/successful swap.
+    @State private var downloadError: String?
+    // Imported entry pending the "Remove" confirmation dialog.
+    @State private var removeCandidate: ImportedModelEntry?
+    @State private var freeDisk = ""           // recomputed by rescan(), not per-render
 
     private let manager = ModelManager()
     private var physicalBytes: UInt64 { ProcessInfo.processInfo.physicalMemory }
@@ -467,17 +497,40 @@ private struct ModelsPane: View {
         return ModelCatalog.entries.first { $0.id == selectedID } ?? ModelCatalog.entries[0]
     }
 
+    // Whether the selected model's file is actually on disk — drives the Active-model pill and
+    // gates "Reveal in Finder" (revealing a non-existent file just opens an unrelated folder).
+    private var activeModelFileExists: Bool {
+        FileManager.default.fileExists(atPath: manager.modelURL(for: selectedEntry).path)
+    }
+
+    // Derived Active-model state: a download in flight beats everything (apply() only ever starts a
+    // download for the model it just selected), then installed vs missing-on-disk.
+    @ViewBuilder private var activeModelPill: some View {
+        if downloading != nil {
+            Pill(text: "Downloading…", kind: .warn)
+        } else if activeModelFileExists {
+            Pill(text: "Loaded", kind: .good)
+        } else {
+            Pill(text: "Not downloaded", kind: .warn)
+        }
+    }
+
     var body: some View {
         Form {
             Callout(systemImage: "lock.fill",
                     text: "**All inference runs on this Mac** via llama.cpp + Metal. Models download once over HTTPS, are verified by SHA-256, and never phone home during completion.")
+
+            if let err = downloadError {
+                Callout(systemImage: "exclamationmark.triangle.fill",
+                        text: LocalizedStringKey(err), tint: .orange)
+            }
 
             Section("Active model") {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
                             Text(selectedEntry.name).fontWeight(.semibold)
-                            Pill(text: "Loaded", kind: .good)
+                            activeModelPill
                         }
                         Text(modelSpec(selectedEntry))
                             .font(.caption).foregroundStyle(.secondary)
@@ -487,6 +540,7 @@ private struct ModelsPane: View {
                         NSWorkspace.shared.activateFileViewerSelecting([manager.modelURL(for: selectedEntry)])
                     }
                     .controlSize(.small)
+                    .disabled(!activeModelFileExists)
                 }
                 .padding(.vertical, 2)
 
@@ -577,7 +631,7 @@ private struct ModelsPane: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Models")
-        .onAppear { rescan(); freeDisk = Self.computeFreeDisk(); importedEntries = ImportedModelStore.shared.entries() }
+        .onAppear { rescan(); importedEntries = ImportedModelStore.shared.entries() }
         .sheet(isPresented: $hfSheetVisible) {
             HFImportSheet { newEntry in
                 importedEntries = ImportedModelStore.shared.entries()
@@ -588,12 +642,53 @@ private struct ModelsPane: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .shadowtypeModelDidChange)) { note in
             downloading = nil
+            downloadFraction = nil
             rescan()
             if let id = note.userInfo?["id"] as? String,
-               note.userInfo?["ok"] as? Bool == false,
-               selectedID == id {
-                selectedID = ModelCatalog.entries[0].id
+               note.userInfo?["ok"] as? Bool == false {
+                downloadError = (note.userInfo?["error"] as? String)
+                    ?? "Download failed — check disk space and network."
+                if selectedID == id { selectedID = ModelCatalog.entries[0].id }
+            } else {
+                downloadError = nil
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .shadowtypeModelDownloadProgress)) { note in
+            guard let id = note.userInfo?["id"] as? String, id == downloading else { return }
+            downloadFraction = note.userInfo?["fraction"] as? Double
+        }
+        .confirmationDialog(
+            "Remove \u{201C}\(removeCandidate?.name ?? "model")\u{201D}?",
+            isPresented: Binding(get: { removeCandidate != nil },
+                                 set: { if !$0 { removeCandidate = nil } }),
+            titleVisibility: .visible,
+            presenting: removeCandidate
+        ) { entry in
+            Button("Remove", role: .destructive) { confirmRemove(entry) }
+            Button("Cancel", role: .cancel) {}
+        } message: { entry in
+            if entry.id == selectedID {
+                Text("This model is currently active — suggestions will stop until another model is selected. Shadowtype will switch to \u{201C}\(removalFallbackEntry.name)\u{201D} after removal. Your original .gguf file on disk is not deleted.")
+            } else {
+                Text("This removes the import from Shadowtype. Your original .gguf file on disk is not deleted.")
+            }
+        }
+    }
+
+    // The catalog entry we auto-select after removing the ACTIVE imported model: the first
+    // recommended (RAM-fitting) entry, falling back to the shipping default.
+    private var removalFallbackEntry: ModelCatalogEntry {
+        ModelCatalog.entries.first { ModelCatalog.ramOK(for: $0, physicalBytes: physicalBytes) }
+            ?? ModelCatalog.entries[0]
+    }
+
+    private func confirmRemove(_ entry: ImportedModelEntry) {
+        let wasActive = entry.id == selectedID
+        ImportedModelStore.shared.remove(id: entry.id)
+        importedEntries = ImportedModelStore.shared.entries()
+        if wasActive {
+            // Re-point the engine at a real model so suggestions come back without a manual pick.
+            apply(to: removalFallbackEntry.id)
         }
     }
 
@@ -608,22 +703,31 @@ private struct ModelsPane: View {
                 HStack(spacing: 6) {
                     Text(entry.name).fontWeight(.medium)
                     if isActive { Pill(text: "Active", kind: .good) }
+                    if entry.isInstruct { Pill(text: "Instruct", kind: .warn) }
                 }
                 Text(libraryDetail(entry, ramOK: ramOK))
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             if downloading == entry.id {
-                ProgressView().controlSize(.small)
+                if let fraction = downloadFraction {
+                    ProgressView(value: fraction).frame(width: 90)
+                    Text("\(Int(fraction * 100))%")
+                        .font(.caption.monospaced()).foregroundStyle(.secondary)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
             } else if isActive {
                 Button("In use") {}.disabled(true).controlSize(.small)
             } else if isInstalled {
                 Pill(text: "Downloaded", kind: .good)
                 Button("Switch to") { apply(to: entry.id) }.controlSize(.small)
+                    .disabled(downloading != nil)   // no mid-download switch race
             } else {
                 Text(gb(entry.downloadGB)).font(.caption.monospaced()).foregroundStyle(.secondary)
                 Button("Download") { apply(to: entry.id) }
                     .controlSize(.small).buttonStyle(.borderedProminent)
+                    .disabled(downloading != nil)   // one download at a time
             }
         }
         .padding(.vertical, 2)
@@ -661,11 +765,15 @@ private struct ModelsPane: View {
             present.insert(entry.id)
         }
         installed = present
+        // Free space changes with every download/removal, so refresh it alongside the install scan.
+        freeDisk = Self.computeFreeDisk()
     }
 
     // Posts the live-swap request (AppDelegate downloads-if-needed + swaps on the inference queue,
     // then posts .shadowtypeModelDidChange).
     private func apply(to newID: String) {
+        downloadError = nil
+        downloadFraction = nil
         // M3 BYOM: imported IDs route through ImportedModelStore so the swap notification carries
         // a synthesized ModelCatalogEntry pointing at the symlink. No download path; AppDelegate
         // calls swapModel which calls ensureModel which (for byom-) short-circuits to the path.
@@ -705,12 +813,10 @@ private struct ModelsPane: View {
             } else {
                 Button("Switch to") { apply(to: entry.id) }
                     .controlSize(.small)
+                    .disabled(downloading != nil)   // no mid-download switch race
             }
-            Button("Remove") {
-                ImportedModelStore.shared.remove(id: entry.id)
-                importedEntries = ImportedModelStore.shared.entries()
-            }
-            .controlSize(.small)
+            Button("Remove") { removeCandidate = entry }
+                .controlSize(.small)
         }
         .padding(.vertical, 2)
     }
@@ -930,15 +1036,20 @@ private struct AppsDomainsPane: View {
     }
 
     private var addBar: some View {
-        HStack(spacing: 6) {
-            TextField("Add bundle id or domain…", text: $addText)
-                .textFieldStyle(.roundedBorder).font(.caption)
-            Menu {
-                Button("Add as app") { addTarget(isApp: true) }
-                Button("Add as domain") { addTarget(isApp: false) }
-            } label: { Image(systemName: "plus") }
-                .menuStyle(.borderlessButton).fixedSize()
-                .disabled(addText.trimmingCharacters(in: .whitespaces).isEmpty)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                TextField("Add bundle id or domain…", text: $addText)
+                    .textFieldStyle(.roundedBorder).font(.caption)
+                Menu {
+                    Button("Add as app") { addTarget(isApp: true) }
+                    Button("Add as domain") { addTarget(isApp: false) }
+                } label: { Image(systemName: "plus") }
+                    .menuStyle(.borderlessButton).fixedSize()
+                    .disabled(addText.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            Text("Domain rules match subdomains too — “google.com” also matches “mail.google.com”.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(8)
     }
@@ -1346,18 +1457,31 @@ private struct ShortcutsPane: View {
     @AppStorage("shadowtype.emojiShortcode") private var emojiShortcode = true
     @AppStorage("shadowtype.rewriteEnabled") private var rewriteEnabled = true
 
+    @AppStorage("shadowtype.rewriteHotkeyChord") private var rewriteChord = "opt-cmd-k"
+
     private struct Shortcut: Identifiable {
         let id = UUID(); let action: String; let note: String; let keys: [String]?
     }
-    private let shortcuts: [Shortcut] = [
+    // Keycap symbols for the configurable rewrite chord (General pane picker).
+    private var rewriteChordKeys: [String] {
+        switch rewriteChord {
+        case "ctrl-cmd-k": return ["⌃", "⌘", "K"]
+        case "opt-cmd-j":  return ["⌥", "⌘", "J"]
+        default:           return ["⌥", "⌘", "K"]
+        }
+    }
+    private var rewriteChordLabel: String { rewriteChordKeys.joined() }
+
+    private var shortcuts: [Shortcut] { staticShortcuts(rewriteKeys: rewriteChordKeys) }
+    private func staticShortcuts(rewriteKeys: [String]) -> [Shortcut] { [
         .init(action: "Accept next word", note: "Take one word from the current suggestion. Right Arrow also works at end-of-line when enabled.", keys: ["Tab"]),
         .init(action: "Accept whole line", note: "Take the entire suggested line at once.", keys: ["⌥", "Tab"]),
         .init(action: "Dismiss suggestion", note: "Hide the current ghost text. Typing also dismisses.", keys: ["esc"]),
         .init(action: "Force suggestions here", note: "Turn completions on in the current field, even where Shadowtype stays idle (terminals, code editors).", keys: ["⌃", "`"]),
-        .init(action: "Rewrite selection", note: "Rewrite the selected text on-device — improve, shorten, change tone, fix grammar, or summarize. Preview before keeping.", keys: ["⌥", "⌘", "K"]),
+        .init(action: "Rewrite selection", note: "Rewrite the selected text on-device — improve, shorten, change tone, fix grammar, or summarize. Preview before keeping.", keys: rewriteKeys),
         .init(action: "Toggle Shadowtype on/off", note: "Global hotkey to pause and resume everywhere.", keys: nil),
         .init(action: "Pause for current app", note: "Temporarily disable in the frontmost app.", keys: ["⌃", "⌥", "P"]),
-    ]
+    ] }
 
     var body: some View {
         Form {
@@ -1375,7 +1499,7 @@ private struct ShortcutsPane: View {
                     .padding(.vertical, 1)
                 }
             } footer: {
-                Text("Accept/dismiss keys are fixed in the Free tier.")
+                Text("Accept and dismiss keys are fixed; the rewrite shortcut is configurable in General.")
             }
 
             Section {
@@ -1385,8 +1509,8 @@ private struct ShortcutsPane: View {
                 caption("Accept the next word with Right Arrow when the caret is at end-of-line. Matches Smart Compose and Superhuman. Cursor motion still wins mid-line or with any modifier held.")
                 Toggle("Emoji shortcode", isOn: $emojiShortcode)
                 caption("Type “:” then a name to insert emoji. Turn off to disable the trigger entirely.")
-                Toggle("Selection rewrite (⌥⌘K)", isOn: $rewriteEnabled)
-                caption("Rewrite selected text on-device with a local model. Off disables the ⌥⌘K hotkey.")
+                Toggle("Selection rewrite (\(rewriteChordLabel))", isOn: $rewriteEnabled)
+                caption("Rewrite selected text on-device with a local model. Off disables the \(rewriteChordLabel) hotkey. Change the shortcut in General.")
             }
         }
         .formStyle(.grouped)
@@ -1403,6 +1527,7 @@ private struct PersonalizationPane: View {
     @AppStorage("shadowtype.personalizationStrength") private var strength = 3
     @State private var phrases = 0
     @State private var sizeText = "Empty"
+    @State private var wipeConfirmVisible = false
 
     private static let strengthLabels = ["Off", "Light", "Medium", "Strong"]
 
@@ -1440,8 +1565,17 @@ private struct PersonalizationPane: View {
                 }
                 LabeledContent("Profile storage", value: sizeText)
                 Button("Wipe my profile", role: .destructive) {
-                    StyleProfile.shared.wipe()
-                    refresh()
+                    wipeConfirmVisible = true
+                }
+                .confirmationDialog("Wipe your writing-style profile?",
+                                    isPresented: $wipeConfirmVisible, titleVisibility: .visible) {
+                    Button("Wipe Profile", role: .destructive) {
+                        StyleProfile.shared.wipe()
+                        refresh()
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This permanently deletes everything Shadowtype has learned about your writing style on this Mac. It can’t be undone.")
                 }
             }
         }
@@ -1466,8 +1600,12 @@ private struct InstructionsPane: View {
     @State private var perApp: [String: String] = [:]
     @State private var newBundleId = ""
     @State private var newInstruction = ""
+    @State private var resetFlash = false   // brief "Reset to default." confirmation flash
 
     private var sortedBundleIds: [String] { perApp.keys.sorted() }
+    private var trimmedNewBundleId: String {
+        newBundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
         Form {
@@ -1487,9 +1625,17 @@ private struct InstructionsPane: View {
                 HStack {
                     Text("Custom AI Instructions")
                     Spacer()
+                    if resetFlash {
+                        Text("Reset to default.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .textCase(nil)
+                            .transition(.opacity)
+                    }
                     Button("Reset to Default") {
                         InstructionStore.shared.resetGlobalToDefault()
                         refresh()
+                        resetFlash = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { resetFlash = false }
                     }
                     .buttonStyle(.borderless)
                     .controlSize(.small)
@@ -1528,18 +1674,23 @@ private struct InstructionsPane: View {
                           prompt: Text("App bundle id (e.g. com.tinyspeck.slackmacgap)"))
                     .labelsHidden()
                     .font(.system(.body, design: .monospaced))
+                if !trimmedNewBundleId.isEmpty && !BundleIDValidator.isValid(trimmedNewBundleId) {
+                    Text("Not a valid bundle id — use at least two dot-separated parts of letters, digits, or hyphens (e.g. com.apple.mail).")
+                        .font(.caption).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 TextField("Instruction for that app", text: $newInstruction,
                           prompt: Text("Instruction for that app"), axis: .vertical)
                     .labelsHidden()
                     .lineLimit(2...5)
                 Button("Add override") {
-                    let bid = newBundleId.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !bid.isEmpty else { return }
+                    let bid = trimmedNewBundleId
+                    guard BundleIDValidator.isValid(bid) else { return }
                     InstructionStore.shared.setInstruction(newInstruction, forBundleId: bid)
                     newBundleId = ""; newInstruction = ""
                     refresh()
                 }
-                .disabled(newBundleId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!BundleIDValidator.isValid(trimmedNewBundleId))
             }
         }
         .formStyle(.grouped)
@@ -1560,6 +1711,25 @@ private struct InstructionsPane: View {
                 InstructionStore.shared.setInstruction(newValue, forBundleId: bundleId)
             }
         )
+    }
+}
+
+// Pure bundle-id shape check for the "Add override" field. Internal (not private) so unit tests
+// can exercise it directly. Deliberately ASCII-strict: real CFBundleIdentifiers are reverse-DNS
+// of ASCII letters/digits/hyphens — anything else is almost certainly a typo in this field.
+enum BundleIDValidator {
+    /// True when `raw` (whitespace-trimmed) has ≥2 dot-separated components, each non-empty and
+    /// containing only ASCII letters, digits, or hyphens.
+    static func isValid(_ raw: String) -> Bool {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = s.components(separatedBy: ".")
+        guard parts.count >= 2 else { return false }
+        return parts.allSatisfy { part in
+            !part.isEmpty && part.unicodeScalars.allSatisfy {
+                ("a"..."z").contains($0) || ("A"..."Z").contains($0)
+                    || ("0"..."9").contains($0) || $0 == "-"
+            }
+        }
     }
 }
 
@@ -1714,7 +1884,19 @@ private struct AboutPane: View {
         case .readyToInstall(let m):
             Pill(text: "Ready to install — v\(m.version)", kind: .good)
         case .failed(let msg):
-            Pill(text: msg, kind: .warn)
+            // Show the actual failure reason (a pill truncates poorly for long messages) plus a
+            // one-click retry of the same check/stage flow the manual button runs.
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(msg)
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.trailing)
+                Button("Try again") {
+                    let channel: UpdateChannel = includeBeta ? .beta : .stable
+                    Task { await updater.checkThenStage(channel: channel, manual: true) }
+                }
+                .controlSize(.small)
+            }
         }
     }
 }
@@ -1782,17 +1964,25 @@ final class PermissionsManager: ObservableObject {
     }
 
     // Screen Recording is the only thing the OCR context feature needs. The first time we observe it
-    // granted, flip the on-screen OCR toggle on for the user (FR-CTX-1) — that's the whole point of
-    // granting it. Gated by a one-time persisted flag so we don't re-enable on every poll (or fight a
-    // user who later turns OCR back off). Revoking Screen Recording clears the flag, so a future
-    // re-grant auto-enables again.
+    // granted, OFFER to enable on-screen OCR (FR-CTX-1) — never flip it silently: the user may have
+    // granted Screen Recording for an unrelated reason, and "app starts reading my screen" must be an
+    // explicit choice. Gated by a one-time persisted flag so the offer doesn't repeat on every poll.
+    // Revoking Screen Recording clears the flag, so a future re-grant offers again.
     private func autoEnableOCRIfScreenRecordingGranted(_ granted: Bool) {
         let defaults = UserDefaults.standard
         let flagKey = "shadowtype.ocrAutoEnabledForScreenRecording"
         if granted {
             guard !defaults.bool(forKey: flagKey) else { return }
-            defaults.set(true, forKey: "shadowtype.useScreenOCR")
             defaults.set(true, forKey: flagKey)
+            guard !defaults.bool(forKey: "shadowtype.useScreenOCR") else { return }
+            let alert = NSAlert()
+            alert.messageText = "Use screen text for context?"
+            alert.informativeText = "Screen Recording is now granted. Shadowtype can read on-screen text near where you type to improve suggestions — entirely on-device, nothing leaves your Mac. You can change this anytime in Settings → Context."
+            alert.addButton(withTitle: "Enable")
+            alert.addButton(withTitle: "Not Now")
+            if alert.runModal() == .alertFirstButtonReturn {
+                defaults.set(true, forKey: "shadowtype.useScreenOCR")
+            }
         } else {
             defaults.set(false, forKey: flagKey)
         }

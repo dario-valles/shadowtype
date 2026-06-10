@@ -2,7 +2,7 @@
 // intercepts the three control keys the HUD offers so they don't reach the host app, and treats any
 // other key as "commit and get out of the way":
 //   • Return / Enter   → onKeep      (swallowed — Return would otherwise send the Slack/Mail message)
-//   • ⌘R               → onRegenerate (swallowed)
+//   • ⌘R               → onRegenerate (swallowed when shouldSwallowRegenerate(); else other-key)
 //   • Escape           → onUndo      (swallowed)
 //   • anything else     → onOtherKey (passed through so the user's typing isn't lost) then teardown
 // Modeled on TabSwallowTap (active .defaultTap at the head of the session tap; returning nil deletes the
@@ -15,6 +15,10 @@ final class RewriteKeyTap {
     var onRegenerate: (() -> Void)?
     var onUndo: (() -> Void)?
     var onOtherKey: (() -> Void)?
+    // Whether ⌘R is one of OURS right now. Web sessions don't offer redo, so swallowing ⌘R there
+    // would dead-key the browser's reload — when this returns false, ⌘R takes the other-key path
+    // (commit + pass through to the host). Default: swallow (native behavior).
+    var shouldSwallowRegenerate: () -> Bool = { true }
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -56,8 +60,13 @@ final class RewriteKeyTap {
                     return nil
                 }
                 if cmd && code == RewriteKeyTap.kR {
-                    me.onRegenerate?()
-                    return nil
+                    if me.shouldSwallowRegenerate() {
+                        me.onRegenerate?()
+                        return nil
+                    }
+                    // Not ours (web session): commit like any other key and let the host see ⌘R.
+                    me.onOtherKey?()
+                    return Unmanaged.passUnretained(event)
                 }
                 // Any other key commits the rewrite and dismisses; pass the key through to the app.
                 me.onOtherKey?()

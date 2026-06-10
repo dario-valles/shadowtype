@@ -171,8 +171,14 @@ final class EmojiCompletion {
 
     // The partial shortcode after the last unterminated `:`, or nil. Lowercased for matching.
     // Returns nil for an empty query (`...:`) — there's nothing to match yet.
+    // The colon must start a token: at the beginning of the prefix or preceded by whitespace.
+    // Otherwise mid-text colons misfire ("meeting at 3:smile", "ratio 1:1", "http://x:port").
     func currentQuery(prefix: String) -> String? {
         guard let colon = prefix.lastIndex(of: ":") else { return nil }
+        if colon != prefix.startIndex {
+            let before = prefix[prefix.index(before: colon)]
+            guard before.isWhitespace else { return nil }
+        }
         let after = prefix[prefix.index(after: colon)...]
         guard !after.isEmpty else { return nil }
         for ch in after where !Self.isShortcodeChar(ch) { return nil }

@@ -10,6 +10,11 @@ import AppKit
 final class GlobalHotKey {
     var onPress: (() -> Void)?
 
+    // Registration status, observable by callers (Settings shows "hotkey in use by another app"
+    // when start() fails). `lastStatus` keeps the raw OSStatus of the most recent attempt.
+    var isRegistered: Bool { hotKeyRef != nil }
+    private(set) var lastStatus: OSStatus = noErr
+
     private var hotKeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
     // 'SHTY' signature + a per-instance id disambiguate our hotkeys inside the shared application event
@@ -18,12 +23,14 @@ final class GlobalHotKey {
     private var hotKeyID = EventHotKeyID(signature: 0x53485459, id: 1)
 
     // Default ⌃` (grave). keyCode/modifiers use Carbon virtual-key + modifier constants. `id` must be
-    // unique across live GlobalHotKey instances. No-op (with a diagnostic) if the handler can't install or
-    // the key is already claimed — never leaves a half-registered state that a later start() would double
-    // up on.
+    // unique across live GlobalHotKey instances. Returns false (with a diagnostic) if the handler can't
+    // install or the key is already claimed — never leaves a half-registered state that a later start()
+    // would double up on. Calling while registered re-registers: the existing hotkey + handler come
+    // down first, so callers can rebind to a new chord with a single start() call.
+    @discardableResult
     func start(keyCode: UInt32 = UInt32(kVK_ANSI_Grave), modifiers: UInt32 = UInt32(controlKey),
-               id: UInt32 = 1) {
-        guard hotKeyRef == nil else { return }
+               id: UInt32 = 1) -> Bool {
+        if hotKeyRef != nil { stop() }
         hotKeyID.id = id
 
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
@@ -45,7 +52,9 @@ final class GlobalHotKey {
             return noErr
         }, 1, &spec, selfPtr, &handler)
         guard installStatus == noErr, let handler else {
-            Diag.log("GlobalHotKey: InstallEventHandler failed (\(installStatus))"); return
+            Diag.log("GlobalHotKey: InstallEventHandler failed (\(installStatus))")
+            lastStatus = installStatus
+            return false
         }
 
         var ref: EventHotKeyRef?
@@ -53,10 +62,13 @@ final class GlobalHotKey {
         guard regStatus == noErr, let ref else {
             Diag.log("GlobalHotKey: RegisterEventHotKey failed (\(regStatus)) — key in use?")
             RemoveEventHandler(handler)   // don't leak the handler we just installed
-            return
+            lastStatus = regStatus
+            return false
         }
         handlerRef = handler
         hotKeyRef = ref
+        lastStatus = noErr
+        return true
     }
 
     func stop() {
