@@ -80,13 +80,13 @@ enum CompletionLength: String, CaseIterable, Identifiable {
     /// UserDefaults key for the user's chosen length. Stored as the enum `rawValue` string.
     static let defaultsKey = "shadowtype.completionLength"
 
-    /// The effective length to apply right now: the stored value, defaulting to `.short` when unset
+    /// The effective length to apply right now: the stored value, defaulting to `.medium` when unset
     /// or unrecognized.
     ///
     /// `defaults` is injectable purely for hermetic tests; production passes `.standard`.
     static func current(defaults: UserDefaults = .standard) -> CompletionLength {
         guard let raw = defaults.string(forKey: defaultsKey),
-              let length = CompletionLength(rawValue: raw) else { return .short }
+              let length = CompletionLength(rawValue: raw) else { return .medium }
         return length
     }
 }

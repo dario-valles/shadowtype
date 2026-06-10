@@ -67,9 +67,9 @@ final class CompletionLengthTests: XCTestCase {
 
     // MARK: - current() reads the stored value (free: every length selectable)
 
-    func testCurrentDefaultsToShortWhenUnset() {
+    func testCurrentDefaultsToMediumWhenUnset() {
         let defaults = tempDefaults() // nothing stored
-        XCTAssertEqual(CompletionLength.current(defaults: defaults), .short)
+        XCTAssertEqual(CompletionLength.current(defaults: defaults), .medium)
     }
 
     func testCurrentReadsStoredValue() {
@@ -81,9 +81,9 @@ final class CompletionLengthTests: XCTestCase {
         XCTAssertEqual(CompletionLength.current(defaults: defaults), .long)
     }
 
-    func testCurrentFallsBackToShortOnUnrecognizedValue() {
+    func testCurrentFallsBackToMediumOnUnrecognizedValue() {
         let defaults = tempDefaults()
         defaults.set("gigantic", forKey: CompletionLength.defaultsKey)
-        XCTAssertEqual(CompletionLength.current(defaults: defaults), .short)
+        XCTAssertEqual(CompletionLength.current(defaults: defaults), .medium)
     }
 }

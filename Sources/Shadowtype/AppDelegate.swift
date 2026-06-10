@@ -483,9 +483,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UserDefaults.standard.object(forKey: "styleProfileEnabled") == nil
             ? true
             : UserDefaults.standard.bool(forKey: "styleProfileEnabled")
-        // General → "Suggestion trigger delay". Default 120 ms when unset; clamp to the slider range.
+        // General → "Suggestion trigger delay". Default 50 ms when unset; clamp to the slider range.
         // This is the adaptive-pause FLOOR (see CompletionCoordinator.adaptiveDelay).
-        let delayMs = UserDefaults.standard.object(forKey: "shadowtype.triggerDelayMs") as? Double ?? 120
+        let delayMs = UserDefaults.standard.object(forKey: "shadowtype.triggerDelayMs") as? Double ?? 50
         coordinator.debounce = max(0.04, min(0.4, delayMs / 1000))
         // General → "Aggressiveness": scales the confirmed-pause threshold on top of the delay floor.
         coordinator.pauseMultiplier = Aggressiveness.current().pauseMultiplier

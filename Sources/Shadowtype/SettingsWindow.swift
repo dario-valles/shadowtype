@@ -311,13 +311,13 @@ private struct GeneralPane: View {
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
 
     // Suggestion trigger delay (real: AppDelegate.syncToggles mirrors this into coordinator.debounce).
-    @AppStorage("shadowtype.triggerDelayMs") private var triggerDelayMs = 120.0
+    @AppStorage("shadowtype.triggerDelayMs") private var triggerDelayMs = 50.0
     // Aggressiveness — real: AppDelegate.syncToggles mirrors this into coordinator.pauseMultiplier, which
     // scales the adaptive typing-pause threshold. Stored as the Aggressiveness rawValue.
     @AppStorage(Aggressiveness.defaultsKey) private var aggressivenessRaw = Aggressiveness.balanced.rawValue
     // Suggestion length — the SAME engine knob AppDelegate reads, so the control always reflects (and
     // drives) real behavior. Segments map 1:1 to CompletionLength; no separate display store.
-    @AppStorage(CompletionLength.defaultsKey) private var lengthRaw = CompletionLength.short.rawValue
+    @AppStorage(CompletionLength.defaultsKey) private var lengthRaw = CompletionLength.medium.rawValue
     // Typo handling.
     @AppStorage("GW.autocorrectEnabled") private var autocorrectEnabled = false
     // Live: AppDelegate.syncToggles mirrors these on every UserDefaults change — menu-bar count + icon
@@ -339,9 +339,9 @@ private struct GeneralPane: View {
     // Reads/writes the real CompletionLength key; all lengths are available.
     private var lengthBinding: Binding<CompletionLength> {
         Binding(
-            get: { CompletionLength(rawValue: lengthRaw) ?? .short },
+            get: { CompletionLength(rawValue: lengthRaw) ?? .medium },
             set: { newValue in
-                guard unlocked || newValue == .short else { return }   // snaps back via get
+                guard unlocked || newValue == .medium else { return }   // snaps back via get
                 lengthRaw = newValue.rawValue
                 NotificationCenter.default.post(name: .shadowtypeCompletionLengthChanged, object: nil)
             }
