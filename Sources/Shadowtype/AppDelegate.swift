@@ -657,7 +657,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // and MUST run on main — this Task body is on a cooperative thread, so hop to main first or
                 // we touch AppKit off-main (SIGTRAP: "Must only be used from the main thread").
                 await MainActor.run {
-                self.coordinator.reloadModel(at: url.path, fallbackPath: fallback) { [weak self] ok in
+                self.coordinator.reloadModel(at: url.path, fallbackPath: fallback) { [weak self] ok, loadError in
                     guard let self else { return }
                     self.modelReloadInFlight = false
                     if ok {
@@ -669,9 +669,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     } else {
                         NSLog("Shadowtype: model swap to \(entry.id) did not load; keeping previous model")
                     }
+                    // The download succeeded (ensureModel returned) — a non-ok here is an ENGINE LOAD
+                    // failure, not a download problem. Pass the real reason so the Models pane stops
+                    // showing the generic "check disk space and network" fallback for a Metal/GGUF fault.
+                    var info: [String: Any] = ["id": entry.id, "ok": ok]
+                    if let loadError { info["error"] = loadError }
                     NotificationCenter.default.post(
-                        name: .shadowtypeModelDidChange, object: nil,
-                        userInfo: ["id": entry.id, "ok": ok])
+                        name: .shadowtypeModelDidChange, object: nil, userInfo: info)
                     NotificationCenter.default.post(
                         name: .shadowtypeEngineLoadStateChanged, object: nil,
                         userInfo: ["loaded": self.coordinator.isModelLoaded])
@@ -706,7 +710,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (which lags a tick behind this main-thread call).
         modelIdleUnloaded = false
         modelReloadInFlight = true
-        coordinator.reloadModel(at: url.path, fallbackPath: nil) { [weak self] ok in
+        coordinator.reloadModel(at: url.path, fallbackPath: nil) { [weak self] ok, _ in
             guard let self else { return }
             self.modelReloadInFlight = false
             if ok {

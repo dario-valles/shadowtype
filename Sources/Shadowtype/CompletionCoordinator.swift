@@ -1063,17 +1063,21 @@ final class CompletionCoordinator {
     // dispatch unload+load onto inferenceQueue, where it is serialized AFTER any running generate(). If
     // the new model fails to load, fall back to `fallbackPath` so the engine isn't left unloaded (which
     // would silently kill all completions until relaunch). `onComplete(true/false)` runs on main.
-    func reloadModel(at path: String, fallbackPath: String?, onComplete: @escaping (Bool) -> Void) {
+    func reloadModel(at path: String, fallbackPath: String?, onComplete: @escaping (Bool, String?) -> Void) {
         cancel()   // main: bumpGeneration + engine.requestCancel + hide ghost; the running decode bails fast
         inferenceQueue.async { [weak self] in
             guard let self else { return }
             self.engine.unload()
             var ok = true
+            // The real load failure (e.g. Metal context init on a new GPU/OS) — surfaced to the
+            // Models pane so it stops mislabeling an engine failure as a disk/network download error.
+            var loadError: String?
             do {
                 try self.engine.load(modelPath: path)
             } catch {
                 NSLog("Shadowtype: model load failed for \(path): \(error)")
                 ok = false
+                loadError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
                 if let fallbackPath {
                     do {
                         try self.engine.load(modelPath: fallbackPath)
@@ -1084,7 +1088,8 @@ final class CompletionCoordinator {
                 }
             }
             let success = ok
-            DispatchQueue.main.async { onComplete(success) }
+            let reason = loadError
+            DispatchQueue.main.async { onComplete(success, reason) }
         }
     }
 

@@ -174,6 +174,22 @@ if [[ "${RELEASE:-0}" == "1" ]]; then
     while IFS= read -r d2; do queue+=("$d2"); done < <(nonsys_deps "$FW/$base")
   done
 
+  # ggml ≥0.13 loads its COMPUTE BACKENDS (Metal / CPU variants / BLAS) as separate plugins at
+  # RUNTIME — they are NOT in the otool load-closure above, so the loop never copied them. libggml
+  # finds them via a path baked in at BUILD time (the dev's Homebrew Cellar libexec); on any machine
+  # without that exact path it logs "no backends are loaded" and the model load fails. Copy the whole
+  # libexec/*.so into Frameworks so the app is self-contained; InferenceEngine points GGML_BACKEND_PATH
+  # at Frameworks at launch. MUST be the SAME ggml version as the bundled libggml-base — mixing a
+  # 0.13 core with newer backend plugins produces silent numerical garbage (repeating-token salad).
+  GGML_LIBEXEC="$(brew --prefix ggml 2>/dev/null)/libexec"
+  if [[ -d "$GGML_LIBEXEC" ]]; then
+    shopt -s nullglob
+    for so in "$GGML_LIBEXEC"/*.so; do cp -L "$so" "$FW/$(basename "$so")"; chmod u+w "$FW/$(basename "$so")"; done
+    shopt -u nullglob
+  else
+    echo "error: ggml libexec not found at '$GGML_LIBEXEC' — backend plugins would be missing." >&2; exit 1
+  fi
+
   # Repoint the executable's absolute deps to @rpath/<base> and add the Frameworks run-path.
   while IFS= read -r dep; do
     [[ "$dep" == /opt/homebrew/* ]] && install_name_tool -change "$dep" "@rpath/$(basename "$dep")" "$EXE"
@@ -189,7 +205,10 @@ if [[ "${RELEASE:-0}" == "1" ]]; then
   # available since macOS 11. (The proper fix is building llama.cpp with CMAKE_OSX_DEPLOYMENT_TARGET=14.0;
   # this keeps the Homebrew-bottle path shippable.) Runs before the inside-out codesign so the re-sign
   # seals the patched header. Order matters: vtool also invalidates the signature.
-  for f in "$FW"/*.dylib; do
+  # Includes the runtime backend plugins (*.so) copied above, which carry the same minos + absolute
+  # dep problems as the linked dylibs and so need the same id/dep/minos rewrite before signing.
+  shopt -s nullglob
+  for f in "$FW"/*.dylib "$FW"/*.so; do
     b="$(basename "$f")"
     install_name_tool -id "@rpath/$b" "$f"
     while IFS= read -r dep; do
@@ -198,13 +217,16 @@ if [[ "${RELEASE:-0}" == "1" ]]; then
     install_name_tool -add_rpath "@loader_path" "$f" 2>/dev/null || true
     xcrun vtool -set-build-version macos 14.0 14.0 -replace -output "$f" "$f"
   done
+  shopt -u nullglob
 
   echo "==> codesign (RELEASE) with Developer ID + hardened runtime: $SIGN_ID"
   # Sign INSIDE-OUT: each bundled dylib first (install_name_tool invalidated their signatures), then the
   # app (which signs the main executable with entitlements). No --deep — we sign the nested code ourselves.
-  for f in "$FW"/*.dylib; do
+  shopt -s nullglob
+  for f in "$FW"/*.dylib "$FW"/*.so; do
     codesign -s "$SIGN_ID" --force --timestamp --options runtime "$f"
   done
+  shopt -u nullglob
   # Bundled MCP helper in Resources/ is a Mach-O but NOT nested code that the app's
   # signature seals as executable — without an explicit sign it keeps its fake cctools
   # signature and notarization rejects it (no Developer ID, no timestamp, no hardened runtime).
