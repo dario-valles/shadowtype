@@ -23,6 +23,11 @@ extension Notification.Name {
     // Posted by AppDelegate while a catalog download is in flight; userInfo ["id": String,
     // "fraction": Double] — "fraction" absent while the total size is unknown (indeterminate).
     static let shadowtypeModelDownloadProgress = Notification.Name("shadowtypeModelDownloadProgress")
+    // Posted by AppDelegate whenever the inference engine's resident-model state changes (startup
+    // load + every live swap); userInfo ["loaded": Bool] plus an optional ["error": String]. The
+    // Models pane uses this for the Active-model pill so it reflects the ENGINE, not just file-on-disk
+    // — a model can be downloaded yet fail to load (e.g. Metal init failure on new GPU/OS).
+    static let shadowtypeEngineLoadStateChanged = Notification.Name("shadowtype.engineLoadStateChanged")
     // Posted by the General pane when the rewrite-hotkey chord (UserDefaults
     // "shadowtype.rewriteHotkeyChord") changes; AppDelegate re-registers the global hotkey.
     static let shadowtypeRewriteHotkeyChanged = Notification.Name("shadowtypeRewriteHotkeyChanged")
@@ -473,6 +478,11 @@ private struct ModelsPane: View {
     // Last failed download/swap reason, from .shadowtypeModelDidChange userInfo["error"].
     // Cleared on the next apply()/successful swap.
     @State private var downloadError: String?
+    // Whether the inference engine actually has the active model resident (from
+    // .shadowtypeEngineLoadStateChanged). Distinct from activeModelFileExists: a model can be on disk
+    // yet fail to load (Metal init failure on new GPU/OS) — the pill must not claim "Loaded" then.
+    @State private var engineLoaded = true
+    @State private var engineLoadError: String?
     // Imported entry pending the "Remove" confirmation dialog.
     @State private var removeCandidate: ImportedModelEntry?
     @State private var freeDisk = ""           // recomputed by rescan(), not per-render
@@ -508,10 +518,12 @@ private struct ModelsPane: View {
     @ViewBuilder private var activeModelPill: some View {
         if downloading != nil {
             Pill(text: "Downloading…", kind: .warn)
-        } else if activeModelFileExists {
-            Pill(text: "Loaded", kind: .good)
-        } else {
+        } else if !activeModelFileExists {
             Pill(text: "Not downloaded", kind: .warn)
+        } else if !engineLoaded {
+            Pill(text: "Failed to load", kind: .warn)
+        } else {
+            Pill(text: "Loaded", kind: .good)
         }
     }
 
@@ -523,6 +535,12 @@ private struct ModelsPane: View {
             if let err = downloadError {
                 Callout(systemImage: "exclamationmark.triangle.fill",
                         text: LocalizedStringKey(err), tint: .orange)
+            }
+
+            if let err = engineLoadError {
+                Callout(systemImage: "exclamationmark.triangle.fill",
+                        text: LocalizedStringKey("This model is on disk but failed to load, so no suggestions will appear: \(err) Full details are in diag.log."),
+                        tint: .orange)
             }
 
             Section("Active model") {
@@ -656,6 +674,10 @@ private struct ModelsPane: View {
         .onReceive(NotificationCenter.default.publisher(for: .shadowtypeModelDownloadProgress)) { note in
             guard let id = note.userInfo?["id"] as? String, id == downloading else { return }
             downloadFraction = note.userInfo?["fraction"] as? Double
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .shadowtypeEngineLoadStateChanged)) { note in
+            engineLoaded = note.userInfo?["loaded"] as? Bool ?? true
+            engineLoadError = engineLoaded ? nil : (note.userInfo?["error"] as? String)
         }
         .confirmationDialog(
             "Remove \u{201C}\(removeCandidate?.name ?? "model")\u{201D}?",

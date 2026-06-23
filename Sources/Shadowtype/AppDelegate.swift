@@ -160,9 +160,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run {
                     self.currentModelURL = url   // FR-LM-1: baseline for live-swap fallback
                     self.statusItem.setModelName(url.deletingPathExtension().lastPathComponent)
+                    NotificationCenter.default.post(
+                        name: .shadowtypeEngineLoadStateChanged, object: nil, userInfo: ["loaded": true])
                 }
             } catch {
+                // The engine failed to load the model on disk (e.g. Metal context init failure on a
+                // new GPU/OS). This is distinct from the Settings "Loaded" pill, which only checks that
+                // the file exists — so surface it where the user (and a bug report) can actually see it:
+                // the diag file and the menu bar. Without this the failure was NSLog-only and invisible.
+                let reason = (error as? LocalizedError)?.errorDescription ?? "\(error)"
                 NSLog("Shadowtype: model load failed: \(error)")
+                Diag.log("model load FAILED: \(reason)")
+                await MainActor.run {
+                    self.statusItem.setModelName("failed to load — see diag.log")
+                    NotificationCenter.default.post(
+                        name: .shadowtypeEngineLoadStateChanged, object: nil,
+                        userInfo: ["loaded": false, "error": reason])
+                }
             }
         }
 
@@ -658,6 +672,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NotificationCenter.default.post(
                         name: .shadowtypeModelDidChange, object: nil,
                         userInfo: ["id": entry.id, "ok": ok])
+                    NotificationCenter.default.post(
+                        name: .shadowtypeEngineLoadStateChanged, object: nil,
+                        userInfo: ["loaded": self.coordinator.isModelLoaded])
                 }
                 }
             } catch {

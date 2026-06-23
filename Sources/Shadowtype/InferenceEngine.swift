@@ -20,7 +20,7 @@ import os
 // .unsafeFlags(["-I/opt/homebrew/include"]) or a -Xcc -I/opt/homebrew/include build flag.
 // Verified: `swift build -Xcc -I/opt/homebrew/include` links the whole target cleanly.
 
-enum InferenceError: Error {
+enum InferenceError: Error, LocalizedError {
     case notLoaded
     case modelLoadFailed(String)
     case contextInitFailed
@@ -31,6 +31,17 @@ enum InferenceError: Error {
     // dropped tokens would be fim_pre / fim_suf — framing the model was trained on. Routes catch
     // this and return HTTP 400 with a clear message instead of letting the model emit garbage.
     case fimContextOverflow(tokens: Int, cap: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .notLoaded:                  return "No model is loaded."
+        case .modelLoadFailed(let path):  return "llama failed to load the model file at \(path) — the GGUF may be corrupt or unsupported by this build."
+        case .contextInitFailed:          return "llama failed to initialize the Metal context — the GPU/OS may not support this model's settings."
+        case .tokenizeFailed:             return "Tokenization failed."
+        case .decodeFailed(let code):     return "llama_decode failed (code \(code))."
+        case .fimContextOverflow(let t, let cap): return "Context overflow: \(t) tokens exceed the \(cap)-token cap."
+        }
+    }
 }
 
 final class InferenceEngine: InferenceEngineProtocol {

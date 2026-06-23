@@ -375,6 +375,25 @@ final class EditContextTracker {
             }
         }
 
+        // (1b) Synthesized end-of-text glyph (Chromium AXTextArea, e.g. YouTube comments). The field
+        // exposes kAXValue + kAXNumberOfCharacters + kAXReplaceRangeWithText but NEITHER kAXSelectedTextRange
+        // (so path 1 above never runs) NOR text markers (path 2 below returns nil) — leaving only the
+        // frame-anchored width ESTIMATE, whose SF-Pro-vs-web-font guess drifts the ghost off the caret
+        // (the YouTube gap). But AX param-attribute lists are routinely under-reported, so kAXBoundsForRange
+        // often still answers an explicit range here. We only fire at end-of-text, so synthesize the caret
+        // at the value's end and anchor on the LAST glyph's trailing edge (its rect keeps the real line
+        // height even when the empty-caret rect would collapse) — an EXACT caret, no font guessing. Gated on
+        // a missing selected range so fields that already position via path 1 are untouched.
+        if caretLocation(of: element) == nil, let n = characterCount(of: element), n > 0,
+           let glyph = axBoundsForRange(element, n - 1, 1),
+           glyph.size.height > 0, glyph.origin.x.isFinite, glyph.maxX.isFinite {
+            let synth = CGRect(x: glyph.maxX, y: glyph.minY, width: 0, height: glyph.size.height)
+            if caretRectIsPlausible(synth, element: element) {
+                Diag.log("caret: path=synth axRect=\(Int(synth.minX)),\(Int(synth.minY)) \(Int(synth.width))x\(Int(synth.height))")
+                return convertAXRectToCocoa(synth)
+            }
+        }
+
         // (2) Web text-marker bounds (PRD R2, FR-OV-6).
         if let axRect = AXTextProbe.webCaretBounds(of: element), caretRectIsPlausible(axRect, element: element) {
             Diag.log("caret: path=web axRect=\(Int(axRect.minX)),\(Int(axRect.minY)) \(Int(axRect.width))x\(Int(axRect.height))")
