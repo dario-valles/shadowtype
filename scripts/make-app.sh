@@ -195,6 +195,14 @@ if [[ "${RELEASE:-0}" == "1" ]]; then
     [[ "$dep" == /opt/homebrew/* ]] && install_name_tool -change "$dep" "@rpath/$(basename "$dep")" "$EXE"
   done < <(otool -L "$EXE" | awk 'NR>1{print $1}' | grep -E '^/opt/homebrew' || true)
   install_name_tool -add_rpath "@executable_path/../Frameworks" "$EXE" 2>/dev/null || true
+  # Strip the dev-box rpaths SwiftPM baked in (/opt/homebrew/* from Package.swift, /Applications/Xcode.app/*
+  # swift toolchain). They don't just fail to exist on a clean Mac — they're searched BEFORE
+  # @executable_path/../Frameworks, so a user who happens to have a DIFFERENT Homebrew ggml installed
+  # would have dyld load THAT over our bundled libs → version mismatch → garbage output (the same class of
+  # bug as a stale Cellar symlink). After this the only non-system search paths are the bundle + @loader_path.
+  while IFS= read -r rp; do
+    install_name_tool -delete_rpath "$rp" "$EXE" 2>/dev/null || true
+  done < <(otool -l "$EXE" | awk '/LC_RPATH/{f=1} f&&/ path /{print $2; f=0}' | grep -E '^/opt/homebrew|^/Applications/Xcode' || true)
 
   # Set each bundled lib's id to @rpath/<base>, repoint its absolute deps, and let it find siblings.
   # Also retarget LC_BUILD_VERSION → macOS 14.0: Homebrew builds ggml/llama.cpp/libomp with
@@ -231,7 +239,14 @@ if [[ "${RELEASE:-0}" == "1" ]]; then
   # signature seals as executable — without an explicit sign it keeps its fake cctools
   # signature and notarization rejects it (no Developer ID, no timestamp, no hardened runtime).
   MCP_BUNDLED="$APP_DIR/Contents/Resources/shadowtype-mcp"
-  [[ -f "$MCP_BUNDLED" ]] && codesign -s "$SIGN_ID" --force --timestamp --options runtime "$MCP_BUNDLED"
+  if [[ -f "$MCP_BUNDLED" ]]; then
+    # Same dead-rpath strip as the main executable (the MCP helper only has the stale Xcode
+    # toolchain rpath; its Swift runtime resolves from the OS /usr/lib/swift). Before signing.
+    while IFS= read -r rp; do
+      install_name_tool -delete_rpath "$rp" "$MCP_BUNDLED" 2>/dev/null || true
+    done < <(otool -l "$MCP_BUNDLED" | awk '/LC_RPATH/{f=1} f&&/ path /{print $2; f=0}' | grep -E '^/opt/homebrew|^/Applications/Xcode' || true)
+    codesign -s "$SIGN_ID" --force --timestamp --options runtime "$MCP_BUNDLED"
+  fi
   codesign -s "$SIGN_ID" --force --timestamp \
     --options runtime --entitlements "$ENTITLEMENTS" "$APP_DIR"
 else
