@@ -193,12 +193,15 @@ final class InferenceEngine: InferenceEngineProtocol {
 
         // ggml loads its compute backends (Metal/CPU/BLAS) as runtime plugins, searching a path baked
         // into libggml at build time (the dev's Homebrew Cellar). A distributed .app has no such path,
-        // so without this it logs "no backends are loaded" and every model load fails. Point ggml at the
-        // backend .so's we bundle in Contents/Frameworks (see make-app.sh). Dev builds (`swift run`, no
-        // .app bundle) lack the bundled backends and keep the working Homebrew Cellar fallback.
+        // so without this it logs "no backends are loaded" and every model load fails. Load the backend
+        // .so's we bundle in Contents/Frameworks (see make-app.sh) from that directory. NOTE: the
+        // GGML_BACKEND_PATH env var is dlopen()'d as a single FILE — pointing it at the Frameworks
+        // DIRECTORY fails with "not a file" and loads nothing (issue #3). ggml_backend_load_all_from_path
+        // enumerates the dir and loads each backend by name. Dev builds (`swift run`, no .app bundle)
+        // lack the bundled backends and keep the working Homebrew Cellar fallback.
         if let fw = Bundle.main.privateFrameworksPath,
            FileManager.default.fileExists(atPath: fw + "/libggml-metal.so") {
-            setenv("GGML_BACKEND_PATH", fw, 1)
+            ggml_backend_load_all_from_path(fw)
         }
 
         llama_backend_init()

@@ -178,8 +178,8 @@ if [[ "${RELEASE:-0}" == "1" ]]; then
   # RUNTIME — they are NOT in the otool load-closure above, so the loop never copied them. libggml
   # finds them via a path baked in at BUILD time (the dev's Homebrew Cellar libexec); on any machine
   # without that exact path it logs "no backends are loaded" and the model load fails. Copy the whole
-  # libexec/*.so into Frameworks so the app is self-contained; InferenceEngine points GGML_BACKEND_PATH
-  # at Frameworks at launch. MUST be the SAME ggml version as the bundled libggml-base — mixing a
+  # libexec/*.so into Frameworks so the app is self-contained; InferenceEngine loads them at launch via
+  # ggml_backend_load_all_from_path(Frameworks). MUST be the SAME ggml version as the bundled libggml-base — mixing a
   # 0.13 core with newer backend plugins produces silent numerical garbage (repeating-token salad).
   GGML_LIBEXEC="$(brew --prefix ggml 2>/dev/null)/libexec"
   if [[ -d "$GGML_LIBEXEC" ]]; then
