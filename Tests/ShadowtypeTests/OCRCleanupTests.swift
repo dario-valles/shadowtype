@@ -428,8 +428,8 @@ final class OCRCleanupTests: XCTestCase {
             instruction: nil, styleHint: nil, styleEnabled: false,
             clipboard: nil, clipboardEnabled: false,
             ocr: ctx, ocrEnabled: true, steerLanguageName: "Catalan")
-        XCTAssertTrue(steered.contains("\n\nText (in Catalan):\n"))
-        XCTAssertFalse(steered.contains("\n\nText:\n"))
+        XCTAssertTrue(steered.prompt.contains("\n\nText (in Catalan):\n"))
+        XCTAssertFalse(steered.prompt.contains("\n\nText:\n"))
 
         // nil steer is byte-identical to the bare-marker output (guards KV-reuse identity).
         let bare = CompletionCoordinator.assemblePrompt(
@@ -437,8 +437,8 @@ final class OCRCleanupTests: XCTestCase {
             instruction: nil, styleHint: nil, styleEnabled: false,
             clipboard: nil, clipboardEnabled: false,
             ocr: ctx, ocrEnabled: true)
-        XCTAssertTrue(bare.contains("\n\nText:\n"))
-        XCTAssertFalse(bare.contains("Text (in"))
+        XCTAssertTrue(bare.prompt.contains("\n\nText:\n"))
+        XCTAssertFalse(bare.prompt.contains("Text (in"))
     }
 
     func testSuggestionConflictsWithContext() {

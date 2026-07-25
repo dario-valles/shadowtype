@@ -527,9 +527,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Personalization → "strength" (0...3, default 3 when unset). 0 disables the style hint.
         coordinator.personalizationStrength =
             (UserDefaults.standard.object(forKey: "shadowtype.personalizationStrength") as? Int) ?? 3
-        // Context → "Context window size" (tokens; default 1024 when unset). Drives the engine prefix cap.
-        engine.maxContextTokens =
+        // Context → "Context window size" (tokens; default 1024 when unset). Drives the engine prefix cap
+        // AND the coordinator's prompt byte budget — THE TWO MUST STAY IN SYNC, which is why they are set
+        // together here (this is the only place that knows the setting). InferenceEngine.generate()
+        // front-trims the tokenized prompt to this cap, and the front of the prompt is the `Context:`
+        // header plus every context block, so a budget bigger than the cap silently throws away the
+        // context we just paid to build. See CompletionCoordinator.promptBudgetBytes.
+        let contextTokens =
             (UserDefaults.standard.object(forKey: "shadowtype.contextWindowTokens") as? Int) ?? 1024
+        engine.maxContextTokens = contextTokens
+        coordinator.promptCharBudget =
+            CompletionCoordinator.promptBudgetBytes(forContextTokens: contextTokens)
         // Models → "Unload model when idle" (minutes; 0 == Never; default 10 matches the picker). The
         // idle timer reads this.
         idleUnloadMinutes =

@@ -514,6 +514,12 @@ final class CompletionCoordinator {
     // queue promptly, and is itself superseded (returns nothing) if the user triggers again. Unlike the
     // ghost path this is a ONE-SHOT instruction-style few-shot prompt (RewriteAction), so the KV cache
     // resets to a cold prefill — acceptable for an explicit, occasional action.
+    //
+    // It runs on its OWN sequence (2), never the ghost's seq 0. The few-shot prompt diverges from the
+    // ghost stream at token 0, so the engine's reuseLength() returns 0 and it resets the seq — on seq 0
+    // that dropped the ENTIRE ghost prefix, making the first keystroke after every rewrite pay a second
+    // full cold prefill. Seq 1 is the API/MCP slot (see runRawCompletion), so rewrite takes 2; the
+    // engine's n_seq_max is 4 and kv_unified means the seqs share one n_ctx pool rather than carving it up.
     func rewrite(selection: String, action: RewriteAction, completion: @escaping (String?) -> Void) {
         guard isLicensed, engine.isLoaded, !selection.isEmpty else { completion(nil); return }
         let tone = instructionStore?.effectiveInstruction(bundleId: context.frontmostBundleId)
@@ -523,14 +529,9 @@ final class CompletionCoordinator {
         let lang = Self.dominantLanguage(selection, minConfidence: 0.50).flatMap(Self.englishLanguageName)
         let prompt = RewriteAction.prompt(for: action, selection: selection, userTone: tone, language: lang)
         let budget = RewriteAction.maxTokens(forSelection: selection)
-        // A rewrite is a FULL multi-sentence transformation, not an inline ghost. The ghost stop
-        // policy (maxWords cap + first-sentence/newline stop) would truncate it — a multi-sentence
-        // selection came back as just the first ~5 words ("Have you installed the beta"). Stream raw
-        // tokens governed only by maxTokens + our few-shot stop strings: keep the ghost's low-temp,
-        // repeat-penalized sampling (good for faithful rewrites) but turn OFF the engine stop policy.
-        var params = SamplingParams.ghostDefaults
-        params.useEngineStopPolicy = false
-        params.stopStrings = ["\nText:", "\nText (", "\nRewritten:"]
+        // Ghost sampling minus the ghost stop policy, plus a fresh seed per call so ⌘R redo actually
+        // re-rolls instead of replaying the same text (see SamplingParams.rewriteDefaults).
+        let params = SamplingParams.rewriteDefaults()
         let myGen = bumpGeneration()
         engine.requestCancel()     // stop a running ghost decode so the serial queue frees up promptly
         Diag.log("rewrite: action=\(action.rawValue) selLen=\(selection.count) budget=\(budget) lang=\(lang ?? "auto")")
@@ -538,7 +539,7 @@ final class CompletionCoordinator {
             guard let self else { return }
             var acc = ""
             do {
-                try self.engine.generate(prompt: prompt, maxTokens: budget, seqID: 0, params: params,
+                try self.engine.generate(prompt: prompt, maxTokens: budget, seqID: 2, params: params,
                                          requiredPrefix: nil, onToken: { piece in
                     guard self.isCurrent(myGen) else { return false }
                     acc += piece
@@ -549,6 +550,10 @@ final class CompletionCoordinator {
             } catch {
                 Diag.log("rewrite: ERROR \(error)")
             }
+            // Hand seq 2's cells straight back: `kv_unified` shares one n_ctx pool, and a rewrite prompt
+            // always diverges at token 0, so this cache can never be reused — holding it would just starve
+            // the ghost (ghost + rewrite both near the cap exceed the pool and llama_decode fails).
+            self.engine.releaseSeq(2)
             let cleaned = RewriteAction.cleanOutput(acc, selectionWasMultiline: selection.contains("\n"))
             DispatchQueue.main.async {
                 guard self.isCurrent(myGen) else { return }
@@ -865,8 +870,9 @@ final class CompletionCoordinator {
         generationIsHealed = (requiredPrefix != nil)
 
         // FR-CTX-1/2/3, FR-PA-3: assemble leading context, each block gated by isLicensed + its toggle,
-        // then the user's prefix as the forward-from-caret tail. Default Free -> effectivePrompt == prefix,
-        // so KV reuse and behavior are unchanged. Shell mode swaps in the few-shot `$ command` framing
+        // then the user's prefix as the forward-from-caret tail. Default Free -> effectivePrompt is the
+        // prefix (anchor-windowed once it outgrows the budget), so KV reuse holds across a typing burst.
+        // Shell mode swaps in the few-shot `$ command` framing
         // built from the terminal buffer (the OCR/style/clipboard context blocks don't apply there).
         let effectivePrompt = shellMode
             ? Self.assembleShellPrompt(prefix: promptPrefix, terminalBuffer: terminalBuffer)
@@ -1729,7 +1735,8 @@ final class CompletionCoordinator {
     //                                              NOT licence-gated; it is a Free feature).
     // wrapped as `Context:\n<blocks>\n\nText:\n<prefix>` so the base model conditions on the context
     // (see assemblePrompt). The prefix STAYS the forward-from-caret tail (FR-CE-9). Free default
-    // (no licence, OCR off) yields exactly `prefix`, so KV reuse + behaviour are unchanged.
+    // (no licence, OCR off) yields exactly `prefix` up to the budget, and an ANCHORED tail window of it
+    // beyond — either way the prompt head holds still across a burst, so KV reuse is preserved.
     private func assembledPrompt(prefix: String) -> String {
         // Resolve each (already-gated-ready) source, then hand the gating + ordering + join to the pure
         // static below so it is unit-testable without AX/model/overlay (the leak-when-unlicensed property
@@ -1760,8 +1767,9 @@ final class CompletionCoordinator {
 
         // Language steering (user choice: match the surrounding conversation, else hide). Detect the
         // dominant language of the SAME on-screen context that goes into the prompt (chrome already
-        // stripped). Stash it for renderSuggestion's drift suppression, and pass its English name to the
-        // assembler so the `Text (in <Language>):` marker steers the base model toward it. nil when
+        // stripped). Stash it for renderSuggestion's drift suppression (only if that context survives the
+        // budget — see below), and pass its English name to the assembler so the `Text (in <Language>):`
+        // marker steers the base model toward it. nil when
         // there's no confident single-language context → behaviour unchanged.
         // Detect the steer language from the context NEAREST the caret, not the whole capture. Slack and
         // most chat apps expose no AX web-area, so the context is a full-screen OCR dominated by English
@@ -1772,9 +1780,8 @@ final class CompletionCoordinator {
         // "has trob" misreads as English at 0.95.)
         let ctxLang = (useScreenOCR ? ocr.map { Self.caretLocalContextTail($0) } : nil)
             .flatMap { Self.dominantLanguage($0, minConfidence: 0.70) }
-        generationContextLang = ctxLang
 
-        return Self.assemblePrompt(
+        let assembled = Self.assemblePrompt(
             prefix: prefix, isLicensed: isLicensed,
             instruction: instruction,
             styleHint: styleHint, styleEnabled: styleProfileEnabled,
@@ -1782,6 +1789,15 @@ final class CompletionCoordinator {
             ocr: ocr, ocrEnabled: useScreenOCR,
             steerLanguageName: ctxLang.flatMap(Self.englishLanguageName),
             totalChars: promptCharBudget)
+        // Arm renderSuggestion's context-drift suppression ONLY when the OCR block actually SURVIVED the
+        // budget. A long draft eats most of the budget and the lowest-priority OCR block is dropped — the
+        // model then never sees that context at all, so hiding its completion for "drifting" from it hides
+        // a perfectly good ghost on evidence the model was never given. Committed after assembly for that
+        // reason (it used to be set from the pre-assembly detection, which couldn't know). Deliberately
+        // asymmetric with the steer marker above, which still carries the detected name: steering toward
+        // the language the user is actually writing in is harmless when the block is gone; HIDING is not.
+        generationContextLang = assembled.ocrKept ? ctxLang : nil
+        return assembled.prompt
     }
 
     // English display name for a detected language ("ca" -> "Catalan"), used to steer the base model in
@@ -1791,11 +1807,29 @@ final class CompletionCoordinator {
         Locale(identifier: "en_US").localizedString(forLanguageCode: language.rawValue)
     }
 
-    // #8: global character ceiling for the assembled prompt (context blocks + prefix). ~6000 chars
-    // ≈1500 tokens — well inside the engine's 4096-token window with generation headroom — so the
-    // per-feature caps (OCR/clipboard/style) plus this total guard keep the caret text from being
-    // crowded out. The prefix is filled first and never starved.
-    private let promptCharBudget = 6000
+    // #8: global BYTE ceiling for the assembled prompt (context blocks + prefix). MIRRORED FROM the
+    // engine's live token cap by AppDelegate.syncToggles, right next to where it sets
+    // `engine.maxContextTokens` — THE TWO MUST STAY IN SYNC. They used to drift: this was hardcoded to
+    // 6000 ("well inside the engine's 4096-token window"), but the window is the USER's
+    // `shadowtype.contextWindowTokens` setting, 1024 by default. InferenceEngine.generate() front-trims
+    // the tokenized prompt to that cap, and the FRONT is exactly where `Context:\n` + instruction +
+    // style + clipboard + OCR live — so every context block we paid to build was decapitated and the
+    // model got a headless fragment glued to `\n\nText:\n`, the flat-document shape the framing below
+    // exists to avoid. This default mirrors the 1024-token default of that key.
+    var promptCharBudget = CompletionCoordinator.promptBudgetBytes(forContextTokens: 1024)
+
+    // Pure (testable): prompt bytes that safely fit `tokens` tokens. 3.5 bytes/token is deliberately
+    // BELOW the ~4 bytes/token of mixed English prose: under-filling only wastes a little of the window,
+    // while over-filling reintroduces the front-trim that eats the context blocks. The reserve covers the
+    // framing the section budget is not charged for — `Context:\n`, the `\n\n` block separators and the
+    // longest `\n\nText (in <Language>):\n` marker.
+    static func promptBudgetBytes(forContextTokens tokens: Int) -> Int {
+        let framingReserve = 64
+        // Clamped before the Double math: the value comes from user defaults, and an absurd hand-edited
+        // one would otherwise overflow the Int conversion and trap. The engine clamps to n_ctx anyway.
+        let tokens = min(max(0, tokens), 32_768)
+        return max(256, Int(Double(tokens) * 3.5) - framingReserve)
+    }
 
     // Pure leading-context assembly + GATING (testable: no AX/model/overlay). Prepends, in order:
     //   1. instruction (paid, FR-PA-3)  2. styleHint (paid, FR-CTX-3)  3. clipboard (paid, FR-CTX-2)
@@ -1804,19 +1838,22 @@ final class CompletionCoordinator {
     // (FR-CE-9). The three PAID blocks are
     // dropped whenever `isLicensed` is false (or their toggle is off / value empty), so a Free user can
     // never leak a paid context source. Empty result (no blocks) returns exactly `prefix` (KV reuse safe).
-    // `totalChars` is the global character budget for the whole prompt (context blocks + prefix). It
+    // `totalChars` is the global BYTE budget for the whole prompt (context blocks + prefix). It
     // defaults to "unbounded" so existing callers/tests keep the exact prior behavior; the live caller
     // passes a finite budget so a noisy screen capture can't crowd out the caret text or blow the
     // context window (#8 PromptSectionBudget). The prefix is given top fill-priority and is never
     // dropped — the lower-priority context blocks (OCR first, then clipboard, style, instruction) trim
-    // or drop to fit. Surviving blocks keep their original render order.
+    // or drop to fit — but it is itself capped at a share of the budget so it can't drop ALL of them
+    // (see prefixCap below). Surviving blocks keep their original render order.
+    // Returns the prompt plus whether the OCR block survived the budget, which the caller needs to decide
+    // if the render-time context-language suppression may be armed (see assembledPrompt).
     static func assemblePrompt(prefix: String, isLicensed: Bool,
                                instruction: String?,
                                styleHint: String?, styleEnabled: Bool,
                                clipboard: String?, clipboardEnabled: Bool,
                                ocr: String?, ocrEnabled: Bool,
                                steerLanguageName: String? = nil,
-                               totalChars: Int = .max) -> String {
+                               totalChars: Int = .max) -> (prompt: String, ocrKept: Bool) {
         // A base model's tokenizer attaches the leading space to each word (SentencePiece `▁word`), so a
         // prompt ending in a bare space is a "dangling space" the model can't continue cleanly — it
         // degrades into word-salad ("…castillo y que " -> "2 erme en un r es una una…", while the same
@@ -1829,29 +1866,46 @@ final class CompletionCoordinator {
         // plus the prefix at top priority so it survives a tight budget. Priorities set the FILL order
         // (prefix first, OCR last); the allocator trims/drops lowest-priority blocks to fit totalChars.
         var sections: [PromptSection] = []
-        func addContext(_ s: String?, priority: Int) {
+        func addContext(_ s: String?, name: String = "ctx", priority: Int) {
             guard let s, !s.isEmpty else { return }
             // maxChars is a BYTE budget (PromptSectionBudget costs in UTF-8 bytes); each section's own
             // max is its full byte length so it's only trimmed when the TOTAL budget binds.
-            sections.append(PromptSection(name: "ctx", content: s, priority: priority,
+            sections.append(PromptSection(name: name, content: s, priority: priority,
                                           minChars: 0, maxChars: PromptSectionBudget.cost(s),
                                           truncation: .preserveEnd))
         }
         if isLicensed { addContext(instruction, priority: 80) }              // FR-PA-3 (paid)
         if isLicensed && styleEnabled { addContext(styleHint, priority: 60) } // FR-CTX-3 (paid)
         if isLicensed && clipboardEnabled { addContext(clipboard, priority: 40) } // FR-CTX-2 (paid)
-        if ocrEnabled { addContext(ocr, priority: 20) }                     // FR-CTX-1 (FREE)
-        // The prefix (kept nearest-the-caret tail) — top priority, never starved.
-        let prefixSection = PromptSection(name: "prefix", content: prefix, priority: 1000,
-                                          minChars: 0, maxChars: PromptSectionBudget.cost(prefix),
+        if ocrEnabled { addContext(ocr, name: "ocr", priority: 20) }         // FR-CTX-1 (FREE)
+        // The prefix (kept nearest-the-caret tail) — top priority, so it still wins under contention, but
+        // CAPPED so it can't take the whole budget. It used to declare its own full length as maxChars:
+        // the allocator fills highest-priority first, so any draft longer than the budget consumed 100% of
+        // it, every context block then trimmed to "" and was dropped, and the caller silently got the BARE
+        // prefix — instruction, style, clipboard and OCR vanished in any document past the budget, with no
+        // log and nothing visible to the user. 65% leaves the context blocks reserved room while keeping
+        // the caret text dominant; the prefix still keeps its tail (nearest the caret) when trimmed.
+        // ...but ONLY when there is context to reserve room for. With no blocks (the Free default: no
+        // licence, OCR off) a 65% cap would shrink the caret window for nothing — wasting a third of the
+        // budget AND starting the sliding truncation below a third earlier than the engine's own cap would.
+        let prefixCap = sections.isEmpty ? totalChars : max(1, totalChars / 100 * 65)
+        // Anchored so the kept window's START holds still across a typing burst. A plain tail cut slides one
+        // byte per keystroke, which diverges the prompt at its first token and costs a full cold re-prefill
+        // every fire (see PromptSectionBudget.anchoredTail). Pre-windowed here, so the section declares its
+        // own already-fitting length and the allocator never re-cuts it unanchored.
+        let windowedPrefix = PromptSectionBudget.anchoredTail(prefix, maxCost: prefixCap)
+        let prefixSection = PromptSection(name: "prefix", content: windowedPrefix, priority: 1000,
+                                          minChars: 0,
+                                          maxChars: PromptSectionBudget.cost(windowedPrefix),
                                           truncation: .preserveEnd)
         sections.append(prefixSection)
 
         let allocated = PromptSectionBudget.allocate(sections, totalChars: totalChars)
         let outPrefix = allocated.first(where: { $0.name == "prefix" })?.content ?? prefix
-        let blocks = allocated.filter { $0.name == "ctx" }.map(\.content)
+        let blocks = allocated.filter { $0.name != "prefix" }.map(\.content)
+        let ocrKept = allocated.contains { $0.name == "ocr" }
 
-        guard !blocks.isEmpty else { return outPrefix }
+        guard !blocks.isEmpty else { return (outPrefix, ocrKept) }
         // Document-shaped framing: a base (pretrained) model follows the `Header:\n…` pattern from its
         // corpus, so labelling the blocks as `Context:` demotes them to reference material and the
         // `Text:` marker tells the model the prefix is the live text to CONTINUE conditioned on that
@@ -1865,7 +1919,7 @@ final class CompletionCoordinator {
         // `Text:` marker, byte-identical to the pre-steer output. The name derives from the cached
         // context, so it's stable across a burst (KV warm path preserved).
         let textMarker = steerLanguageName.map { "\n\nText (in \($0)):\n" } ?? "\n\nText:\n"
-        return "Context:\n" + blocks.joined(separator: "\n\n") + textMarker + outPrefix
+        return ("Context:\n" + blocks.joined(separator: "\n\n") + textMarker + outPrefix, ocrKept)
     }
 
     // MARK: - Shell-command framing (terminal shell-command mode)

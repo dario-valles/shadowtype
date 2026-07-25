@@ -159,6 +159,35 @@ final class CotabbyGrabsTests: XCTestCase {
         XCTAssertEqual(out.map(\.content), ["AAAA", "BBBB"])   // unbounded → nothing trimmed
     }
 
+    // The property the anchored window exists for: while the user types, the KEPT WINDOW'S HEAD must hold
+    // still, so each assembled prompt is a strict extension of the last one and the engine's
+    // longest-common-prefix KV reuse survives. A plain `.preserveEnd` cut slides one byte per keystroke and
+    // diverges at the first token, forcing a cold re-prefill on every fire.
+    func testAnchoredTailHeadIsStableAcrossKeystrokes() {
+        let maxCost = 1000, anchor = 512
+        var heads = Set<String>()
+        // Simulate 200 consecutive keystrokes on a draft already past the budget.
+        for n in 1500...1700 {
+            let draft = String(repeating: "x", count: n - 20) + String(repeating: "y", count: 20)
+            let win = PromptSectionBudget.anchoredTail(draft, maxCost: maxCost, anchor: anchor)
+            XCTAssertLessThanOrEqual(PromptSectionBudget.cost(win), maxCost)   // never exceeds the cap
+            XCTAssertTrue(draft.hasSuffix(win))                                // always the caret-side tail
+            heads.insert(String(win.prefix(24)))
+        }
+        // 201 keystrokes spanning 200 bytes of growth: an unanchored window would produce ~201 distinct
+        // heads (one re-prefill each). Anchored to 512, it re-anchors at most once.
+        XCTAssertLessThanOrEqual(heads.count, 2, "window head slid \(heads.count) times; anchoring is broken")
+    }
+
+    func testAnchoredTailIsLosslessUnderBudgetAndNeverExceedsCap() {
+        XCTAssertEqual(PromptSectionBudget.anchoredTail("hello", maxCost: 1000), "hello")   // fits → untouched
+        // Rounding the drop UP keeps the window at or below the cap, never above it.
+        for n in 900...1100 {
+            let s = String(repeating: "z", count: n)
+            XCTAssertLessThanOrEqual(PromptSectionBudget.cost(PromptSectionBudget.anchoredTail(s, maxCost: 1000, anchor: 64)), 1000)
+        }
+    }
+
     func testBudgetTruncationEnds() {
         let preserveEnd = [PromptSection(name: "x", content: "abcdef", priority: 1, minChars: 0, maxChars: 6, truncation: .preserveEnd)]
         XCTAssertEqual(PromptSectionBudget.allocate(preserveEnd, totalChars: 3).first?.content, "def")
@@ -183,7 +212,7 @@ final class CotabbyGrabsTests: XCTestCase {
             prefix: "the quick brown", isLicensed: true,
             instruction: "be terse", styleHint: nil, styleEnabled: false,
             clipboard: nil, clipboardEnabled: false, ocr: nil, ocrEnabled: false)
-        XCTAssertEqual(p, "Context:\nbe terse\n\nText:\nthe quick brown")
+        XCTAssertEqual(p.prompt, "Context:\nbe terse\n\nText:\nthe quick brown")
     }
 
     func testAssemblePromptBudgetProtectsPrefix() {
@@ -193,8 +222,76 @@ final class CotabbyGrabsTests: XCTestCase {
             instruction: nil, styleHint: nil, styleEnabled: false,
             clipboard: nil, clipboardEnabled: false, ocr: bigOCR, ocrEnabled: true,
             totalChars: 200)
-        XCTAssertTrue(p.hasSuffix("Text:\nmy real sentence so far"))   // caret text never starved
-        XCTAssertLessThanOrEqual(p.count, 260)                         // budget + framing overhead
+        XCTAssertTrue(p.prompt.hasSuffix("Text:\nmy real sentence so far"))  // caret text never starved
+        XCTAssertLessThanOrEqual(p.prompt.count, 260)                        // budget + framing overhead
+    }
+
+    // The other half of "never starved": the prefix must not starve the CONTEXT either. It used to
+    // declare its own full length as maxChars, so any draft longer than the budget took 100% of it and
+    // every context block trimmed to "" — instruction/style/clipboard/OCR silently vanished in long
+    // documents and the caller got the bare prefix (the flat-document shape that yields word-salad).
+    func testAssemblePromptKeepsContextWhenPrefixOverflowsBudget() {
+        let budget = 1000
+        let bigPrefix = String(repeating: "a ", count: 5000)   // 10 000 bytes of draft — 10× the budget
+        let p = CompletionCoordinator.assemblePrompt(
+            prefix: bigPrefix, isLicensed: true,
+            instruction: "reply in a friendly tone", styleHint: nil, styleEnabled: false,
+            clipboard: nil, clipboardEnabled: false, ocr: nil, ocrEnabled: false,
+            totalChars: budget)
+        XCTAssertTrue(p.prompt.hasPrefix("Context:\n"))                 // framing survives…
+        XCTAssertTrue(p.prompt.contains("reply in a friendly tone"))    // …and so does the instruction
+        // The prefix is capped at 65% of the budget: still dominant, no longer unbounded. Asserted as a
+        // RANGE, not an exact 650: the window is anchor-quantized (PromptSectionBudget.anchoredTail) so its
+        // head holds still while typing, which costs up to one step of kept bytes. The bounds still fail if
+        // the cap is removed (unbounded → 10 000) or if the prefix collapses.
+        let keptPrefix = p.prompt.components(separatedBy: "\n\nText:\n").last ?? ""
+        XCTAssertLessThanOrEqual(PromptSectionBudget.cost(keptPrefix), 650)
+        XCTAssertGreaterThan(PromptSectionBudget.cost(keptPrefix), 650 - 650 / 4)
+        // Whole prompt stays inside the budget plus the framing the sections aren't charged for.
+        XCTAssertLessThanOrEqual(PromptSectionBudget.cost(p.prompt), budget + 64)
+    }
+
+    // assemblePrompt reports whether the OCR block SURVIVED, because CompletionCoordinator arms the
+    // render-time context-language suppression off that fact: hiding a ghost for "drifting" from screen
+    // context that the budget dropped means suppressing on evidence the model was never given.
+    func testAssemblePromptReportsWhetherOCRSurvivedTheBudget() {
+        let screen = "Aquesta és una conversa en català sobre la feina."
+        let fits = CompletionCoordinator.assemblePrompt(
+            prefix: "També necesito ", isLicensed: false,
+            instruction: nil, styleHint: nil, styleEnabled: false,
+            clipboard: nil, clipboardEnabled: false, ocr: screen, ocrEnabled: true,
+            totalChars: 2000)
+        XCTAssertTrue(fits.ocrKept)
+        XCTAssertTrue(fits.prompt.contains(screen))
+
+        // Prefix takes its 65%, the higher-priority (paid) instruction takes the rest → OCR, lowest
+        // priority, trims to nothing and is dropped.
+        let starved = CompletionCoordinator.assemblePrompt(
+            prefix: String(repeating: "draft ", count: 200), isLicensed: true,
+            instruction: String(repeating: "instruction ", count: 40), styleHint: nil, styleEnabled: false,
+            clipboard: nil, clipboardEnabled: false, ocr: screen, ocrEnabled: true,
+            totalChars: 100)
+        XCTAssertFalse(starved.ocrKept)
+        XCTAssertFalse(starved.prompt.contains("català"))
+        XCTAssertTrue(starved.prompt.contains("instruction"))   // the paid block still wins over OCR
+    }
+
+    // The prompt budget is derived from the engine's live token cap instead of a hardcoded 6000 that
+    // assumed a 4096-token window: the default window is 1024 tokens, so a 6000-byte prompt was
+    // front-trimmed by InferenceEngine.generate() — and the front is the `Context:` header plus every
+    // context block. Must stay under ~4 bytes/token (English prose) at every picker step.
+    func testPromptBudgetFitsInsideTheEngineTokenCap() {
+        for tokens in [512, 1024, 2048, 3072] {   // the Settings → Context picker steps
+            let budget = CompletionCoordinator.promptBudgetBytes(forContextTokens: tokens)
+            XCTAssertLessThan(budget, tokens * 4, "budget must under-fill the window at \(tokens)")
+            XCTAssertGreaterThan(budget, tokens, "budget shouldn't be needlessly tiny at \(tokens)")
+        }
+        // Strictly monotone in the setting, and the old hardcoded 6000 is now out of reach at the default.
+        XCTAssertLessThan(CompletionCoordinator.promptBudgetBytes(forContextTokens: 1024), 6000)
+        XCTAssertGreaterThan(CompletionCoordinator.promptBudgetBytes(forContextTokens: 3072),
+                             CompletionCoordinator.promptBudgetBytes(forContextTokens: 2048))
+        // A degenerate/absent setting can never yield a zero or negative budget.
+        XCTAssertGreaterThanOrEqual(CompletionCoordinator.promptBudgetBytes(forContextTokens: 0), 256)
     }
 
     // MARK: - OverlayRenderer pure geometry/colors (RTL clamp + appearance-adaptive palette)
@@ -301,6 +398,8 @@ final class CotabbyGrabsTests: XCTestCase {
         func load(modelPath: String) throws { loadCalled = true; isLoaded = true }
         func unload() { isLoaded = false }
         func requestCancel() {}
+        private(set) var releasedSeqs: [Int32] = []
+        func releaseSeq(_ seqID: Int32) { releasedSeqs.append(seqID) }
         func generate(prompt: String, maxTokens: Int,
                       seqID: Int32, params: SamplingParams,
                       requiredPrefix: [UInt8]?,

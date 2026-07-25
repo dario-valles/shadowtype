@@ -904,7 +904,8 @@ private struct ContextPane: View {
     @State private var unlocked = Entitlement.isUnlocked
     @AppStorage("shadowtype.useScreenOCR") private var useScreenOCR = false
     @AppStorage("clipboardContextEnabled") private var clipboardContext = false
-    // Live: AppDelegate.syncToggles caps engine.maxContextTokens from this key.
+    // Live: AppDelegate.syncToggles caps engine.maxContextTokens from this key AND derives the
+    // coordinator's prompt byte budget from it, so this picker sizes the context blocks too.
     @AppStorage("shadowtype.contextWindowTokens") private var contextTokens = 1024
 
     var body: some View {
@@ -925,13 +926,17 @@ private struct ContextPane: View {
                 .disabled(!unlocked)
                 caption("Include recent clipboard text as context when relevant. Nothing is stored; the clipboard is read only while this is on.")
 
+                // 3072 is the top usable step: the engine runs a 4096-token context and reserves 256 for
+                // generation, so anything above ~3840 is silently clamped. Without it the top half of the
+                // window was unreachable from the UI.
                 Picker("Context window size", selection: $contextTokens) {
                     Text("512").tag(512)
                     Text("1024").tag(1024)
                     Text("2048").tag(2048)
+                    Text("3072").tag(3072)
                 }
                 .pickerStyle(.segmented)
-                caption("How much recent text to feed the model. More gives sharper suggestions in long drafts; less is lighter on memory.")
+                caption("How much text to feed the model — the recent text you're typing plus the context sources above. More gives sharper suggestions in long drafts; less is lighter on memory. 3072 is the most the model's window can hold.")
             }
         }
         .formStyle(.grouped)

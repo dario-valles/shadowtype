@@ -34,8 +34,36 @@ final class TypoGuardTests: XCTestCase {
     // MARK: - Should NOT flag (conservative)
 
     func testNormalWordsPass() {
-        for w in ["hello", "completion", "keyboard", "rhythm", "because", "their", "world", "great"] {
+        // "lengths"/"strengths" carry a 5-consonant run, so they also pin the ORDER of the checks:
+        // the system-dictionary gate must run before signal 3, or they'd be flagged as typos.
+        for w in ["hello", "completion", "keyboard", "rhythm", "because", "their", "world", "great",
+                  "lengths", "strengths"] {
             XCTAssertFalse(guard_.looksLikeTypo(lastWord: w), "false positive on \(w)")
+        }
+    }
+
+    // Regression (the single largest quality bug the guard ever shipped): with only the tiny lexicon
+    // as an anchor, all 38 of these ordinary words were flagged as typos — every regular plural and
+    // dozens of everyday words sit one Damerau edit from a lexicon entry. Because the coordinator
+    // calls this on the trailing word of the prefix with holdBackOnTypos default ON, typing "in two
+    // weeks" or "I must" and pausing produced NO ghost, ever. The system dictionary now settles it
+    // before the edit-distance signal runs.
+    func testOrdinaryWordsNeverFlagged() {
+        let words = """
+            must made three those whole four hour tour line note host word near hear dear wear \
+            theme thin hers form code same weeks years days teams emails projects meetings things \
+            times places ways works makes looks takes uses
+            """.split(separator: " ").map(String.init)
+        XCTAssertEqual(words.count, 38)
+        for w in words {
+            XCTAssertFalse(guard_.looksLikeTypo(lastWord: w), "false positive on real word \(w)")
+        }
+    }
+
+    // ...and the dictionary gate must not cost us the real typos it sits in front of.
+    func testRealTyposStillFlaggedAfterDictionaryGate() {
+        for w in ["becuase", "thier", "helllo"] {
+            XCTAssertTrue(guard_.looksLikeTypo(lastWord: w), "real typo missed: \(w)")
         }
     }
 

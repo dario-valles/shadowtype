@@ -67,6 +67,34 @@ enum PromptSectionBudget {
     // UTF-8 byte cost of a string (the budget unit).
     static func cost(_ s: String) -> Int { s.utf8.count }
 
+    // Tail window whose START only moves in `anchor`-byte steps — the byte-level twin of the engine's
+    // anchored token trim (InferenceEngine.trimToWindow).
+    //
+    // Why not just keep the last `maxCost` bytes: a plain `.preserveEnd` truncation slides its start
+    // forward by one byte on EVERY keystroke, so the assembled prompt is never a strict extension of the
+    // previous one. The engine's KV reuse is a longest-common-PREFIX match (InferenceEngine.reuseLength),
+    // so a one-byte slide diverges the streams at the first prefix token and forces a full cold re-prefill
+    // of the whole window on every fire — the exact per-keystroke cold-prefill this pass exists to kill,
+    // just relocated from the engine's trim to the allocator's.
+    //
+    // Rounding the DROP up to a multiple of `anchor` pins the window start until the text grows past the
+    // next multiple, so the prompt is byte-stable (a strict extension) for ~`anchor` bytes at a time and
+    // one cold prefill amortizes over hundreds of keystrokes. Costs at most `anchor` bytes of kept context
+    // versus the naive window — cheap next to a re-prefill per keystroke.
+    static func anchoredTail(_ s: String, maxCost: Int, anchor: Int = 512) -> String {
+        let total = cost(s)
+        guard total > maxCost else { return s }
+        guard maxCost > 0 else { return "" }
+        let minDrop = total - maxCost
+        // Rounding up costs at most `step` bytes of kept context, so the step must stay small relative to
+        // the window — a 512-byte step against a 650-byte cap would throw away most of the caret text.
+        let step = max(1, min(anchor, maxCost / 4))
+        // Round the drop UP so the kept window is never larger than maxCost.
+        let drop = ((minDrop + step - 1) / step) * step
+        guard drop < total else { return "" }
+        return truncate(s, toCost: total - drop, end: .preserveEnd)
+    }
+
     // Keep as many whole graphemes from the requested end as fit within `limit` BYTES, so a multi-byte
     // character is never split mid-scalar.
     private static func truncate(_ text: String, toCost limit: Int, end: PromptSection.Truncation) -> String {

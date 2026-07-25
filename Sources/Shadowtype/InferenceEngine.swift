@@ -97,9 +97,18 @@ final class InferenceEngine: InferenceEngineProtocol {
         isSpecial && !isEOG && !isFIM
     }
 
-    // Tier 2a: lazily-built flat table of every token's rendered bytes, for the required-prefix
-    // (mid-word healing) sampler mask. off[i]..<off[i+1] are token i's bytes. ~1–2 MB; built once on
-    // the first healed completion (a ~262k-token sweep), so normal generation never pays for it.
+    // Tier 2a: flat table of every token's rendered bytes, for the required-prefix (mid-word healing)
+    // sampler mask. off[i]..<off[i+1] are token i's bytes. ~1–2 MB, a ~262k-token sweep with two
+    // allocations per token. Built once at the END of load(), NOT lazily on the first healed
+    // completion: lazily it landed between prefill and the first sampled token — squarely inside the
+    // latency budget of the very completion that needed it — and mid-word healing is default-ON, so
+    // that is the common case, not a rare one.
+    //
+    // unload() MUST clear all three. CompletionCoordinator.reloadModel is unload+load on the SAME
+    // engine instance, so after a Settings model swap a surviving table returns the PREVIOUS model's
+    // bytes: the ghost renders old-vocab byte strings, and when the new vocab is larger the ids past
+    // the stale table return an empty slice, which RequiredPrefix.isAdmissible rejects — -inf on every
+    // candidate, i.e. empty ghosts until relaunch, with nothing logged.
     private var tokenByteBuf: [UInt8] = []
     private var tokenByteOff: [Int32] = []
     private var tokenByteTableReady = false
@@ -127,6 +136,14 @@ final class InferenceEngine: InferenceEngineProtocol {
         guard n > 0 else { return [] }
         return (0..<Int(n)).map { UInt8(bitPattern: buf[$0]) }
     }
+
+    // Candidate buffer for sampleWithProb, hoisted out of generate(): on a 262k-token vocab this is a
+    // ~3.1 MB allocation that the old per-call `var cand` paid on EVERY generate — i.e. on every
+    // keystroke that fires a ghost. Resized only when the vocab size changes (a model swap). Safe to
+    // share because the inferenceQueue is serial: exactly one generate() is ever in flight, and it is
+    // the only reader/writer. Passed `inout` into the decode loops, which never touch `self.cand`
+    // themselves, so the inout access never overlaps a second access to this property.
+    private var cand: [llama_token_data] = []
 
     // KV-cache reuse state (FR-CE-5), now keyed by llama.cpp sequence ID. `cachedTokensBySeq[seq]`
     // is the exact token stream currently committed to the KV cache for that seq, and
@@ -156,8 +173,15 @@ final class InferenceEngine: InferenceEngineProtocol {
     // Tunables.
     private let contextSize: UInt32 = 4096
     private let batchSize: UInt32 = 512
-    private let maxSeqCount: Int32 = 4   // ghost (0) + API (1) + headroom; cparams.n_seq_max
-    private let prefillChunk: Int = 48   // tokens per prefill batch; cancel is checked between chunks (FR-CE-4)
+    private let maxSeqCount: Int32 = 4   // ghost (0) + API (1) + selection rewrite (2) + headroom; cparams.n_seq_max
+    // Tokens per llama_decode during prefill, and the only cancel-latency knob we have: cancel is
+    // polled BETWEEN chunks (FR-CE-4), and llama_set_abort_callback is a documented no-op for
+    // GPU-offloaded work — which is all of it here (n_gpu_layers = 999). The old value of 48 bought
+    // finer cancel granularity at the cost of starving the GPU: it, not cparams.n_batch (512), governs
+    // the real batch width, so a 1024-token cold prefill was ~22 Metal graph builds + submits + waits
+    // at a tenth of the configured batch. 256 is 4 dispatches for that same prefill; worst-case cancel
+    // latency becomes one 256-token chunk, still well under a frame.
+    private let prefillChunk: Int = 256
 
     // Set to true via env SHADOWTYPE_GREEDY to force deterministic greedy sampling across both
     // ghost and API paths regardless of `SamplingParams.greedy`.
@@ -218,9 +242,10 @@ final class InferenceEngine: InferenceEngineProtocol {
         var cparams = llama_context_default_params()
         cparams.n_ctx = contextSize
         cparams.n_batch = batchSize
-        // Multi-seq context: ghost on seq 0, API/MCP on seq 1. Headroom in case future surfaces
-        // (a second API client, a parallel embedding job) want their own KV slot too. The header
-        // recommends swa_full=true with n_seq_max > 1 to avoid SWA performance cliffs.
+        // Multi-seq context: ghost on seq 0, API/MCP on seq 1, selection rewrite on seq 2 (its few-shot
+        // prompt diverges at token 0, so sharing seq 0 evicted the ghost's cached prefix). One slot of
+        // headroom left in case a future surface wants its own KV slot too. The header recommends
+        // swa_full=true with n_seq_max > 1 to avoid SWA performance cliffs.
         cparams.n_seq_max = UInt32(maxSeqCount)
         cparams.swa_full = true
         // kv_unified=true shares ONE n_ctx-sized buffer across all sequences. With the default (false)
@@ -228,7 +253,8 @@ final class InferenceEngine: InferenceEngineProtocol {
         // tokens at 4096/4): a long page-context + prefix prompt (e.g. a multi-paragraph Reddit/forum
         // post) overflows the partition and `llama_decode` returns 1 (no KV slot) — the ghost silently
         // dies on exactly the long-prose case it's most wanted. Unify so the ghost can use the full
-        // window; ghost (0) and the occasional API/MCP seq (1) rarely both run near-full at once.
+        // window; ghost (0) and the occasional API/MCP (1) or selection-rewrite (2) seq rarely both run
+        // near-full at once.
         cparams.kv_unified = true
         // Flash Attention speeds the prefill of long prefixes (the page-context / thread-aware case) on
         // Metal. AUTO enables it whenever the model+backend support it and is a safe no-op otherwise —
@@ -283,6 +309,11 @@ final class InferenceEngine: InferenceEngineProtocol {
                 bias.append(llama_logit_bias(token: id, bias: -Float.infinity))
             }
             self.maskedSpecialBias = bias
+
+            // Tier 2a: build the token-byte table here, on the load thread, instead of on the first
+            // healed completion — see tokenByteBuf. Same one-pass cost, paid where nobody is waiting
+            // on a ghost. unload() cleared it, so this always rebuilds for the newly loaded vocab.
+            ensureTokenByteTable(nVocab: Int(n))
         }
 
         // FR-CE-8: confirm the Metal backend initialised. llama.cpp logs "ggml_metal_init: ..."
@@ -310,7 +341,8 @@ final class InferenceEngine: InferenceEngineProtocol {
     // gating (suppress low-probability/flailing completions) — decoupled from word-flush boundaries so a
     // multi-token word doesn't smear the per-token signal.
     //
-    // `seqID` selects which llama.cpp sequence this call belongs to (ghost = 0, API = 1). `params`
+    // `seqID` selects which llama.cpp sequence this call belongs to (ghost = 0, API = 1,
+    // selection rewrite = 2). `params`
     // configures the sampler chain + stop policy. When `params.useEngineStopPolicy` is true the
     // legacy ghost decode loop runs (word buffering, sentence stops, maxWords); when false the raw
     // API decode loop runs (verbatim piece stream, stop-string scan, maxTokens-only termination).
@@ -368,7 +400,12 @@ final class InferenceEngine: InferenceEngineProtocol {
             if params.fim != nil {
                 throw InferenceError.fimContextOverflow(tokens: tokens.count, cap: cap)
             }
-            tokens = Array(tokens.suffix(cap))
+            // The raw path front-trims (most-recent-context wins), but NOT with a plain suffix: that
+            // dropped the BOS that tokenize(addSpecial: true) put at index 0, and Gemma-3 — the
+            // shipping default — is trained with a mandatory BOS. Keep slot 0 whenever this vocab
+            // actually prepends one, and anchor the window so the head stays byte-stable between
+            // re-anchors (see trimToWindow).
+            tokens = Self.trimToWindow(tokens, cap: cap, keepFirst: llama_vocab_get_add_bos(vocab))
         }
 
         // Per-seq cached stream + KV length. First call on a seq starts empty. The defer below
@@ -477,12 +514,14 @@ final class InferenceEngine: InferenceEngineProtocol {
         // --- Decode loop ------------------------------------------------------------------------
         // Reusable candidate buffer for manual sample-with-probability (avoids a per-token vocab-sized
         // alloc; the decode budget is tiny — maxTokens). `cur.data` is modified in place by the chain.
+        // The buffer itself is a stored property (see `cand`) so it also survives across generate()
+        // calls; refill is per-token anyway, so only the size has to match the live vocab.
         let nVocab = Int(llama_vocab_n_tokens(vocab))
-        var cand = [llama_token_data](repeating: llama_token_data(id: 0, logit: 0, p: 0), count: nVocab)
+        if cand.count != nVocab {
+            cand = [llama_token_data](repeating: llama_token_data(id: 0, logit: 0, p: 0), count: nVocab)
+        }
 
         if params.useEngineStopPolicy {
-            // Tier 2a: build the byte table once before a healed (required-prefix) completion.
-            if let rp = requiredPrefix, !rp.isEmpty { ensureTokenByteTable(nVocab: nVocab) }
             try ghostDecodeLoop(ctx: ctx, vocab: vocab, smpl: smpl, batch: &batch,
                                 seqID: seqID, maxTokens: maxTokens,
                                 cached: &cached, nPast: &nPast,
@@ -739,6 +778,14 @@ final class InferenceEngine: InferenceEngineProtocol {
         modelArchitecture = nil
         modelSupportsChat = false
         modelFIMTokens = nil
+        // Tier 2a: the byte table is vocab-specific. reloadModel() is unload+load on this same
+        // instance, so leaving it behind hands the next model the previous vocab's bytes (see
+        // tokenByteBuf for what that breaks). Same for the vocab-sized candidate buffer, which
+        // generate() re-sizes on mismatch anyway but should not hold ~3 MB across an unload.
+        tokenByteBuf.removeAll(keepingCapacity: false)
+        tokenByteOff.removeAll(keepingCapacity: false)
+        tokenByteTableReady = false
+        cand.removeAll(keepingCapacity: false)
         cachedTokensBySeq.removeAll(keepingCapacity: false)
         nPastBySeq.removeAll(keepingCapacity: false)
         isLoaded = false
@@ -754,6 +801,16 @@ final class InferenceEngine: InferenceEngineProtocol {
         _ = llama_memory_seq_rm(memory, seqID, 0, -1)
     }
 
+    // Hand a sequence's KV cells back to the shared pool (see the protocol declaration for why). Safe to
+    // call on a seq that was never used. Must run on the inferenceQueue like every other engine call —
+    // it mutates the same per-seq maps generate() maintains.
+    func releaseSeq(_ seqID: Int32) {
+        guard isLoaded, let ctx else { return }
+        resetSeq(seqID, in: llama_get_memory(ctx))
+        cachedTokensBySeq[seqID] = nil
+        nPastBySeq[seqID] = nil
+    }
+
     // How many leading tokens of `new` are already committed to the KV cache holding `cached` —
     // the longest common prefix, but never the entire `new` stream: we keep at most new.count-1 so
     // the final token is always (re)evaluated to produce fresh sampling logits even when the prompt
@@ -767,6 +824,47 @@ final class InferenceEngine: InferenceEngineProtocol {
         var i = 0
         while i < cached.count, i < maxKeep, cached[i] == new[i] { i += 1 }
         return i
+    }
+
+    // Granularity of the front-trim window (FIX 4). See trimToWindow.
+    static let trimAnchor = 256
+
+    // Front-trim an over-cap prompt to the most recent `cap` tokens, ANCHORED — and keeping token 0
+    // when the vocab prepended a BOS (`keepFirst`).
+    //
+    // Why anchored: a plain `suffix(cap)` slides the window forward by one token per keystroke, so
+    // cached[0] != new[0] on every fire, reuseLength() returns 0, resetSeq() runs, and every single
+    // keystroke pays a full cold prefill. That is why the documented warm ~65 ms path (FR-CE-5)
+    // vanishes in long documents — the exact case the product exists for. Rounding the dropped-token
+    // count UP to a multiple of `trimAnchor` pins the window head to a fixed grid: between re-anchors
+    // the prompt head is byte-identical, reuseLength grows normally, and one cold prefill is amortized
+    // over ~256 tokens of typing. (Rounding DOWN would keep more tokens than `cap` allows and blow the
+    // n_ctx budget the cap exists to protect, so it has to be up.) The price is that the live window
+    // oscillates in (cap - anchor, cap] instead of sitting at cap — ~6% of context at 3840/256.
+    //
+    // Upgrade path for the next reader: llama_memory_seq_add + llama_memory_can_shift DO exist in this
+    // build (llama.h:736, :769), so a true server-style seq_rm+seq_add context shift — rebasing the KV
+    // positions instead of re-prefilling — is possible. We deliberately take the anchored window first:
+    // it is a fraction of the work and captures most of the win.
+    //
+    // llama_token is a typealias for Int32; spelled Int32 so this stays callable from the test target
+    // without importing CLlama.
+    static func trimToWindow(_ tokens: [Int32], cap: Int, keepFirst: Bool) -> [Int32] {
+        guard cap > 0, tokens.count > cap else { return tokens }
+        let head = keepFirst ? 1 : 0            // slots reserved at the front (BOS)
+        guard tokens.count > head else { return tokens }
+        // Scale the step down on small windows so one anchor step can never cost more than a quarter
+        // of the context (at the shipping cap of 3840 this is a no-op and the step stays 256).
+        let anchor = max(1, min(trimAnchor, cap / 4))
+        // Body tokens that MUST go for the result (head + kept body) to fit `cap`; the head is carried
+        // over, so the shortfall is the same with or without a BOS.
+        let minDrop = tokens.count - cap
+        let drop = min(((minDrop + anchor - 1) / anchor) * anchor, tokens.count - head)
+        var out: [Int32] = []
+        out.reserveCapacity(tokens.count - drop)
+        if keepFirst { out.append(tokens[0]) }
+        out.append(contentsOf: tokens[(head + drop)...])
+        return out
     }
 
     // First stop-string occurrence in `s` across any of `stops`. Returns the index of the EARLIEST

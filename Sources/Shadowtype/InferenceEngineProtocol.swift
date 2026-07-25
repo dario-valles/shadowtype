@@ -44,6 +44,13 @@ protocol InferenceEngineProtocol: AnyObject {
     func unload()
     func requestCancel()
 
+    // Drop a sequence's KV cells and cached token stream. `kv_unified = true` means every seq draws from
+    // ONE n_ctx-sized pool, so a seq that will never reuse its prefix should hand the cells back rather
+    // than hold them against the ghost: ghost + rewrite both prefilling near the cap would otherwise ask
+    // for more cells than exist and `llama_decode` fails with no KV slot. Rewrite is exactly that case —
+    // every rewrite prompt diverges at token 0, so its cache is never reused.
+    func releaseSeq(_ seqID: Int32)
+
     // Full-surface generate. Ghost callers use the defaulted extension below (`seqID: 0`,
     // `params: .ghostDefaults`); API/MCP callers stamp their own seq ID + clamped params so the two
     // workloads can coexist in the same context with independent KV slots.
@@ -122,6 +129,7 @@ final class InferenceEngineRouter: InferenceEngineProtocol {
     func load(modelPath: String) throws { try active.load(modelPath: modelPath) }
     func unload() { active.unload() }
     func requestCancel() { active.requestCancel() }
+    func releaseSeq(_ seqID: Int32) { active.releaseSeq(seqID) }
 
     func generate(prompt: String, maxTokens: Int,
                   seqID: Int32, params: SamplingParams,
@@ -156,6 +164,7 @@ final class FoundationModelsEngine: InferenceEngineProtocol {
 
     func unload() {}
     func requestCancel() {}
+    func releaseSeq(_ seqID: Int32) {}
 
     func generate(prompt: String, maxTokens: Int,
                   seqID: Int32, params: SamplingParams,

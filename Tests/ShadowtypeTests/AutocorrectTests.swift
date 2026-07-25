@@ -28,6 +28,17 @@ final class AutocorrectTests: XCTestCase {
         }
     }
 
+    // Regression: the lexicon holds SINGULAR/base forms ("week", "just", "from"), so every regular
+    // plural and dozens of ordinary words had a unique lexicon word exactly one edit away and were
+    // "corrected" into it — weeks->week, must->just, form->from. Rewriting text the user spelled
+    // correctly is worse than any missed fix, so the system dictionary now vetoes first.
+    func testCorrectWordsOutsideLexiconReturnNil() {
+        for w in ["weeks", "must", "form", "years", "days", "teams", "emails", "meetings", "things",
+                  "hers", "code", "three", "whole", "hour", "theme"] {
+            XCTAssertNil(ac.correction(for: w), "correct word rewritten: \(w)")
+        }
+    }
+
     // MARK: - Short tokens return nil
 
     func testShortTokensReturnNil() {

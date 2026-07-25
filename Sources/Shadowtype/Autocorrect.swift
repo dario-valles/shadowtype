@@ -8,7 +8,8 @@
 // Bias is the same as TypoGuard's, only flipped in cost: a WRONG correction (silently rewriting a
 // word the user meant) is far worse than NO correction, so every path here is conservative. We only
 // return a fix that is exactly one edit (Damerau-Levenshtein distance 1) from a known lexicon word,
-// and only when that fix is unambiguous (a single confident candidate). Anything short, ALL-CAPS,
+// only when that fix is unambiguous (a single confident candidate), and only when the system
+// dictionary does NOT already recognise the word we are about to rewrite. Anything short, ALL-CAPS,
 // proper-noun-like, or containing digits/symbols is left untouched.
 import Foundation
 
@@ -79,8 +80,13 @@ struct Autocorrect {
         if Autocorrect.isLikelyProperNounOrAcronym(chars) { return nil }
 
         let lower = raw.lowercased()
-        // Already a correct word -> nothing to fix.
-        if lexicon.contains(lower) { return nil }
+        // Already a correct word -> nothing to fix. The lexicon membership test is only a fast path:
+        // it holds a few hundred SINGULAR/base forms, so on its own it happily "corrected" every
+        // regular plural and dozens of ordinary words into a lexicon entry one edit away —
+        // weeks->week, must->just, form->from — i.e. it rewrote text the user had spelled correctly,
+        // the worst failure this engine has. The on-device system dictionary is the authority; this
+        // is the exact gate TypoGuard applies before its own edit-distance signal.
+        if lexicon.contains(lower) || TypoGuard.isRealWord(raw) { return nil }
 
         // Gather every lexicon word exactly one Damerau-Levenshtein edit away. Demand a UNIQUE
         // candidate: if two distinct words are both one edit away we cannot confidently pick, so we
