@@ -680,6 +680,39 @@ private struct AnyButtonStyle: ButtonStyle {
 
 // MARK: - Step 4: Language model (real ModelManager download)
 
+/// Copy for the model card, kept pure and out of the View so it is unit-testable without a window,
+/// a downloaded file or the network.
+///
+/// Both of these strings used to be constants that lied. The spec line hardcoded "Q4_K_M" for every
+/// row while four Gemma QAT entries are `q4_0`, and the installed status said "Verified · GGUF ✓" for
+/// every download when most catalog entries carry no pinned hash and the only check was the 4-byte
+/// GGUF magic. Each now renders what the specific file actually is / actually got.
+enum ModelCardCopy {
+
+    /// `quant` is `ModelCatalogEntry.quant`; nil (BYOM/imported, whose filename is the user's) renders
+    /// as the neutral "GGUF" rather than inventing a format.
+    static func spec(quant: String?, approxRAMGB: Double) -> String {
+        "\(quant ?? "GGUF") · on-device · ~\(String(format: "%.1f", approxRAMGB)) GB RAM"
+    }
+
+    /// Status line once the model is on disk. `nil` = nothing was downloaded this run (the file was
+    /// already there), so there is no verdict to report — do NOT read that as "unverified".
+    static func installedStatus(_ verification: ModelVerification?) -> String {
+        guard let verification else { return "Installed ✓" }
+        return verification.isHashVerified ? "Verified · SHA-256 ✓" : "Installed · not checksummed"
+    }
+
+    /// Extra line shown only when the bytes could not be hash-checked, so the badge above is never the
+    /// user's only signal. Deliberately plain and undramatic: a missing header is a normal fallback,
+    /// not a compromise. nil when there is nothing to disclose.
+    static func installedNote(_ verification: ModelVerification?) -> String? {
+        guard verification == .unverified else { return nil }
+        return "Hugging Face didn't report a checksum for this file, so we couldn't hash-verify it — "
+            + "we only confirmed it's a well-formed GGUF. The download used HTTPS. Re-downloading from "
+            + "Settings → Models will try again."
+    }
+}
+
 private struct OBModelStep: View {
     /// Mirrors `phase == .installed` up to the root so the footer Continue can gate on it.
     @Binding var installed: Bool
@@ -689,7 +722,8 @@ private struct OBModelStep: View {
     private let manager = ModelManager()
     private let physicalBytes = ProcessInfo.processInfo.physicalMemory
 
-    // The best model that fits this Mac's RAM — the default selection. Every model is free and
+    // The default selection: the best model that both fits this Mac's RAM and stays under
+    // ModelCatalog's first-token-deadline cap — NOT the largest that fits. Every model is free and
     // selectable. Mirrors the Settings → Models recommendation logic.
     private let recommended = ModelCatalog.recommended(
         physicalBytes: ProcessInfo.processInfo.physicalMemory)
@@ -697,6 +731,10 @@ private struct OBModelStep: View {
     @State private var selectedID: String
     @State private var progress: Double = 0     // 0...1
     @State private var phase: Phase = .idle
+    // What actually vouched for the bytes we just downloaded (ModelManager.lastVerification), or nil
+    // when this run downloaded nothing (the file was already on disk). Drives the status line instead
+    // of the old unconditional "Verified · GGUF ✓", which claimed a checksum that mostly never ran.
+    @State private var verification: ModelVerification?
 
     init(installed: Binding<Bool>, onSkip: @escaping () -> Void) {
         _installed = installed
@@ -720,7 +758,13 @@ private struct OBModelStep: View {
             OBHeader(eyebrow: "Language model",
                      title: "Choose your ",
                      accentTail: "on-device model.",
-                     lead: AnyView(Text("Shadowtype runs a local model on Apple Silicon via Metal. We've preselected the best one for your Mac — pick another below if you like. It's stored locally and verified by checksum.")))
+                     // No blanket "verified by checksum" — most catalog entries ship no pinned hash, so
+                     // verification depends on Hugging Face reporting the object's digest and can fall
+                     // back; the status line below reports what actually happened, per download.
+                     // "Fastest good one", not "the best one": the recommendation is capped well below
+                     // what this Mac's RAM allows, because a model that misses the first-token deadline
+                     // shows no suggestion at all.
+                     lead: AnyView(Text("Shadowtype runs a local model on Apple Silicon via Metal. We've preselected the one that gives you the best suggestions while staying fast enough on your Mac — pick another below if you like. It stays on this Mac, and we check the download against the publisher's checksum whenever one is published.")))
                 .padding(.bottom, 24)
 
             // Download card — reflects the currently selected model.
@@ -783,6 +827,11 @@ private struct OBModelStep: View {
                         .font(.system(size: 11.5)).foregroundStyle(OBTheme.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, 8)
+                } else if let note = ModelCardCopy.installedNote(verification) {
+                    Text(note)
+                        .font(.system(size: 11.5)).foregroundStyle(OBTheme.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 8)
                 }
             }
             .padding(20)
@@ -831,7 +880,7 @@ private struct OBModelStep: View {
         ModelCatalog.entries.filter { $0.id != selectedID }
     }
     private func spec(_ entry: ModelCatalogEntry) -> String {
-        "Q4_K_M · on-device · ~\(String(format: "%.1f", entry.approxRAMGB)) GB RAM"
+        ModelCardCopy.spec(quant: entry.quant, approxRAMGB: entry.approxRAMGB)
     }
     private var primaryLabel: String {
         switch phase {
@@ -845,7 +894,7 @@ private struct OBModelStep: View {
         switch phase {
         case .idle:        return "Ready to download"
         case .downloading: return String(format: "%.1f GB of %.1f GB", selected.downloadGB * progress, selected.downloadGB)
-        case .installed:   return "Verified · GGUF ✓"
+        case .installed:   return ModelCardCopy.installedStatus(verification)
         case .failed:      return "Download failed — check your connection"
         }
     }
@@ -862,6 +911,9 @@ private struct OBModelStep: View {
         selectedID = entry.id
         progress = isInstalled(entry) ? 1 : 0
         phase = isInstalled(entry) ? .installed : .idle
+        // The previous model's verdict says nothing about this file — clearing it makes the status line
+        // fall back to the plain "Installed ✓" instead of carrying a stale checksum claim across rows.
+        verification = nil
     }
 
     private func startDownload() {
@@ -883,7 +935,9 @@ private struct OBModelStep: View {
         Task {
             do {
                 _ = try await manager.ensureModel(entry)
+                let verdict = manager.lastVerification
                 await MainActor.run {
+                    verification = verdict
                     progress = 1; phase = .installed
                     activate(entry)
                 }

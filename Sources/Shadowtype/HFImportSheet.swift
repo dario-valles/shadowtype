@@ -247,14 +247,15 @@ struct HFImportSheet: View {
             manager.onDownloadProgress = { p in
                 DispatchQueue.main.async { progress = p }
             }
+            // Download into the imports dir directly so we don't need a second copy/move. Hoisted out
+            // of the `do` so the cancel path below can find the resume blob it needs to clean up.
+            let importsDir = (try? FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: true))!
+                .appendingPathComponent("Shadowtype/models/imported", isDirectory: true)
+            let target = importsDir.appendingPathComponent(filename)
             do {
-                // Download into the imports dir directly so we don't need a second copy/move.
-                let importsDir = (try? FileManager.default.url(
-                    for: .applicationSupportDirectory, in: .userDomainMask,
-                    appropriateFor: nil, create: true))!
-                    .appendingPathComponent("Shadowtype/models/imported", isDirectory: true)
                 try FileManager.default.createDirectory(at: importsDir, withIntermediateDirectories: true)
-                let target = importsDir.appendingPathComponent(filename)
                 let final = try await manager.downloadAuthenticated(
                     from: downloadURL, to: target, token: usedToken)
 
@@ -285,7 +286,15 @@ struct HFImportSheet: View {
                     dismiss()
                 }
             } catch is CancellationError {
-                // User hit Cancel — the sheet is already dismissing; nothing to report.
+                // User hit Cancel — the sheet is already dismissing; nothing to report. But cancelling
+                // now produces resume data by design, and URLSession keeps its multi-GB temp file alive
+                // for as long as that blob exists. The sheet treats Cancel as full abandonment (the
+                // import is never registered), so keeping the blob would silently cost the user
+                // gigabytes with nothing in the UI to explain or reclaim it. Dropping it unpins the
+                // temp file for the system's tmp purge.
+                let resumeURL = ModelManager.resumeDataURL(for: target, source: downloadURL)
+                try? FileManager.default.removeItem(at: resumeURL)
+                try? FileManager.default.removeItem(at: ModelManager.linkedMetadataURL(for: resumeURL))
                 return
             } catch {
                 await MainActor.run {
@@ -307,6 +316,9 @@ struct HFImportSheet: View {
             return "Could not contact HuggingFace: \(msg)"
         case .noGGUFFiles:
             return "No .gguf files found in this repo."
+        case .sharded(let msg):
+            // No "could not contact" prefix: the repo answered, we are declining what it ships.
+            return "This repo can't be imported — \(msg)"
         }
     }
 

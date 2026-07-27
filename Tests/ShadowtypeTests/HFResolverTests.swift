@@ -166,4 +166,87 @@ extension HFResolverTests {
         XCTAssertEqual(HFResolver.preferredImportFile(in: list)?.filename, "model.Q2_K.gguf")
         XCTAssertNil(HFResolver.preferredImportFile(in: []))
     }
+
+    func testPreferredImportFilePrefersIMatrixQ4KM() {
+        // Same size and speed as the plain quant, lower perplexity on rare/non-English tokens — so
+        // when a repo ships both, the imatrix build is the better default.
+        let list = [sib("model.Q4_K_M.gguf", 2), sib("model.i1-Q4_K_M.gguf", 2)]
+        XCTAssertEqual(HFResolver.preferredImportFile(in: list)?.filename, "model.i1-Q4_K_M.gguf")
+        // Reverse order must give the same answer (it's a preference, not "first wins").
+        let reversed = [sib("model.i1-Q4_K_M.gguf", 2), sib("model.Q4_K_M.gguf", 2)]
+        XCTAssertEqual(HFResolver.preferredImportFile(in: reversed)?.filename, "model.i1-Q4_K_M.gguf")
+    }
+
+    func testPreferredImportFileNeverPreSelectsAShard() {
+        // The 70B case: the only Q4_K_M in the repo is split, so it must not be the default pick.
+        let list = [sib("model-Q4_K_M-00001-of-00002.gguf", 9),
+                    sib("model-Q4_K_M-00002-of-00002.gguf", 9),
+                    sib("model.Q2_K.gguf", 1)]
+        XCTAssertEqual(HFResolver.preferredImportFile(in: list)?.filename, "model.Q2_K.gguf")
+        // All-shards list: nothing is safely importable.
+        XCTAssertNil(HFResolver.preferredImportFile(in: [sib("m-00001-of-00003.gguf", 1)]))
+    }
+
+    func testIsIMatrixBuildMatchesWholeTokensOnly() {
+        XCTAssertTrue(HFResolver.isIMatrixBuild("Qwen3-8B.i1-Q4_K_M.gguf"))
+        XCTAssertTrue(HFResolver.isIMatrixBuild("model-Q4_K_M-imat.gguf"))
+        XCTAssertTrue(HFResolver.isIMatrixBuild("model.imatrix.Q4_K_M.gguf"))
+        XCTAssertFalse(HFResolver.isIMatrixBuild("model.Q4_K_M.gguf"))
+        // "gemini1-" contains the substring "i1-" but is not an imatrix build.
+        XCTAssertFalse(HFResolver.isIMatrixBuild("gemini1-Q4_K_M.gguf"))
+    }
+}
+
+// MARK: - Sharded (split) GGUF rejection
+
+extension HFResolverTests {
+
+    func testShardInfoDetectsSplitFiles() {
+        XCTAssertEqual(HFResolver.shardInfo("model-Q4_K_M-00001-of-00002.gguf")?.index, 1)
+        XCTAssertEqual(HFResolver.shardInfo("model-Q4_K_M-00001-of-00002.gguf")?.total, 2)
+        XCTAssertEqual(HFResolver.shardInfo("Big-Model-00003-of-00017.GGUF")?.index, 3)
+        XCTAssertEqual(HFResolver.shardInfo("sub/dir/m-00002-of-00002.gguf")?.index, 2)
+    }
+
+    func testShardInfoIgnoresWholeFiles() {
+        XCTAssertNil(HFResolver.shardInfo("model.Q4_K_M.gguf"))
+        XCTAssertNil(HFResolver.shardInfo("model-00001-of-00001.gguf"),
+                     "-00001-of-00001 IS the whole model; rejecting it would block a valid import")
+        XCTAssertNil(HFResolver.shardInfo("model-1-of-2.gguf"), "only the 5-digit convention counts")
+        XCTAssertNil(HFResolver.shardInfo("model-00003-of-00002.gguf"), "index past total is not a shard")
+        XCTAssertNil(HFResolver.shardInfo("model-00001-of-00002.bin"))
+    }
+
+    func testPartitionShardsSplitsTheList() {
+        let list = [sib("whole.Q4_K_M.gguf", 1),
+                    sib("big-00001-of-00002.gguf", 9), sib("big-00002-of-00002.gguf", 9)]
+        let p = HFResolver.partitionShards(list)
+        XCTAssertEqual(p.whole.map(\.filename), ["whole.Q4_K_M.gguf"])
+        XCTAssertEqual(p.shards.count, 2)
+    }
+
+    func testShardRejectionMessageNamesTheOffendingFile() {
+        let msg = HFResolver.shardRejectionMessage([sib("big-00001-of-00002.gguf", 9)])
+        XCTAssertTrue(msg.contains("big-00001-of-00002.gguf"), msg)
+        XCTAssertTrue(msg.lowercased().contains("split"), "must say WHY it was rejected: \(msg)")
+    }
+
+    func testDirectShardURLRejectedWithReason() {
+        // Every shard carries the GGUF magic, so this used to download + register fine and then die at
+        // load with the generic "may be corrupt or unsupported".
+        let p = HFResolver.parse(
+            "https://huggingface.co/o/r/resolve/main/Model-Q4_K_M-00001-of-00002.gguf")
+        guard case let .invalid(reason) = p else {
+            XCTFail("a shard URL must be rejected, got \(p)"); return
+        }
+        XCTAssertTrue(reason.contains("split"), "reason must explain the shard problem: \(reason)")
+    }
+
+    func testDirectWholeFileURLStillAccepted() {
+        let p = HFResolver.parse("https://huggingface.co/o/r/resolve/main/Model-00001-of-00001.gguf")
+        guard case let .directFile(_, _, _, filename, _) = p else {
+            XCTFail("a single-part file must still import, got \(p)"); return
+        }
+        XCTAssertEqual(filename, "Model-00001-of-00001.gguf")
+    }
 }

@@ -5,9 +5,12 @@
 //
 // This pane set is a native-SwiftUI recreation of the app/Settings.html design handoff
 // (claude.ai/design). Controls backed by real subsystems are wired live; controls the design
-// shows ahead of their backing (quantization, speculative decoding, all-time/acceptance stats,
-// auto-update channel) persist via @AppStorage and/or render as faithful placeholders so the window
-// matches the mock feature-for-feature.
+// shows ahead of their backing (all-time/acceptance stats, auto-update channel) persist via
+// @AppStorage and/or render as faithful placeholders so the window matches the mock.
+// A "Soon" pill is only honest for something we intend to ship: the mock's Quantization picker and
+// Speculative-decoding (MTP) toggle were removed outright rather than left disabled, because we
+// decided NOT to build them (MTP doubles resident RAM to speed up a 1-4B target that already clears
+// the deadline). Advertising a decided-against feature as "Soon" is a promise we would never keep.
 import Cocoa
 import SwiftUI
 import ApplicationServices
@@ -217,7 +220,7 @@ private struct ProBadge: View {
     var body: some View { EmptyView() }
 }
 
-private enum PillKind { case good, warn, beta, neutral }
+private enum PillKind { case good, warn, neutral }
 
 private struct Pill: View {
     let text: String
@@ -226,7 +229,6 @@ private struct Pill: View {
         switch kind {
         case .good: return .green
         case .warn: return .orange
-        case .beta: return OBTheme.accent
         case .neutral: return .secondary
         }
     }
@@ -464,10 +466,6 @@ private struct ModelsPane: View {
         ModelCatalog.entries[0].id
     // Live: AppDelegate.syncToggles drives the idle-unload timer from this key.
     @AppStorage("shadowtype.unloadIdleMinutes") private var unloadIdle = 10
-    // Not yet wired — these need shipped quantization variants / a speculative drafter, so they stay
-    // disabled so the UI never implies they change runtime behavior.
-    @AppStorage("shadowtype.quantization") private var quantization = "Q4_K_M"
-    @AppStorage("shadowtype.speculativeDecoding") private var speculative = false
 
     @State private var unlocked = Entitlement.isUnlocked
     @State private var installed: Set<String> = []
@@ -530,7 +528,10 @@ private struct ModelsPane: View {
     var body: some View {
         Form {
             Callout(systemImage: "lock.fill",
-                    text: "**All inference runs on this Mac** via llama.cpp + Metal. Models download once over HTTPS, are verified by SHA-256, and never phone home during completion.")
+                    // "when one is available", not a flat "verified by SHA-256": most catalog entries
+                    // ship no pinned hash, so verification depends on Hugging Face returning the LFS
+                    // object's digest — and it can legitimately fall back to the GGUF-magic check.
+                    text: "**All inference runs on this Mac** via llama.cpp + Metal. Models download once over HTTPS, are checked against the publisher's SHA-256 whenever one is available, and never phone home during completion.")
 
             if let err = downloadError {
                 Callout(systemImage: "exclamationmark.triangle.fill",
@@ -572,19 +573,25 @@ private struct ModelsPane: View {
                 caption("Free the model from memory after inactivity; it reloads on your next keystroke.")
             }
 
-            let recommended = ModelCatalog.entries.filter { ModelCatalog.ramOK(for: $0, physicalBytes: physicalBytes) }
+            // "Fits this Mac", NOT "Recommended": ramOK is only a memory gate, and it passes models far
+            // too slow to make the coordinator's first-token deadline (a 32 GB Mac clears the 30B MoE).
+            // ModelCatalog.recommended() is the single recommendation, and it caps well below the RAM
+            // ceiling — labelling this whole list "Recommended" was telling the user to pick the biggest.
+            let fits = ModelCatalog.entries.filter { ModelCatalog.ramOK(for: $0, physicalBytes: physicalBytes) }
             let other = ModelCatalog.entries.filter { !ModelCatalog.ramOK(for: $0, physicalBytes: physicalBytes) }
 
-            if !recommended.isEmpty {
+            if !fits.isEmpty {
                 Section {
-                    ForEach(recommended) { entry in libraryRow(entry) }
+                    ForEach(fits) { entry in libraryRow(entry) }
                 } header: {
                     HStack {
-                        Text("Recommended")
+                        Text("Fits this Mac")
                         Spacer()
                         Text(freeDisk).font(.caption).foregroundStyle(.secondary)
                             .textCase(nil)
                     }
+                } footer: {
+                    Text("Bigger isn't better here: suggestions are dropped when the first token misses its deadline, so the recommended model is the best one that still keeps up. Larger entries are for the local API.")
                 }
             }
 
@@ -594,7 +601,7 @@ private struct ModelsPane: View {
                 } header: {
                     Text("Other models")
                 } footer: {
-                    Text("Larger than ~75% of this Mac's RAM — may run slowly or fail to load.")
+                    Text("Weights plus KV cache don't fit this Mac's memory budget once macOS and the app you're typing into are accounted for — these may swap, run slowly, or fail to load.")
                 }
             }
 
@@ -626,25 +633,6 @@ private struct ModelsPane: View {
                 HStack { Text("Imported"); Spacer() }
             } footer: {
                 Text("Any local .gguf is fair game. We symlink it (your original file isn't copied) and verify the GGUF magic bytes before saving the import.")
-            }
-
-            Section {
-                Picker(selection: $quantization) {
-                    Text("Q4_K_M (recommended)").tag("Q4_K_M")
-                    Text("Q5_K_M (higher quality)").tag("Q5_K_M")
-                    Text("IQ4_XS (smallest)").tag("IQ4_XS")
-                } label: {
-                    HStack(spacing: 6) { Text("Quantization"); SoonPill() }
-                }
-                .disabled(true)
-                Text("Lower bit-width uses less memory; Q4_K_M is the quality/size sweet spot.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle(isOn: $speculative) {
-                    HStack(spacing: 6) { Text("Speculative decoding (MTP)"); Pill(text: "Labs", kind: .beta); SoonPill() }
-                }
-                .disabled(true)
-                Text("Multi-token-prediction drafter. Off by default — can regress on small models.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -697,11 +685,18 @@ private struct ModelsPane: View {
         }
     }
 
-    // The catalog entry we auto-select after removing the ACTIVE imported model: the first
-    // recommended (RAM-fitting) entry, falling back to the shipping default.
+    // The catalog entry we auto-select after removing the ACTIVE imported model: the one this Mac is
+    // actually recommended. It used to take the first RAM-fitting entry, which is the SMALLEST that
+    // fits — so removing a BYOM model silently landed the user on the 1B while the rest of the pane
+    // badged something else as recommended. Same call as the badge, so the dialog's named model and
+    // the recommendation cannot disagree.
     private var removalFallbackEntry: ModelCatalogEntry {
-        ModelCatalog.entries.first { ModelCatalog.ramOK(for: $0, physicalBytes: physicalBytes) }
-            ?? ModelCatalog.entries[0]
+        ModelCatalog.recommended(physicalBytes: physicalBytes)
+    }
+
+    // The single entry ModelCatalog.recommended() would pre-select for this Mac, used to badge one row.
+    private var recommendedEntry: ModelCatalogEntry {
+        ModelCatalog.recommended(physicalBytes: physicalBytes)
     }
 
     private func confirmRemove(_ entry: ImportedModelEntry) {
@@ -725,6 +720,10 @@ private struct ModelsPane: View {
                 HStack(spacing: 6) {
                     Text(entry.name).fontWeight(.medium)
                     if isActive { Pill(text: "Active", kind: .good) }
+                    // Marks the ONE entry ModelCatalog.recommended() would pick. The list used to sit
+                    // under a "Recommended" section header covering everything that fit RAM, which
+                    // read as "take the largest" — the opposite of the deadline-capped recommendation.
+                    if entry.id == recommendedEntry.id { Pill(text: "Recommended", kind: .good) }
                     if entry.isInstruct { Pill(text: "Instruct", kind: .warn) }
                 }
                 Text(libraryDetail(entry, ramOK: ramOK))
@@ -1506,7 +1505,6 @@ private struct ShortcutsPane: View {
         .init(action: "Dismiss suggestion", note: "Hide the current ghost text. Typing also dismisses.", keys: ["esc"]),
         .init(action: "Force suggestions here", note: "Turn completions on in the current field, even where Shadowtype stays idle (terminals, code editors).", keys: ["⌃", "`"]),
         .init(action: "Rewrite selection", note: "Rewrite the selected text on-device — improve, shorten, change tone, fix grammar, or summarize. Preview before keeping.", keys: rewriteKeys),
-        .init(action: "Toggle Shadowtype on/off", note: "Global hotkey to pause and resume everywhere.", keys: nil),
         .init(action: "Pause for current app", note: "Temporarily disable in the frontmost app.", keys: ["⌃", "⌥", "P"]),
     ] }
 

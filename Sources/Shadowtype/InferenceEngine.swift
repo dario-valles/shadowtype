@@ -198,6 +198,17 @@ final class InferenceEngine: InferenceEngineProtocol {
     // latency becomes one 256-token chunk, still well under a frame.
     private let prefillChunk: Int = 256
 
+    // NOT overriding n_threads / n_threads_batch, deliberately. The tempting argument — "a background
+    // menu-bar app should not run a core-count-wide thread pool against the user's foreground work" —
+    // rests on a false premise: llama does NOT size these from the core count. `llama_context_default_params`
+    // sets both to GGML_DEFAULT_N_THREADS, which is a hard-coded 4 (ggml.h). So a "narrower than default"
+    // override changes nothing on Pro/Max-class CPUs (4 P-cores' worth either way) and only HALVES the
+    // base M-series Macs to 2 — the machines with the least headroom, in the direction that could cost
+    // latency. Every layer is Metal-offloaded (n_gpu_layers = 999), so the CPU side is sampling plus a
+    // few non-offloaded ops and probably does not care either way; "probably" is the point. This is a
+    // measurable question and InferenceEnginePerfTests exists for it — set these once there is a
+    // before/after number, not before.
+
     // Set to true via env SHADOWTYPE_GREEDY to force deterministic greedy sampling across both
     // ghost and API paths regardless of `SamplingParams.greedy`.
     private let useGreedyEnv = ProcessInfo.processInfo.environment["SHADOWTYPE_GREEDY"] != nil
@@ -343,7 +354,7 @@ final class InferenceEngine: InferenceEngineProtocol {
 
         // FR-CE-8: confirm the Metal backend initialised. llama.cpp logs "ggml_metal_init: ..."
         // to stderr during model load; this line ties that to our context so it's greppable.
-        NSLog("Shadowtype: InferenceEngine loaded model (Metal, n_gpu_layers=999, n_ctx=\(llama_n_ctx(c)), n_seq_max=\(maxSeqCount), arch=\(modelArchitecture ?? "?"), chatTemplate=\(modelChatTemplate != nil ? "yes" : "no"), supportsChat=\(modelSupportsChat), fim=\(modelFIMTokens != nil ? "yes" : "no"), maskedControl=\(maskedSpecialBias.count))")
+        NSLog("Shadowtype: InferenceEngine loaded model (Metal, n_gpu_layers=999, n_ctx=\(llama_n_ctx(c)), n_threads=\(llama_n_threads(c)), n_seq_max=\(maxSeqCount), arch=\(modelArchitecture ?? "?"), chatTemplate=\(modelChatTemplate != nil ? "yes" : "no"), supportsChat=\(modelSupportsChat), fim=\(modelFIMTokens != nil ? "yes" : "no"), maskedControl=\(maskedSpecialBias.count))")
 
         self.cachedTokensBySeq.removeAll(keepingCapacity: false)
         self.nPastBySeq.removeAll(keepingCapacity: false)

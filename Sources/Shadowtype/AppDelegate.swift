@@ -27,6 +27,63 @@ private final class RewriteActionPayload: NSObject {
     }
 }
 
+// Adaptive back-off for an always-on background app. Nothing used to consult thermalState or Low
+// Power Mode, so Shadowtype ran the identical GPU inference on every typing pause whether the Mac was
+// cool on wall power or already thermally throttled on battery — the difference between "invisible"
+// and "my fan is on and my battery is gone". This maps the two free ProcessInfo signals onto the
+// three knobs AppDelegate already pushes (coordinator.debounce / coordinator.maxTokens /
+// engine.maxContextTokens): fire less often, generate less, prefill less.
+//
+// Pure + static so the mapping is unit-testable without a hot Mac.
+struct PowerPolicy {
+    /// The knobs the policy adapts, in the units AppDelegate pushes them.
+    struct Settings: Equatable {
+        var debounce: TimeInterval
+        var maxTokens: Int
+        var maxContextTokens: Int
+    }
+
+    // `nominal` (not `none`) so a `.none` at a call site can never be read as `Optional.none`.
+    enum Tier { case nominal, moderate, heavy }
+
+    /// `.fair` is the steady state of any laptop doing real work, so treating it as pressure would
+    /// mean throttling almost always; back off from `.serious` up. Low Power Mode is an explicit
+    /// user request to spend less energy, so it earns the same treatment as `.serious` — and it
+    /// never softens `.critical`.
+    static func tier(thermalState: ProcessInfo.ThermalState, lowPower: Bool) -> Tier {
+        switch thermalState {
+        case .critical: return .heavy
+        case .serious:  return .moderate
+        default:        return lowPower ? .moderate : .nominal
+        }
+    }
+
+    /// Adaptation may only make things LIGHTER: the debounce can only grow, tokens/context can only
+    /// shrink, so the user's own settings stay the ceiling. Suggestions are never switched off — a
+    /// silently dead product is worse than a slower one.
+    static func adjust(_ base: Settings,
+                       thermalState: ProcessInfo.ThermalState,
+                       lowPower: Bool) -> Settings {
+        switch tier(thermalState: thermalState, lowPower: lowPower) {
+        case .nominal:
+            return base
+        case .moderate:
+            return lighter(base, debounceScale: 2, debounceCap: 0.6, maxTokens: 12, contextTokens: 1024)
+        case .heavy:
+            return lighter(base, debounceScale: 3, debounceCap: 1.0, maxTokens: 8, contextTokens: 512)
+        }
+    }
+
+    // The caps are absolute, the debounce stretch is relative — but a user who already asked for a
+    // long delay must not be sped up by the cap, hence the max() against the configured value.
+    private static func lighter(_ base: Settings, debounceScale: Double, debounceCap: TimeInterval,
+                                maxTokens: Int, contextTokens: Int) -> Settings {
+        Settings(debounce: max(base.debounce, min(debounceCap, base.debounce * debounceScale)),
+                 maxTokens: min(base.maxTokens, maxTokens),
+                 maxContextTokens: min(base.maxContextTokens, contextTokens))
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     // P0
     let engine = InferenceEngine()
@@ -68,6 +125,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let screenContext = ScreenContextProvider()
     private var ocrSettingObserver: NSObjectProtocol?
     private var appSettingsObserver: NSObjectProtocol?
+    // Thermal pressure / Low Power Mode (see PowerPolicy). Both signals only ever loosen the live
+    // knobs; the stored settings they are derived from are untouched.
+    private var thermalObserver: NSObjectProtocol?
+    private var powerModeObserver: NSObjectProtocol?
     // Per-app "we can't read this app" banner (Google Docs et al). Coordinator posts the trigger; this
     // owns the floating panel + persisted "don't show again" state (AXNudgeStore).
     private let axNudge = AccessibilityNudgeController()
@@ -373,6 +434,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateTabDisableForFrontmost()
         }
 
+        // Thermal pressure / Low Power Mode: re-apply the knobs so a hot or battery-saving Mac gets a
+        // longer pause and a shorter generation, and gets its full settings back when it recovers.
+        // Both notifications can be delivered on any thread; queue: .main because every knob they
+        // touch is main-thread-owned (as with the settings observers above).
+        thermalObserver = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.applyPowerPolicy() }
+        powerModeObserver = NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
+        ) { [weak self] _ in self?.applyPowerPolicy() }
+
         // FR-CE-3: the Context length picker writes CompletionLength.defaultsKey then posts this.
         lengthObserver = NotificationCenter.default.addObserver(
             forName: .shadowtypeCompletionLengthChanged, object: nil, queue: .main
@@ -517,10 +589,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UserDefaults.standard.object(forKey: "styleProfileEnabled") == nil
             ? true
             : UserDefaults.standard.bool(forKey: "styleProfileEnabled")
-        // General → "Suggestion trigger delay". Default 50 ms when unset; clamp to the slider range.
-        // This is the adaptive-pause FLOOR (see CompletionCoordinator.adaptiveDelay).
-        let delayMs = UserDefaults.standard.object(forKey: "shadowtype.triggerDelayMs") as? Double ?? 50
-        coordinator.debounce = max(0.04, min(0.4, delayMs / 1000))
+        // General → "Suggestion trigger delay" + Context → "Context window size" + the completion-length
+        // preset's token ceiling all land through the thermal/Low-Power policy (see applyPowerPolicy).
+        applyPowerPolicy()
         // General → "Aggressiveness": scales the confirmed-pause threshold on top of the delay floor.
         coordinator.pauseMultiplier = Aggressiveness.current().pauseMultiplier
         // General → "Show active-field indicator" (default ON when unset). Re-evaluate the badge live.
@@ -547,17 +618,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Personalization → "strength" (0...3, default 3 when unset). 0 disables the style hint.
         coordinator.personalizationStrength =
             (UserDefaults.standard.object(forKey: "shadowtype.personalizationStrength") as? Int) ?? 3
-        // Context → "Context window size" (tokens; default 1024 when unset). Drives the engine prefix cap
-        // AND the coordinator's prompt byte budget — THE TWO MUST STAY IN SYNC, which is why they are set
-        // together here (this is the only place that knows the setting). InferenceEngine.generate()
-        // front-trims the tokenized prompt to this cap, and the front of the prompt is the `Context:`
-        // header plus every context block, so a budget bigger than the cap silently throws away the
-        // context we just paid to build. See CompletionCoordinator.promptBudgetBytes.
-        let contextTokens =
-            (UserDefaults.standard.object(forKey: "shadowtype.contextWindowTokens") as? Int) ?? 1024
-        engine.maxContextTokens = contextTokens
-        coordinator.promptCharBudget =
-            CompletionCoordinator.promptBudgetBytes(forContextTokens: contextTokens)
         // Models → "Unload model when idle" (minutes; 0 == Never; default 10 matches the picker). The
         // idle timer reads this.
         idleUnloadMinutes =
@@ -650,10 +710,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applyCompletionLength() {
         let length = CompletionLength.current()
         engine.maxWords = length.maxWords
-        coordinator.maxTokens = length.maxTokens
+        // The preset's token ceiling reaches coordinator.maxTokens through applyPowerPolicy, which may
+        // cap it further under thermal pressure / Low Power Mode.
+        applyPowerPolicy()
         // Longer presets end on a sentence boundary after their grace word-count instead of truncating
         // at the hard maxWords cap (short/medium pass 0 = legacy word-cap-only behaviour).
         engine.stopAtSentenceAfterWords = length.sentenceStopAfterWords
+    }
+
+    /// The user's own settings, read fresh from the store. This is the ceiling PowerPolicy adapts DOWN
+    /// from — deliberately re-derived on every apply instead of snapshotted before a throttle, so a
+    /// setting the user changes WHILE throttled is not clobbered when the Mac cools down again.
+    private func configuredSettings() -> PowerPolicy.Settings {
+        // General → "Suggestion trigger delay". Default 50 ms when unset; clamp to the slider range.
+        // This is the adaptive-pause FLOOR (see CompletionCoordinator.adaptiveDelay).
+        let delayMs = UserDefaults.standard.object(forKey: "shadowtype.triggerDelayMs") as? Double ?? 50
+        // Context → "Context window size" (tokens; default 1024 when unset).
+        let contextTokens =
+            (UserDefaults.standard.object(forKey: "shadowtype.contextWindowTokens") as? Int) ?? 1024
+        return PowerPolicy.Settings(debounce: max(0.04, min(0.4, delayMs / 1000)),
+                                    maxTokens: CompletionLength.current().maxTokens,
+                                    maxContextTokens: contextTokens)
+    }
+
+    /// Push the configured settings through the thermal / Low Power Mode policy into the live knobs.
+    /// Called from syncToggles, applyCompletionLength, and the two power notifications.
+    private func applyPowerPolicy() {
+        let info = ProcessInfo.processInfo
+        let applied = PowerPolicy.adjust(configuredSettings(),
+                                         thermalState: info.thermalState,
+                                         lowPower: info.isLowPowerModeEnabled)
+        coordinator.debounce = applied.debounce
+        coordinator.maxTokens = applied.maxTokens
+        // The context window drives the engine prefix cap AND the coordinator's prompt byte budget —
+        // THE TWO MUST STAY IN SYNC, which is why they are set together here (this is the only place
+        // that knows the effective value). InferenceEngine.generate() front-trims the tokenized prompt
+        // to this cap, and the front of the prompt is the `Context:` header plus every context block,
+        // so a budget bigger than the cap silently throws away the context we just paid to build. See
+        // CompletionCoordinator.promptBudgetBytes.
+        engine.maxContextTokens = applied.maxContextTokens
+        coordinator.promptCharBudget =
+            CompletionCoordinator.promptBudgetBytes(forContextTokens: applied.maxContextTokens)
     }
 
     // FR-LM-1: download+verify the chosen catalog entry, then swap the active model live on the
@@ -789,7 +886,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let ocrSettingObserver {
             NotificationCenter.default.removeObserver(ocrSettingObserver)
         }
-        for obs in [lengthObserver, selectModelObserver, appSettingsObserver, rewriteHotkeyObserver].compactMap({ $0 }) {
+        for obs in [lengthObserver, selectModelObserver, appSettingsObserver, rewriteHotkeyObserver,
+                    thermalObserver, powerModeObserver].compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(obs)
         }
         idleTimer?.invalidate()
