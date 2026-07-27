@@ -10,6 +10,9 @@ enum ShellHistory {
     /// The completion remainder for `currentLine` drawn from the most-recent matching command in
     /// `buffer`, or nil when nothing in history extends the current stem. The returned string is the
     /// part AFTER the typed stem (what Tab would inject), never the whole command.
+    /// CONTRACT: `currentLine` must already be chrome-free (CompletionCoordinator.shellTypedCommand).
+    /// The candidates it is compared against come from shellRecentCommands, which strips the prompt
+    /// sigil — hand it a raw `dario@mac ~/proj % git pu` and nothing can ever match.
     static func prefixMatch(currentLine: String, buffer: String?) -> String? {
         let stem = currentLine
         // Require a real stem so we don't suggest the entire last command on an empty prompt.

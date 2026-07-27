@@ -101,6 +101,35 @@ final class SamplingParamsTests: XCTestCase {
                        "FIM payload must round-trip — the engine reads .prefix + .suffix directly")
     }
 
+    // --- Repetition-penalty window priming (InferenceEngine.penaltyPrimeTokens) ---------------
+    // The bug: llama_sampler_accept only ever saw tokens the CALL generated, so with maxTokens 16-24
+    // the 64-token penalty window never held a single PROMPT token — nothing discouraged the ghost
+    // from echoing what the user had just typed, while short-range repetition inside the completion
+    // was still penalised.
+
+    func testPenaltyPrimeIsTheLastNPromptTokensInOrder() {
+        let prompt = (1...200).map { Int32($0) }
+        let primed = Array(InferenceEngine.penaltyPrimeTokens(prompt: prompt, lastN: 64))
+        XCTAssertEqual(primed.count, 64)
+        XCTAssertEqual(primed.first, 137)
+        XCTAssertEqual(primed.last, 200,
+                       "the ring buffer evicts from the front — the most recent prompt token must be accepted LAST")
+    }
+
+    func testPenaltyPrimeHandlesShortPrompt() {
+        let prompt: [Int32] = [7, 8, 9]
+        XCTAssertEqual(Array(InferenceEngine.penaltyPrimeTokens(prompt: prompt, lastN: 64)), prompt)
+    }
+
+    func testPenaltyPrimeEmptyWithoutAWindow() {
+        // repeatPenaltyLastN == 0 is a documented no-op inside llama.cpp's penalties sampler; priming
+        // it would be pointless work. API defaults use 0 — clients bring their own penalty.
+        XCTAssertTrue(InferenceEngine.penaltyPrimeTokens(prompt: [1, 2, 3], lastN: 0).isEmpty)
+        XCTAssertEqual(SamplingParams.apiDefaults.repeatPenaltyLastN, 0)
+        XCTAssertEqual(SamplingParams.ghostDefaults.repeatPenaltyLastN, 64,
+                       "ghost keeps a penalty window, so the prompt tail is what gets replayed into it")
+    }
+
     func testFIMRequestEquality() {
         let a = FIMRequest(prefix: "foo", suffix: "bar")
         let b = FIMRequest(prefix: "foo", suffix: "bar")

@@ -17,15 +17,29 @@ enum MidWordHealing {
         c.isLetter || c.isNumber || c == "_"
     }
 
+    // Longest stem healed when the caret sits in a space-less script (CJK / kana / Thai). There the
+    // trailing word-char run is not a word but everything since the last full stop — routinely 10-24
+    // chars — and every stem-consuming token still counts against the engine's maxTokens (16 at the
+    // medium preset), so healing the whole run spends most of the generation budget re-emitting text
+    // the user already typed. A few characters are enough to steer the word the caret is inside.
+    static let maxSpacelessStem = 4
+
     // Split `prefix` into (head, stem) when it ends mid-word: `stem` is the trailing run of word
     // chars, `head` is everything before it (ending at the last boundary). nil when the caret is not
     // mid-word (prefix ends in whitespace/punctuation, or there's no word run), or the stem is longer
     // than `maxStem` (a long run is almost certainly a complete word — healing it just burns the
-    // constraint for no gain, and risks reconstructing a different long word).
+    // constraint for no gain, and risks reconstructing a different long word). A space-less-script run
+    // is trimmed to `maxSpacelessStem` instead of rejected: whitespace never breaks it, so the
+    // `maxStem` rule would either reject every healed CJK caret or heal a whole clause.
     static func split(prefix: String, maxStem: Int = 24) -> Split? {
         guard let last = prefix.last, isWordChar(last) else { return nil }
-        let stem = String(prefix.reversed().prefix(while: isWordChar).reversed())
-        guard !stem.isEmpty, stem.count <= maxStem else { return nil }
+        var stem = String(prefix.reversed().prefix(while: isWordChar).reversed())
+        guard !stem.isEmpty else { return nil }
+        if SentenceBoundary.isSpacelessScript(last) {
+            stem = String(stem.suffix(maxSpacelessStem))
+        } else if stem.count > maxStem {
+            return nil
+        }
         return Split(head: String(prefix.dropLast(stem.count)), stem: stem)
     }
 

@@ -88,7 +88,17 @@ final class EditContextTracker {
     }
 
     func currentPrefix() -> String? {
-        return resolvePrefix().map(Self.normalizingSpaces)
+        return resolveTextAroundCaret()?.prefix
+    }
+
+    // Text AFTER the caret (first `maxChars` UTF-16 units, itself clamped by the maxSuffixChars hard
+    // cap), or nil when the field/caret can't be resolved, the field is secure, or nothing follows the
+    // caret. Free on the native path — it comes from the SAME kAXValue + caret offset the prefix read
+    // already fetched, no second AX round trip — and nil on every web/text-marker host (see CaretText).
+    // Sanitized exactly like the prefix: a secure field never yields one, and the NBSP family is folded.
+    func suffixAfterCaret(maxChars: Int = EditContextTracker.maxSuffixChars) -> String? {
+        guard let s = resolveTextAroundCaret()?.suffix else { return nil }
+        return Self.suffixAfterCaret(s, caret: 0, maxChars: maxChars)
     }
 
     // WebKit contenteditable (Apple Mail's compose, web mail) stores a significant trailing/embedded
@@ -110,51 +120,67 @@ final class EditContextTracker {
         "\u{2007}",  // FIGURE SPACE
     ]
 
-    private func resolvePrefix() -> String? {
+    // How much post-caret text we ever read. One screenful is ample to notice that a completion would
+    // duplicate or contradict what already follows the caret, and the cap keeps a 100k-char document
+    // from being copied out of AX on every keystroke.
+    static let maxSuffixChars = 400
+
+    // Text on BOTH sides of the caret, from ONE AX read.
+    private struct CaretText {
+        let prefix: String
+        // Post-caret text (capped at maxSuffixChars), nil when nothing follows the caret OR the read
+        // path can't see past it. Only the native kAXValue+range paths can: on a web/text-marker host
+        // the suffix would cost a whole SECOND marker chain per keystroke (doc-end marker + range build
+        // + stringify) on top of the prefix's, and a correct nil beats an expensive-or-wrong suffix.
+        let suffix: String?
+    }
+
+    // Negative read cache: the focus generation + element + the character count the element reported at
+    // the moment the read failed. A hollow focus (a real diag showed role=AXWindow, descend=AXSplitter,
+    // prefix=nil) used to re-walk the entire tree — descend BFS, marker chains, index probes — on EVERY
+    // keystroke: ~14 walks in 130 ms, all nil. Keyed on focusChangeSequence so a different focused
+    // element always re-probes from scratch. TWO guards keep it from latching a field that is actually
+    // usable: (a) the character count — a field that is merely EMPTY right now (an empty Apple Mail
+    // compose genuinely fails the read) must become readable the instant the user types, so any change
+    // in the count busts the cache; (b) lastGoodReadFocusSeq — a focus that has ALREADY yielded text
+    // this session is never cached, because a nil there is the transient redraw flicker that
+    // FocusCapabilityFlickerGate exists for (Apple Calendar's editor), not a dead field.
+    // Side benefit: throttles the diag below from once-per-keystroke to once per (focus, content) state.
+    private var prefixFailure: (seq: UInt64, element: AXUIElement, chars: Int)?
+    // Focus generation whose text we last read successfully — guard (b) above.
+    private var lastGoodReadFocusSeq: UInt64?
+
+    private func resolveTextAroundCaret() -> CaretText? {
         guard let element = currentFocusedElement(), !isSecure(element) else { return nil }
+        return resolveTextAroundCaret(of: element)
+    }
 
-        // (1) Native path: kAXValue + kAXSelectedTextRange (Cocoa/AppKit fields).
-        if let caret = caretLocation(of: element), let text = elementString(element) {
-            let p = prefixBeforeCaret(text, caret: caret)
-            Diag.log("prefix: ok via=native len=\(p.utf16.count) role=\(roleSubrole(element))")
-            return p
+    // `preDescended`: pass `.some(…)` when the caller already resolved descendToEditable (a
+    // FocusSnapshot has) so the BFS isn't repeated; the default resolves it lazily, and only if the
+    // direct paths fail.
+    private func resolveTextAroundCaret(of element: AXUIElement,
+                                        descended preDescended: AXUIElement?? = nil) -> CaretText? {
+        // Known-bad focus: one cheap attribute read decides whether anything changed (see prefixFailure).
+        if let f = prefixFailure, f.seq == focusChangeSequence, cfEqual(f.element, element) {
+            if (characterCount(of: element) ?? -1) == f.chars { return nil }
+            prefixFailure = nil
+        }
+        if let text = readTextAroundCaret(of: element, descended: preDescended) {
+            lastGoodReadFocusSeq = focusChangeSequence
+            return text
         }
 
-        // (2) Web/Electron/Chromium path (Slack/Warp/VS Code): text-marker string before the caret
-        // (PRD R2). Read forward-from-caret only — webPrefix is document-start→caret (FR-KC-2).
-        if let webText = AXTextProbe.webPrefix(of: element) {
-            Diag.log("prefix: ok via=web len=\(webText.utf16.count) role=\(roleSubrole(element))")
-            return webText
+        // (4) Give up gracefully rather than feed the model wrong text, and remember the failure for this
+        // focus generation so the walk above isn't repeated per keystroke — unless this focus has already
+        // read fine once, in which case the nil is a flicker (see prefixFailure guard (b)). The per-step
+        // marker probe, index probe and full attribute dump are AX-IPC heavy, so build them ONLY when
+        // diag is enabled — in a shipping build (diag off) the eagerly-built Diag.log argument would
+        // otherwise still pay for them.
+        if lastGoodReadFocusSeq != focusChangeSequence {
+            prefixFailure = (focusChangeSequence, element, characterCount(of: element) ?? -1)
         }
-
-        // (3) Descend to the real editable text node and retry the native path on it.
-        let descended = AXTextProbe.descendToEditable(element)
-        if let editable = descended, !isSecure(editable) {
-            if let caret = caretLocation(of: editable), let text = elementString(editable) {
-                let p = prefixBeforeCaret(text, caret: caret)
-                Diag.log("prefix: ok via=descend-native len=\(p.utf16.count) role=\(roleSubrole(editable))")
-                return p
-            }
-            if let webText = AXTextProbe.webPrefix(of: editable) {
-                Diag.log("prefix: ok via=descend-web len=\(webText.utf16.count) role=\(roleSubrole(editable))")
-                return webText
-            }
-        }
-
-        // (3.5) Position-derived marker prefix: modern Apple Mail's compose AXWebArea omits
-        // AXStartTextMarkerForTextMarkerRange (so the marker chain in webPrefix dead-ends) but DOES
-        // answer the caret bounds, AXTextMarkerForPosition, AXStartTextMarker and the unordered-range
-        // builder. Derive the caret marker from its on-screen point and read document-start→caret.
-        if let s = AXTextProbe.webPrefixViaPosition(of: element), !s.isEmpty {
-            Diag.log("prefix: ok via=web-position len=\(s.utf16.count) role=\(roleSubrole(element))")
-            return s
-        }
-
-        // (4) Give up gracefully rather than feed the model wrong text. The per-step marker probe, index
-        // probe and full attribute dump are AX-IPC heavy, so build them ONLY when diag is enabled — on a
-        // permanently-unreadable host (Google Docs canvas) this branch fires every keystroke, and in a
-        // shipping build (diag off) the eagerly-built Diag.log argument would otherwise still pay for them.
         if Diag.isEnabled {
+            let descended = preDescended ?? AXTextProbe.descendToEditable(element)
             Diag.log("prefix: nil role=\(roleSubrole(element)) web=\(AXTextProbe.webPrefixFailureStep(of: element)) idx=[\(AXTextProbe.indexCapabilities(of: element))] descend=\(descended.map { roleSubrole($0) } ?? "none") url=\(frontmostDomainHost() ?? "?")")
             // One-shot per focus session: dump the full AX attribute surface of the focused element, its
             // descended node, and its ancestors — the supported-attribute lists reveal which read path a
@@ -164,6 +190,49 @@ final class EditContextTracker {
                 dumpAXAttributes(element, descended: descended)
             }
         }
+        return nil
+    }
+
+    // The read itself, in resolution order. nil = no path could see the caret's text.
+    private func readTextAroundCaret(of element: AXUIElement,
+                                     descended preDescended: AXUIElement??) -> CaretText? {
+        // (1) Native path: kAXValue + kAXSelectedTextRange (Cocoa/AppKit fields).
+        if let caret = caretLocation(of: element), let text = elementString(element) {
+            let t = caretText(text, caret: caret)
+            Diag.log("prefix: ok via=native len=\(t.prefix.utf16.count) role=\(roleSubrole(element))")
+            return t
+        }
+
+        // (2) Web/Electron/Chromium path (Slack/Warp/VS Code): text-marker string before the caret
+        // (PRD R2). Read forward-from-caret only — webPrefix is document-start→caret (FR-KC-2).
+        if let webText = AXTextProbe.webPrefix(of: element) {
+            Diag.log("prefix: ok via=web len=\(webText.utf16.count) role=\(roleSubrole(element))")
+            return CaretText(prefix: Self.normalizingSpaces(webText), suffix: nil)
+        }
+
+        // (3) Descend to the real editable text node and retry the native path on it.
+        let descended = preDescended ?? AXTextProbe.descendToEditable(element)
+        if let editable = descended, !isSecure(editable) {
+            if let caret = caretLocation(of: editable), let text = elementString(editable) {
+                let t = caretText(text, caret: caret)
+                Diag.log("prefix: ok via=descend-native len=\(t.prefix.utf16.count) role=\(roleSubrole(editable))")
+                return t
+            }
+            if let webText = AXTextProbe.webPrefix(of: editable) {
+                Diag.log("prefix: ok via=descend-web len=\(webText.utf16.count) role=\(roleSubrole(editable))")
+                return CaretText(prefix: Self.normalizingSpaces(webText), suffix: nil)
+            }
+        }
+
+        // (3.5) Position-derived marker prefix: modern Apple Mail's compose AXWebArea omits
+        // AXStartTextMarkerForTextMarkerRange (so the marker chain in webPrefix dead-ends) but DOES
+        // answer the caret bounds, AXTextMarkerForPosition, AXStartTextMarker and the unordered-range
+        // builder. Derive the caret marker from its on-screen point and read document-start→caret.
+        if let s = AXTextProbe.webPrefixViaPosition(of: element), !s.isEmpty {
+            Diag.log("prefix: ok via=web-position len=\(s.utf16.count) role=\(roleSubrole(element))")
+            return CaretText(prefix: Self.normalizingSpaces(s), suffix: nil)
+        }
+
         return nil
     }
 
@@ -206,8 +275,31 @@ final class EditContextTracker {
     /// per-app "mid-line completions" gate. Best-effort: only the native value+range path can see
     /// post-caret text; the web/marker path (prefix-only) returns true so we never suppress on a
     /// surface where we genuinely can't tell (preserves current behavior there).
+    /// NOT an end-of-DOCUMENT test: it looks at exactly one character ahead, so it is true with three
+    /// more paragraphs below the caret. Use suffixAfterCaret() to know what actually follows.
     func caretAtLineEnd() -> Bool {
         guard let element = currentFocusedElement(), !isSecure(element) else { return true }
+        return caretAtLineEnd(element: element, descended: nil, descendedIsSecure: nil)
+    }
+
+    /// Same decision from a snapshot the caller already paid for: no second systemwide focused-element
+    /// read, no second descendToEditable BFS.
+    func caretAtLineEnd(in snapshot: FocusSnapshot) -> Bool {
+        guard !snapshot.isSecure else { return true }
+        return caretAtLineEnd(element: snapshot.element,
+                              descended: .some(snapshot.descendedEditable),
+                              descendedIsSecure: snapshot.descendedIsSecure)
+    }
+
+    private func caretAtLineEnd(element: AXUIElement,
+                                descended preDescended: AXUIElement??,
+                                descendedIsSecure preDescendedIsSecure: Bool?) -> Bool {
+        // The editable node under the focused wrapper, skipping a secure one. Resolved at most once per
+        // call — the branches below are mutually exclusive — and not at all when the caller passed one.
+        func editableDescendant() -> AXUIElement? {
+            guard let d = preDescended ?? AXTextProbe.descendToEditable(element) else { return nil }
+            return (preDescendedIsSecure ?? isSecure(d)) ? nil : d
+        }
         // Chromium/WebKit contenteditables (Gmail in a browser) expose a flat kAXValue whose newline
         // counting drifts from kAXSelectedTextRange the moment the body has a line break: the native
         // post-caret read then lands mid-string and falsely reports "mid-line", so the ghost dies on
@@ -219,7 +311,7 @@ final class EditContextTracker {
             // marker range is nil, so the real answer often lives on the descended text node. Take the
             // first DEFINITE (non-.unavailable) answer; only a definite mid-line suppresses.
             let focused = AXTextProbe.webCaretLinePosition(of: element)
-            let descend = AXTextProbe.descendToEditable(element).flatMap { isSecure($0) ? nil : $0 }
+            let descend = editableDescendant()
                 .map { AXTextProbe.webCaretLinePosition(of: $0) } ?? .unavailable
             let probe = focused != .unavailable ? focused : descend
             switch probe {
@@ -246,7 +338,7 @@ final class EditContextTracker {
         case .midLine: return false
         case .unavailable: break
         }
-        if let editable = AXTextProbe.descendToEditable(element), !isSecure(editable) {
+        if let editable = editableDescendant() {
             if let caret = caretLocation(of: editable), let text = elementString(editable) {
                 return Self.isCaretAtLineEnd(text, caret: caret)
             }
@@ -267,8 +359,13 @@ final class EditContextTracker {
         return chars[i] == 10 || chars[i] == 13   // LF / CR
     }
 
-    // Run of text immediately BEFORE the caret only (FR-KC-2). Never read post-caret text —
-    // forward-from-caret keeps inference on the cached prefix-growth path (FINDINGS Spike 2).
+    // Run of text immediately BEFORE the caret (FR-KC-2). This — and only this — is what the model is
+    // PREFILLED with: keeping the prompt a pure forward-growing prefix is what keeps inference on the
+    // cached prefix-growth path (FINDINGS Spike 2), so post-caret text must never be appended here.
+    // Post-caret text IS read now (suffixAfterCaret), because the old prefix-only view let the model
+    // write something that duplicated or contradicted text sitting three lines below the caret and the
+    // single character caretAtLineEnd() peeks at can't see that — but it is a check on the GENERATED
+    // text, kept out of the prompt prefix.
     private func prefixBeforeCaret(_ text: String, caret: Int) -> String {
         let chars = Array(text.utf16)
         let end = min(max(caret, 0), chars.count)
@@ -276,21 +373,66 @@ final class EditContextTracker {
         return String(utf16CodeUnits: Array(chars[0..<end]), count: end)
     }
 
+    // Pure (testable): the run of text immediately AFTER the caret, capped to `maxChars` UTF-16 units.
+    // nil when nothing follows — "no suffix" and "empty suffix" are the same fact, and callers should
+    // not have to special-case "". UTF-16 offsets, matching kAXSelectedTextRange.
+    static func suffixAfterCaret(_ text: String, caret: Int, maxChars: Int) -> String? {
+        guard maxChars > 0 else { return nil }
+        let chars = Array(text.utf16)
+        let start = min(max(caret, 0), chars.count)
+        guard start < chars.count else { return nil }
+        var end = min(chars.count, start + maxChars)
+        // The cap must not slice a surrogate pair in half — an emoji sitting at the cap boundary would
+        // otherwise arrive as U+FFFD. Drop the dangling high surrogate instead. (Caret offsets themselves
+        // come from kAXSelectedTextRange and never land mid-pair.)
+        if end < chars.count, (0xD800...0xDBFF).contains(chars[end - 1]) { end -= 1 }
+        guard end > start else { return nil }
+        let slice = Array(chars[start..<end])
+        return String(utf16CodeUnits: slice, count: slice.count)
+    }
+
+    // Split a field's raw value at the caret, applying the read-chokepoint NBSP fold to BOTH halves so
+    // every consumer of either side sees U+0020 (see normalizingSpaces).
+    private func caretText(_ text: String, caret: Int) -> CaretText {
+        CaretText(prefix: Self.normalizingSpaces(prefixBeforeCaret(text, caret: caret)),
+                  suffix: Self.suffixAfterCaret(text, caret: caret, maxChars: Self.maxSuffixChars)
+                      .map(Self.normalizingSpaces))
+    }
+
     func caretRectOnScreen() -> CGRect? {
         guard let element = currentFocusedElement(), !isSecure(element) else { return nil }
+        return caretRect(element: element, descended: nil, descendedIsSecure: nil, prefix: nil)
+    }
+
+    // Same geometry from a snapshot: reuses the focused element, the descend, and — the real saving —
+    // the prefix the caller already read, so the frame-anchored fallback (c) no longer costs a SECOND
+    // full text resolution on every fire in the Electron/Chromium hosts that always land there.
+    func caretRectOnScreen(in snapshot: FocusSnapshot) -> CGRect? {
+        guard !snapshot.isSecure else { return nil }
+        return caretRect(element: snapshot.element,
+                         descended: .some(snapshot.descendedEditable),
+                         descendedIsSecure: snapshot.descendedIsSecure,
+                         prefix: .some(snapshot.prefix))
+    }
+
+    private func caretRect(element: AXUIElement,
+                           descended preDescended: AXUIElement??,
+                           descendedIsSecure preDescendedIsSecure: Bool?,
+                           prefix prefixResolved: String??) -> CGRect? {
         // (a) Real caret geometry on the focused element (native kAXBoundsForRange or web markers).
         if let rect = caretBounds(of: element) { return rect }
 
         // (b) Web/Electron often keep the editable node a level down; retry caret geometry there.
-        let editable = AXTextProbe.descendToEditable(element)
-        if let editable, !isSecure(editable), let rect = caretBounds(of: editable) { return rect }
+        let editable = preDescended ?? AXTextProbe.descendToEditable(element)
+        let editableIsSecure = editable.map { preDescendedIsSecure ?? isSecure($0) } ?? false
+        if let editable, !editableIsSecure, let rect = caretBounds(of: editable) { return rect }
 
         // (c) Last resort (Chromium/Electron expose no usable caret rect): anchor on the editable
         // element's own frame — the actual text line — and ESTIMATE the caret X by measuring the
         // rendered width of the current line's prefix in the line's font. This lands the ghost right
         // after the typed text instead of at the box's left edge. Prefer the descended editable node
         // (the real text box) over the focused wrapper.
-        let anchorEl: AXUIElement = (editable.flatMap { isSecure($0) ? nil : $0 }) ?? element
+        let anchorEl: AXUIElement = editableIsSecure ? element : (editable ?? element)
         if let frame = elementFrame(anchorEl) {
             // The frame height is the element BOX. For a single-line field that's ≈ the text line, but
             // for a MULTI-LINE field (textarea / web area, hundreds of px tall) it is NOT a line —
@@ -306,7 +448,7 @@ final class EditContextTracker {
             // hair of gap rather than overlap the typed text) — seats the ghost right at the caret.
             let font = NSFont.systemFont(ofSize: max(11, round(lineHeight * 0.70)))
             // Only the last visual line's text contributes to the caret X (text after the last newline).
-            let prefix = currentPrefix() ?? ""
+            let prefix = (prefixResolved ?? currentPrefix()) ?? ""
             let lastLine = prefix.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? ""
             // When the last logical line is wider than the box it SOFT-WRAPS. The caret then sits at the end
             // of the *last visual* line — partway along it, holding the overflow text. Measuring the whole
@@ -427,6 +569,13 @@ final class EditContextTracker {
     // there this returns false and callers behave as today (fail-open). Single AX call, no descend.
     func hasMarkedText() -> Bool {
         guard let element = currentFocusedElement() else { return false }
+        return hasMarkedText(of: element)
+    }
+
+    /// Same probe on a snapshot's element — saves the systemwide focused-element read.
+    func hasMarkedText(in snapshot: FocusSnapshot) -> Bool { hasMarkedText(of: snapshot.element) }
+
+    private func hasMarkedText(of element: AXUIElement) -> Bool {
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, "AXMarkedTextRange" as CFString, &ref) == .success,
               let v = ref, CFGetTypeID(v) == AXValueGetTypeID() else { return false }
@@ -526,6 +675,9 @@ final class EditContextTracker {
               let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
               rewakedPidThisFocus != pid else { return }
         rewakedPidThisFocus = pid
+        // Waking the tree is exactly the event that can make a focus we recorded as unreadable readable,
+        // so drop the negative cache or the next read would short-circuit on the pre-rewake verdict.
+        invalidateFocusSnapshot()
         electronA11y.apply(pid: pid)
     }
 
@@ -549,27 +701,40 @@ final class EditContextTracker {
         return AXTextProbe.webAreaFullText(of: webArea)
     }
 
+    /// Same text from a snapshot, reusing the web area it already walked up to.
+    func pageContextText(in snapshot: FocusSnapshot) -> String? {
+        guard !snapshot.isSecure, let webArea = snapshot.webArea else { return nil }
+        return AXTextProbe.webAreaFullText(of: webArea)
+    }
+
     // True when the focused field is STRUCTURED input (a search box, or a browser's address/omnibox /
     // find bar) where prose autocomplete is wrong — e.g. "aelo.com" ghosted into the address bar.
     // Gathers the AX facts and defers the decision to the pure ActivationPolicy.isNonProseField.
     // Bypassable by force-activate at the call site. Returns false when nothing is focused.
     func focusedFieldIsNonProse() -> Bool {
-        guard let element = currentFocusedElement() else { return false }
-        let searchSub = subrole(of: element) == (kAXSearchFieldSubrole as String)
-        let editable = AXTextProbe.isEditable(element) || AXTextProbe.descendToEditable(element) != nil
+        guard let snapshot = resolveFocusSnapshot() else { return false }
+        return focusedFieldIsNonProse(in: snapshot)
+    }
+
+    // Snapshot form: every AX fact below — subrole, editability, web area, roles, host, descend — comes
+    // from the single resolution the caller already paid for. This gate on its own used to run TWO
+    // descendToEditable BFS passes (visitCap 64 each) plus its own web-area and document-URL walks, on
+    // every keystroke, and then frontmostDomainHost() walked for the URL a third time.
+    func focusedFieldIsNonProse(in snapshot: FocusSnapshot) -> Bool {
+        let element = snapshot.element
+        let searchSub = snapshot.subrole == (kAXSearchFieldSubrole as String)
+        let editable = snapshot.isEditable || snapshot.descendedEditable != nil
         // A reachable kAXDocument is positive evidence the focus is WEB CONTENT (it's how per-domain
         // rules read the host); the omnibox/find bar carry none. Combine with the parent-walk so a
         // composer counts as "in a web area" even when Chromium hides the AXWebArea from kAXParent.
-        let hasWebArea = AXTextProbe.topWebArea(from: element) != nil
-            || AXTextProbe.documentURL(near: element) != nil
+        let hasWebArea = snapshot.hasWebArea
         // The focused (or descended) editable's role. AXTextArea / AXWebArea = prose content, not chrome.
-        let r = role(of: element)
-            ?? AXTextProbe.descendToEditable(element).flatMap { role(of: $0) }
+        let r = snapshot.role ?? snapshot.descendedRole
         let proseRole = r == (kAXTextAreaRole as String) || r == "AXWebArea"
         // Web-mail header inputs (Gmail/Outlook To/Cc/Bcc/Subject) are AXTextField/AXComboBox inside a
         // page web area — they pass the prose-role check (they aren't a prose role) but the host's own
         // contact autocomplete owns those rows, so a ghost there clashes. Gate by host + role.
-        let host = frontmostDomainHost()
+        let host = snapshot.domainHost
         let structuredMail = ActivationPolicy.isStructuredWebMailField(host: host, role: r)
         let nonProse = ActivationPolicy.isNonProseField(
             isBrowser: ActivationPolicy.isBrowser(bundleId: frontmostBundleId),
@@ -586,8 +751,7 @@ final class EditContextTracker {
         // the focused element and its descended editable (Gmail focuses the wrapper sometimes; Outlook
         // the field itself). Either signal = non-prose.
         guard ActivationPolicy.isBrowser(bundleId: frontmostBundleId) else { return false }
-        let descended = AXTextProbe.descendToEditable(element)
-        let targets: [AXUIElement] = descended.map { [element, $0] } ?? [element]
+        let targets: [AXUIElement] = snapshot.descendedEditable.map { [element, $0] } ?? [element]
         let descriptors = targets.flatMap { AXTextProbe.fieldDescriptors(of: $0) }
         if ActivationPolicy.isWebMailRecipientOrSubject(descriptors: descriptors) {
             Diag.log("nonProse: webMail field descriptors=\(descriptors)")
@@ -680,6 +844,78 @@ final class EditContextTracker {
         return size.height
     }
 
+    // MARK: - Focus snapshot (one AX resolution per fire)
+
+    // Every AX fact the per-keystroke gates ask the tree for, resolved ONCE. Before this a single fire
+    // read the systemwide focused element ~7 times, re-ran the descendToEditable BFS (visitCap 64) in
+    // four separate gates and recomputed the document host 3-4 times; a diag from a real machine caught
+    // the tree being walked ~14 times in 130 ms, every walk returning nil. Resolve one per fire and hand
+    // it to every gate (caretAtLineEnd(in:), focusedFieldIsNonProse(in:), caretRectOnScreen(in:), …).
+    //
+    // Deliberately a VALUE with no lifetime of its own: `prefix`/`suffix` are per-keystroke state, so a
+    // snapshot must never be cached across fires. The only thing that persists between fires is the
+    // negative read cache (see prefixFailure), keyed on the focus generation and dropped by
+    // invalidateFocusSnapshot().
+    struct FocusSnapshot {
+        // The focus generation this was resolved in — the same counter the ghost-font stabilizer and the
+        // capability-flicker gate scope their state by, so a consumer can tell two fires apart.
+        let focusSeq: UInt64
+        let element: AXUIElement
+        let role: String?
+        let subrole: String?
+        let isSecure: Bool
+        // AXTextProbe.isEditable(element): the focused element itself is a readable text node.
+        let isEditable: Bool
+        // The real editable text node under `element` (Slack/Electron/Lexical focus a wrapper whose own
+        // value is empty), with its role and secure flag — resolved here because five gates wanted it.
+        let descendedEditable: AXUIElement?
+        let descendedRole: String?
+        let descendedIsSecure: Bool
+        // Web facts: the top-level AXWebArea (the page, not the compose iframe), the raw kAXDocument URL
+        // and the host it reduces to for the FR-PA-2 per-domain rules.
+        let webArea: AXUIElement?
+        let documentURL: String?
+        let domainHost: String?
+        // Text around the caret, sanitized exactly as currentPrefix()/suffixAfterCaret() return it. Both
+        // nil in a secure field — the read is never even attempted there.
+        let prefix: String?
+        let suffix: String?
+
+        // Positive evidence the focus sits in web CONTENT (a browser's omnibox/find bar carries neither).
+        var hasWebArea: Bool { webArea != nil || documentURL != nil }
+    }
+
+    // Resolve one snapshot. nil only when nothing is focused (or AX is untrusted) — a focused-but-
+    // unreadable field still yields a snapshot with prefix == nil, which is what the gates need to see.
+    func resolveFocusSnapshot() -> FocusSnapshot? {
+        guard let element = currentFocusedElement() else { return nil }
+        let secure = isSecure(element)
+        let descended = AXTextProbe.descendToEditable(element)
+        // Never read text out of a secure field (FR-KC-4) — neither side of the caret.
+        let text = secure ? nil : resolveTextAroundCaret(of: element, descended: .some(descended))
+        let url = AXTextProbe.documentURL(near: element)
+        return FocusSnapshot(
+            focusSeq: focusChangeSequence,
+            element: element,
+            role: role(of: element),
+            subrole: subrole(of: element),
+            isSecure: secure,
+            isEditable: AXTextProbe.isEditable(element),
+            descendedEditable: descended,
+            descendedRole: descended.flatMap { role(of: $0) },
+            descendedIsSecure: descended.map { isSecure($0) } ?? false,
+            webArea: AXTextProbe.topWebArea(from: element),
+            documentURL: url,
+            domainHost: url.flatMap { Self.host(fromDocumentURL: $0) },
+            prefix: text?.prefix,
+            suffix: text?.suffix)
+    }
+
+    // Drop the per-focus state a snapshot resolution can short-circuit on (today: the negative read
+    // cache), so the next resolve walks the tree for real again. Called on focus/value changes and after
+    // an AX-tree rewake — anything that can turn a previously unreadable focus into a readable one.
+    func invalidateFocusSnapshot() { prefixFailure = nil }
+
     // MARK: - Focus + AXObserver
 
     private func refreshFocus() {
@@ -691,6 +927,10 @@ final class EditContextTracker {
         // Re-arm the per-focus-session browser-AX rewake (a stale pid from a prior focus must not
         // block re-priming when the user lands on a fresh Gmail tab in the same browser process).
         rewakedPidThisFocus = nil
+        // This also fires on kAXValueChanged, i.e. the field's content changed — the second reason a
+        // focus recorded as unreadable can become readable (the first being a different element, which
+        // the focus generation already covers). Retry it rather than latch the old verdict.
+        invalidateFocusSnapshot()
 
         var value: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &value)
@@ -820,11 +1060,26 @@ final class EditContextTracker {
     // the app doesn't (web/Electron) — the caller then falls back to sizing by the caret line height.
     func caretFont() -> NSFont? {
         guard let element = currentFocusedElement(), !isSecure(element) else { return nil }
+        return caretFont(element: element, descended: nil, descendedIsSecure: nil)
+    }
+
+    /// Same font from a snapshot — no second focused-element read, no second descend BFS.
+    func caretFont(in snapshot: FocusSnapshot) -> NSFont? {
+        guard !snapshot.isSecure else { return nil }
+        return caretFont(element: snapshot.element,
+                         descended: .some(snapshot.descendedEditable),
+                         descendedIsSecure: snapshot.descendedIsSecure)
+    }
+
+    private func caretFont(element: AXUIElement,
+                           descended preDescended: AXUIElement??,
+                           descendedIsSecure preDescendedIsSecure: Bool?) -> NSFont? {
         if let f = fontAtCaret(element) { return f }
         // Web/Chromium (Gmail etc.) don't answer the range-based attributed-string query fontAtCaret
         // uses; read the font via the text-marker attributed string instead so browser ghosts match.
         if let f = AXTextProbe.webFont(of: element) { return f }
-        if let editable = AXTextProbe.descendToEditable(element), !isSecure(editable) {
+        if let editable = preDescended ?? AXTextProbe.descendToEditable(element),
+           !(preDescendedIsSecure ?? isSecure(editable)) {
             return fontAtCaret(editable) ?? AXTextProbe.webFont(of: editable)
         }
         return nil

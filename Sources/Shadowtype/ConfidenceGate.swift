@@ -1,10 +1,13 @@
 // ConfidenceGate — pure, testable accumulator for suppressing low-confidence completions.
-// The inference engine reports each content token's post-sampler probability; this gate turns the
-// stream of probabilities into two suppression decisions:
+// The inference engine reports each content token's RAW top-1 probability — the model's own softmax
+// peak, BEFORE the sampler chain reshapes the distribution (see InferenceEngine.sampleWithProb). This
+// gate turns the stream of probabilities into two suppression decisions:
 //   • firstTokenRejected — the model was already unsure on its FIRST content token (gate before any
 //     render, so nothing flashes on screen).
-//   • meanRejected — the geometric-mean probability across the whole completion is poor, i.e. the
-//     model was flailing and produced word-salad even if every structural filter passed.
+//   • meanRejected — the RUNNING geometric-mean probability has collapsed, i.e. the model started
+//     flailing mid-completion and is producing word-salad even though every structural filter passed.
+//     Read PER TOKEN so the decode can be cut at the collapse point; the ghost already on screen is
+//     never retracted (see CompletionCoordinator.startGeneration for that tradeoff).
 // Geometric mean (exp of mean log-prob) is the natural aggregate: it is the inverse of perplexity and
 // punishes a single near-zero token instead of letting a few confident tokens mask it.
 import Foundation
@@ -40,7 +43,11 @@ struct ConfidenceGate {
         return p < firstTokenMinProb
     }
 
-    var meanRejected: Bool { count > 0 && meanProb < meanMinProb }
+    // Needs a SECOND sample to mean anything: with one token the geometric mean IS that token's
+    // probability, so a count-of-1 check would silently re-decide the first token at the mean's (looser)
+    // threshold instead of the first-token gate's. From token 2 on it measures what it is meant to —
+    // whether the completion is holding together or coming apart.
+    var meanRejected: Bool { count >= 2 && meanProb < meanMinProb }
 
     // Compact log strings (avoid leaking full precision into Diag lines).
     var firstProbString: String { firstProb.map { String(format: "%.3f", $0) } ?? "nil" }

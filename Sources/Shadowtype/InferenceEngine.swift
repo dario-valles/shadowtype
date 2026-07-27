@@ -31,6 +31,11 @@ enum InferenceError: Error, LocalizedError {
     // dropped tokens would be fim_pre / fim_suf — framing the model was trained on. Routes catch
     // this and return HTTP 400 with a clear message instead of letting the model emit garbage.
     case fimContextOverflow(tokens: Int, cap: Int)
+    // The requested `max_tokens` reserves so much of the context for generation that the over-cap
+    // prompt would have to be front-trimmed to a stub. Answering from a stub looks like a model
+    // failure, so the request is refused; routes should surface it as HTTP 400 (fixable by the
+    // caller: shorten the prompt or lower max_tokens).
+    case promptWindowExhausted(tokens: Int, cap: Int, maxTokens: Int)
 
     var errorDescription: String? {
         switch self {
@@ -40,6 +45,8 @@ enum InferenceError: Error, LocalizedError {
         case .tokenizeFailed:             return "Tokenization failed."
         case .decodeFailed(let code):     return "llama_decode failed (code \(code))."
         case .fimContextOverflow(let t, let cap): return "Context overflow: \(t) tokens exceed the \(cap)-token cap."
+        case .promptWindowExhausted(let t, let cap, let mt):
+            return "Prompt is \(t) tokens but only \(cap) fit alongside max_tokens=\(mt) — shorten the prompt or lower max_tokens."
         }
     }
 }
@@ -336,7 +343,8 @@ final class InferenceEngine: InferenceEngineProtocol {
 
     // `onSample`, when provided, is invoked once per sampled CONTENT token (a token whose decoded
     // piece carries a visible, non-whitespace character), on the engine's inference thread, BEFORE that
-    // token's word(s) are flushed via `onToken`. It reports the token's post-sampler probability and
+    // token's word(s) are flushed via `onToken`. It reports the step's RAW top-1 probability (the peak of
+    // the model's own distribution, before the sampler chain distorts it — see sampleWithProb) and
     // whether it is the FIRST content token of this generation. The coordinator uses this for confidence
     // gating (suppress low-probability/flailing completions) — decoupled from word-flush boundaries so a
     // multi-token word doesn't smear the per-token signal.
@@ -383,13 +391,14 @@ final class InferenceEngine: InferenceEngineProtocol {
         guard !tokens.isEmpty else { return }
         let nCtx = Int(llama_n_ctx(ctx))
         // Cap at the live context minus head-room, and further at the user's configured window. The
-        // head-room is NOT cosmetic: the ghost decodes its generated tokens into THIS same seq's KV
-        // after prefill, and with kv_unified the API/MCP seq shares the same n_ctx pool — so a prompt
-        // filling to nCtx-4 leaves no room to generate (or for a co-resident seq) and llama_decode
-        // returns 1 mid-stream. Reserve a generation+co-seq margin so a long prompt front-trims
-        // gracefully instead of silently failing. (genReserve >> max ghost output of ~tens of tokens.)
-        let genReserve = 256
-        let cap = max(8, min(nCtx - genReserve, maxContextTokens))
+        // head-room is NOT cosmetic: both decode loops append every generated token to THIS same seq's
+        // KV after prefill, and with kv_unified the API/MCP seq shares the same n_ctx pool — so a
+        // prompt filling to nCtx-4 leaves no room to generate (or for a co-resident seq) and
+        // llama_decode returns 1 mid-stream. The reserve tracks the tokens this call will ACTUALLY
+        // generate (see generationReserve): it used to be a flat 256 while /v1 admits max_tokens up to
+        // 2048, so a prompt at the cap plus 2048 generated tokens overran the 4096 pool and the stream
+        // died mid-response with a 500.
+        let cap = Self.promptCap(nCtx: nCtx, maxTokens: maxTokens, maxContextTokens: maxContextTokens)
         if tokens.count > cap {
             // M5 review #2: refuse to truncate when the prompt is a FIM token stream — front-trim
             // drops `fim_pre` first (and on tighter caps `fim_suf`), leaving the model with framing
@@ -399,6 +408,14 @@ final class InferenceEngine: InferenceEngineProtocol {
             // there (FINDINGS §cold; the deadline-drop hides the cold-prefill cost).
             if params.fim != nil {
                 throw InferenceError.fimContextOverflow(tokens: tokens.count, cap: cap)
+            }
+            // A large `maxTokens` can squeeze the prompt window below anything usable (max_tokens 4000
+            // against a 4096 context leaves ~32 tokens). Front-trimming there would answer from a stub
+            // of the prompt and look like a model failure, so fail the request instead — the caller can
+            // shorten the prompt or lower max_tokens. Only the RESERVE may trigger this: a user who
+            // deliberately set a small "Context window size" still gets the trim they asked for.
+            if nCtx - Self.generationReserve(maxTokens: maxTokens) < Self.minPromptWindow {
+                throw InferenceError.promptWindowExhausted(tokens: tokens.count, cap: cap, maxTokens: maxTokens)
             }
             // The raw path front-trims (most-recent-context wins), but NOT with a plain suffix: that
             // dropped the BOS that tokenize(addSpecial: true) put at index 0, and Gemma-3 — the
@@ -511,6 +528,23 @@ final class InferenceEngine: InferenceEngineProtocol {
             llama_sampler_chain_add(smpl, llama_sampler_init_dist(params.seed))
         }
 
+        // Seed the repetition-penalty window with the tail of the PROMPT. llama_sampler_accept was
+        // only ever called for tokens THIS call generated, so with repeatPenaltyLastN 64 and maxTokens
+        // 16-24 the window started empty and never held a single prompt token: nothing at sampling
+        // time discouraged the ghost from echoing the words the user had just typed (the coordinator
+        // compensates after the fact by HIDING the whole suggestion — isPrefixDuplicate — where one
+        // logit adjustment would have produced a good one), while the penalty still punished
+        // legitimate short-range repetition inside a 12-word completion. Chronological order matters:
+        // llama.cpp's penalties sampler keeps a ring buffer of the last `penalty_last_n` accepted
+        // tokens, so the most recent prompt token must be accepted LAST. Only when a penalties sampler
+        // is actually in the chain — the greedy branch adds none, and penalty_last_n == 0 is a
+        // documented no-op in its apply.
+        if !(useGreedyEnv || params.greedy) {
+            for t in Self.penaltyPrimeTokens(prompt: tokens, lastN: params.repeatPenaltyLastN) {
+                llama_sampler_accept(smpl, t)
+            }
+        }
+
         // --- Decode loop ------------------------------------------------------------------------
         // Reusable candidate buffer for manual sample-with-probability (avoids a per-token vocab-sized
         // alloc; the decode budget is tiny — maxTokens). `cur.data` is modified in place by the chain.
@@ -564,18 +598,26 @@ final class InferenceEngine: InferenceEngineProtocol {
         var emitted = 0
         var sawNonSpace = false   // suppress leading-whitespace-only output and never stop on a leading boundary char
         var flushedAny = false    // did this run hand the consumer any whole word yet?
-        var wordCount = 0         // completed words flushed so far (a leading-space piece opens a new word)
+        var wordCount = 0         // words so far: a leading-space piece opens one, and in a space-less
+                                  // script (CJK/kana/Thai) each character IS one
         var pending = ""          // un-flushed trailing fragment (the possibly-incomplete current word)
 
         // Flush every settled word in `pending` (text up to and including each interior whitespace),
         // one whitespace-delimited chunk per onToken call so streaming stays incremental (the
         // consumer sees the ghost grow word-by-word, as before). Holds back only the trailing
         // (possibly-incomplete) word, which a hard stop will drop. Returns false on consumer cancel.
+        //
+        // A space-less-script character (CJK / kana / Thai …) closes a word too: those languages emit
+        // no interior whitespace, so a whitespace-only rule streamed NOTHING for them — the entire
+        // completion escaped through the `!flushedAny` fallback at the very end of the run, with no
+        // early first-token render to beat the deadline drop.
         func flushCompleteWords() -> Bool {
             guard sawNonSpace else { return true }   // don't emit leading-whitespace-only output
-            while let firstSpace = pending.firstIndex(where: { $0.isWhitespace }) {
-                let head = String(pending[...firstSpace])
-                pending = String(pending[pending.index(after: firstSpace)...])
+            while let boundary = pending.firstIndex(where: {
+                $0.isWhitespace || SentenceBoundary.isSpacelessScript($0)
+            }) {
+                let head = String(pending[...boundary])
+                pending = String(pending[pending.index(after: boundary)...])
                 if !head.isEmpty {
                     flushedAny = true
                     if !onToken(head) { return false }
@@ -598,7 +640,6 @@ final class InferenceEngine: InferenceEngineProtocol {
                 return
             }
             llama_sampler_accept(smpl, tok)
-            let tokProb = (useGreedyEnv ? 1.0 : confProb)
             let hadContentBefore = sawNonSpace
 
             var piece = tokenToPiece(tok)
@@ -616,6 +657,11 @@ final class InferenceEngine: InferenceEngineProtocol {
             if !piece.isEmpty {
                 // A new word starts whenever a piece opens with whitespace after we've seen content.
                 if sawNonSpace, let first = piece.first, first.isWhitespace { wordCount += 1 }
+                // …and every space-less-script character IS a word: those scripts never produce a
+                // leading-whitespace piece, so the rule above left wordCount at 0 forever and both the
+                // maxWords cap and stopAtSentenceAfterWords were unreachable for CJK/Japanese/Thai —
+                // the generation ran to maxTokens every time.
+                wordCount += piece.reduce(0) { $0 + (SentenceBoundary.isSpacelessScript($1) ? 1 : 0) }
 
                 // Newline handling. A line break AFTER real content is a clean stop (end the ghost on
                 // the line). But a LEADING newline — before any content has been emitted — is the
@@ -674,7 +720,7 @@ final class InferenceEngine: InferenceEngineProtocol {
                 // confidence gate can suppress before the first render. `isFirstContent` marks the token
                 // that first produced visible output.
                 if piece.contains(where: { !$0.isWhitespace }) {
-                    onSample?(tokProb, !hadContentBefore)
+                    onSample?(confProb, !hadContentBefore)
                 }
                 if !flushCompleteWords() { return }   // cooperative cancel via closure (FR-CE-4)
             }
@@ -743,7 +789,7 @@ final class InferenceEngine: InferenceEngineProtocol {
 
             let piece = tokenToPiece(tok)
             if !piece.isEmpty {
-                onSample?(useGreedyEnv ? 1.0 : confProb, !firstContentReported)
+                onSample?(confProb, !firstContentReported)
                 firstContentReported = true
                 let (chunk, stopped) = stopFilter.push(piece)
                 if !chunk.isEmpty, !onToken(chunk) { return }
@@ -824,6 +870,35 @@ final class InferenceEngine: InferenceEngineProtocol {
         var i = 0
         while i < cached.count, i < maxKeep, cached[i] == new[i] { i += 1 }
         return i
+    }
+
+    // Prompt tokens to replay through llama_sampler_accept so the repetition-penalty ring buffer
+    // reflects what the user actually wrote (see the call site). The LAST `lastN` tokens, in
+    // chronological order — the ring buffer evicts from the front, so a longer replay would just push
+    // the recent tokens back out. Empty when no penalty window is configured.
+    // llama_token is a typealias for Int32; spelled Int32 so this stays callable from the test target
+    // without importing CLlama.
+    static func penaltyPrimeTokens(prompt: [Int32], lastN: Int32) -> ArraySlice<Int32> {
+        guard lastN > 0 else { return [][...] }
+        return prompt.suffix(Int(lastN))
+    }
+
+    // Smallest prompt window worth honouring: below this the front-trim leaves a stub rather than
+    // context, so generate() refuses the request instead (see promptWindowExhausted).
+    static let minPromptWindow = 512
+
+    // KV cells held back from the prompt for the tokens this call will generate. Both decode loops
+    // grow the same seq's KV token by token, so the reserve has to cover `maxTokens` — a flat 256
+    // (the pre-fix value) plus a /v1 request's max_tokens of 2048 overran the 4096 pool and killed the
+    // stream mid-response. The 256 floor is the co-resident-seq margin kv_unified needs and keeps the
+    // ghost path (maxTokens ~16-24) byte-identical to the old behaviour; +64 is slack for the
+    // single-token decode batches themselves.
+    static func generationReserve(maxTokens: Int) -> Int { max(256, maxTokens + 64) }
+
+    // Prompt-token budget for one generate(): the live context minus the generation reserve, then the
+    // user's configured "Context window size". Floored at 8 so the arithmetic can't go negative.
+    static func promptCap(nCtx: Int, maxTokens: Int, maxContextTokens: Int) -> Int {
+        max(8, min(nCtx - generationReserve(maxTokens: maxTokens), maxContextTokens))
     }
 
     // Granularity of the front-trim window (FIX 4). See trimToWindow.
@@ -930,16 +1005,27 @@ final class InferenceEngine: InferenceEngineProtocol {
     // MARK: - Helpers
 
     // Sample one token from the last-evaluated logits and return it together with the model's
-    // CONFIDENCE for that step — the PEAK of the post-sampler distribution (the top token's prob),
-    // NOT the sampled token's prob. Replicates the llama_sampler_sample() shorthand (apply chain ->
-    // read selected) but WITHOUT the internal accept (the caller accepts once).
+    // CONFIDENCE for that step — the PEAK of the model's RAW (pre-sampler-chain) distribution, NOT
+    // the sampled token's prob. Replicates the llama_sampler_sample() shorthand (apply chain -> read
+    // selected) but WITHOUT the internal accept (the caller accepts once).
     //
     // Why peak-prob and not the sampled token's prob: the chain ends in `dist` (stochastic), so the
     // SELECTED token is frequently NOT the top token under temperature. The confidence gate asks
     // "is the model flailing?" — a property of how peaked the distribution is, independent of the
     // random draw. Gating on the sampled token's prob hid confident completions whenever the draw
     // landed on a lower-probability token (the "low first-token confidence -> hide everything" bug).
-    // Falls back to the plain sampler (conf 0) if logits are unavailable or nothing was selected.
+    //
+    // Why RAW and not the post-chain peak: the peak used to be read off `data[i].p` AFTER
+    // llama_sampler_apply had run the whole chain — after top_k(40) truncated, after top_p(0.9)
+    // truncated AND RENORMALIZED, and after temp 0.4 divided every logit by 0.4 (a 2.5x sharpening).
+    // A step whose true top-1 probability is 0.10, spread over ~40 near-uniform survivors, reported
+    // ~0.5 that way — five times the 0.10 first-token threshold — so both confidence gates only fired
+    // on an almost perfectly flat distribution, i.e. essentially never. Reading the raw logits also
+    // makes the number meaningful under greedy sampling: llama_sampler_init_greedy is an argmax with
+    // NO softmax, so the post-chain scan returned p == 0 for every token and the gate would have
+    // suppressed everything the moment `params.greedy` was set (the API temperature == 0 path, and the
+    // one-line experiment any maintainer would try on the ghost).
+    // Falls back to the plain sampler if logits are unavailable (conf 0 = unknown).
     private func sampleWithProb(ctx: OpaquePointer,
                                 smpl: UnsafeMutablePointer<llama_sampler>,
                                 nVocab: Int,
@@ -952,26 +1038,39 @@ final class InferenceEngine: InferenceEngineProtocol {
         // prefix-compatible with the remaining stem — done in the candidate fill the loop already runs,
         // so it's near-free, and only while a stem is being satisfied (the first 1–3 tokens).
         let constrained = !requiredRemaining.isEmpty
+        var maxLogit = -Float.infinity
         for i in 0..<nVocab {
             var lg = logits[i]
             if constrained,
                !RequiredPrefix.isAdmissible(tokenBytes: tokenBytesSlice(llama_token(i)), remaining: requiredRemaining) {
                 lg = -.infinity
             }
+            if lg > maxLogit { maxLogit = lg }
             cand[i] = llama_token_data(id: llama_token(i), logit: lg, p: 0)
         }
+        // Raw softmax peak = exp(maxLogit - logSumExp) = 1 / Σexp(logit - maxLogit). Subtracting the
+        // max first is what keeps the exponentials in range on a 262k-token vocab. Masked (-inf)
+        // entries drop out of both max and sum, so a healed step reports the peak among the tokens the
+        // required-prefix constraint actually left admissible.
+        var sumExp = 0.0
+        if maxLogit > -.infinity {
+            // Terms more than 20 nats below the peak contribute < 2.1e-9 each (< 6e-4 total across the
+            // whole vocab), and skipping them turns ~262k expf() calls per SAMPLED TOKEN — milliseconds
+            // out of a 400 ms end-to-end budget — into a compare sweep plus a few thousand exps.
+            let cutoff = maxLogit - 20
+            for i in 0..<nVocab where cand[i].logit > cutoff {
+                sumExp += Double(exp(cand[i].logit - maxLogit))
+            }
+        }
+        let rawPeak: Float = sumExp > 0 ? Float(1.0 / sumExp) : 0
         return cand.withUnsafeMutableBufferPointer { buf -> (llama_token, Float) in
             var cur = llama_token_data_array(
                 data: buf.baseAddress, size: nVocab, selected: -1, sorted: false)
             llama_sampler_apply(smpl, &cur)
             guard cur.selected >= 0, let data = cur.data else {
-                return (llama_sampler_sample(smpl, ctx, -1), 0)
+                return (llama_sampler_sample(smpl, ctx, -1), rawPeak)
             }
-            // Peak of the surviving (post-top_k/top_p/temp, softmaxed by `dist`) candidates. cur.size
-            // is bounded by top_k (40), so this scan is cheap on the hot path.
-            var peakProb: Float = 0
-            for i in 0..<cur.size { let p = data[i].p; if p > peakProb { peakProb = p } }
-            return (data[Int(cur.selected)].id, peakProb)
+            return (data[Int(cur.selected)].id, rawPeak)
         }
     }
 

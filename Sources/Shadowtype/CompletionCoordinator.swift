@@ -17,12 +17,22 @@ enum WordCap {
 }
 
 final class CompletionCoordinator {
-    // Confidence-gating thresholds (see ConfidenceGate). Conservative defaults tuned to drop obvious
-    // word-salad without eating good suggestions; override at runtime via env for live tuning.
+    // Confidence-gating thresholds (see ConfidenceGate), expressed in RAW top-1 probability — the
+    // model's own softmax peak, not the post-sampler-chain peak these numbers were originally read
+    // against. That old number was inflated ~5× (top_k 40 truncation + top_p 0.9 truncate-renormalize +
+    // temp 0.4 sharpening), so 0.10/0.08 really meant ~0.02/0.016 on the model's own scale and neither
+    // gate ever fired. Re-derived for the raw scale: the first CONTENT token sits at a word boundary,
+    // the highest-entropy position in next-token prediction, where a perfectly good continuation
+    // routinely peaks at only 0.10–0.25 — so a 0.10 raw floor would eat good suggestions. Below 0.05 the
+    // mass is spread over 20+ near-equal candidates: the flat distribution word-salad comes out of. The
+    // running mean sits lower (0.03) because it mixes those hard word-start tokens with easy intra-word
+    // continuations (often > 0.9), so it only trips on a completion that genuinely came apart — and
+    // because a false mean reject truncates a ghost the user may already be reading. Override at runtime
+    // via env for live tuning.
     static let firstTokenMinProb: Double =
-        envDouble("SHADOWTYPE_GATE_FIRST") ?? 0.10
+        envDouble("SHADOWTYPE_GATE_FIRST") ?? 0.05
     static let meanMinProb: Double =
-        envDouble("SHADOWTYPE_GATE_MEAN") ?? 0.08
+        envDouble("SHADOWTYPE_GATE_MEAN") ?? 0.03
 
     private static func envDouble(_ key: String) -> Double? {
         ProcessInfo.processInfo.environment[key].flatMap(Double.init)
@@ -156,6 +166,16 @@ final class CompletionCoordinator {
     // command substitution, `*` = glob, leading `-` = flag) — and instead runs only a newline truncation
     // plus the destructive-command guard. Set per generation in startGeneration / the history fast path.
     private var generationShellMode = false
+
+    // True once the CURRENT generation has actually painted a ghost. renderSuggestion runs per streamed
+    // snapshot and its reject filters are evaluated on PARTIAL text, where none of them is monotonic: a
+    // two-word intermediate like "the the" satisfies the self-repetition rule, and NLLanguageRecognizer
+    // on a 6-character string is a coin flip. Re-running them per snapshot could therefore take a ghost
+    // back off screen that the previous snapshot put there — a show → vanish → show flash, precisely the
+    // flicker the confidence gate refuses to cause. Once this is set, a reject STOPS further renders
+    // instead of retracting (see rejectRender). Reset in bumpGeneration (a superseded generation's ghost
+    // is no longer protected) and in clearSuggestion (nothing on screen to protect).
+    private var generationCommitted = false
 
     // Cached writing-style hint (FR-CTX-3). Like the OCR cache, this is refreshed ONLY on focus-in (the
     // cold path), NOT per keystroke: the profile only changes on a Tab-accept, and recomputing it inside
@@ -729,7 +749,7 @@ final class CompletionCoordinator {
         // on a hit, render it verbatim without ever touching the model. Secret-bearing matches are dropped
         // (never surface a token/password as a ghost), and the danger guard still applies.
         if shellMode, let buffer = shellBuffer {
-            let current = Self.shellCurrentLine(prefix)
+            let current = Self.shellTypedCommand(prefix)
             if let remainder = ShellHistory.prefixMatch(currentLine: current, buffer: buffer),
                !remainder.isEmpty {
                 let full = current + remainder
@@ -899,6 +919,24 @@ final class CompletionCoordinator {
                         Diag.log("gen: low first-token confidence first=\(gate.firstProbString) -> hide")
                         return false
                     }
+                    // Running mean gate — the word-salad backstop. It used to be evaluated only AFTER the
+                    // whole decode and then refused to hide anything already on screen; since the first
+                    // content token renders synchronously and unconditionally, "already on screen" was
+                    // every path that had text to reject, so the branch was structurally unreachable and
+                    // the backstop had never fired once. Checked per token instead. `gate` already
+                    // includes THIS token (the engine calls onSample before onToken), so returning false
+                    // here drops the flailing token and everything after it, leaving the ghost rendered
+                    // up to the previous token exactly as it is.
+                    // TRADEOFF (deliberate): this SHORTENS a collapsing completion rather than
+                    // suppressing it. The two alternatives each break a harder rule — retracting the
+                    // visible ghost is the show→vanish flicker this file refuses to cause anywhere else,
+                    // and withholding the first render for a few tokens costs first-appearance latency,
+                    // which is the product. Cutting at the collapse point costs neither, and with the
+                    // first-token gate now working on real probabilities it is the cheap half of the job.
+                    if gate.meanRejected {
+                        Diag.log("gen: mean confidence collapsed mean=\(gate.meanProbString) -> stop (kept rendered ghost)")
+                        return false
+                    }
                     acc += piece
                     let snapshot = acc
                     // Stop sequence: once a paragraph break (`\n\n`) follows real content, the base model
@@ -996,21 +1034,10 @@ final class CompletionCoordinator {
                         Diag.log("gen: refire divergent -> discard (kept visible ghost)")
                     }
                 }
-                // Cumulative confidence gate: a completion whose mean token probability is poor reads as
-                // word-salad even when each guard above passed; drop it (FR — fewer incoherent ghosts).
-                // BUT: never yank a ghost the user is already reading. The mean-reject fires after the
-                // full decode, by which point the first-token render at line ~822 may have already
-                // committed a partial ghost. Hiding it now is a visible "show → vanish" flash the user
-                // perceives as flicker (worse UX than a slightly garbled completion). So the hide only
-                // applies when nothing has been committed to screen yet.
-                if self.isCurrent(myGen) && !acc.isEmpty && finalGate.meanRejected {
-                    if self.suggestionVisible && !self.suggestionText.isEmpty {
-                        Diag.log("gen: low mean confidence mean=\(finalGate.meanProbString) -> kept visible ghost")
-                    } else {
-                        Diag.log("gen: low mean confidence mean=\(finalGate.meanProbString) -> hide")
-                        self.clearSuggestion(); return
-                    }
-                }
+                // No post-decode confidence check here on purpose: the cumulative mean gate that used to
+                // live at this point could only ever hide a ghost that had NOT been committed to screen,
+                // and by the time this runs the first-token render always has — it was dead code. The
+                // mean gate now runs per token inside onToken above, where it can still stop the decode.
                 // If the stream produced nothing and is still current, hide.
                 if self.isCurrent(myGen) && acc.isEmpty { Diag.log("gen: produced nothing (deadline/EOG)"); self.clearSuggestion() }
                 else if self.isCurrent(myGen) { Diag.log("gen: done len=\(acc.count) mean=\(finalGate.meanProbString)"); Diag.logContent("gen: done acc=\"\(acc.prefix(40))\"") }
@@ -1257,6 +1284,21 @@ final class CompletionCoordinator {
         return CGRect(x: x, y: base.minY, width: 0, height: base.height)
     }
 
+    // A reject verdict for the CURRENT snapshot. Before this generation committed a ghost, hide (there is
+    // nothing on screen to protect, so the old behaviour is exactly right). After, keep what the user is
+    // already reading and merely stop repainting: the filters are non-monotonic, so a later snapshot may
+    // well pass again, and retract-then-restore is the worst-looking of the three outcomes. A held
+    // context re-fire counts as committed too — the visible ghost there belongs to a deliberately held
+    // earlier generation the re-fire is contractually forbidden to replace.
+    private func rejectRender(_ reason: String) {
+        if (generationCommitted || inContextRefire), suggestionVisible, !suggestionText.isEmpty {
+            Diag.log("render: \(reason) -> stop (kept visible ghost)")
+            return
+        }
+        Diag.log("render: \(reason) -> hide")
+        clearSuggestion()
+    }
+
     private func renderSuggestion(_ rawText: String, checkPrefixDup: Bool = true, caretOverride: CGRect? = nil) {
         // Rising edge: a fresh completion (not the streamed re-render of a growing ghost, nor the
         // remainder re-render after a word accept — both keep the ghost already-visible). Drives the
@@ -1271,17 +1313,22 @@ final class CompletionCoordinator {
             // Shell-command mode: bypass EVERY prose transform — markup strip (backticks = command
             // substitution), list-marker strip (leading `-` = flag), glue/leading-space reconcile, and the
             // language guards all corrupt shell syntax. Keep exactly one line, then apply the destructive-
-            // command guard on the JOINED command (typed current line + suggestion) so a split `rm -rf ` +
-            // `/` is still caught.
+            // command guard on the JOINED command (the typed command with the prompt chrome stripped, plus
+            // the suggestion) so a split `rm -rf ` + `/` is still caught.
             text = Self.truncatedAtNewline(rawText)
-            let fullCommand = Self.shellCurrentLine(activePrefix) + text
+            let fullCommand = Self.shellTypedCommand(activePrefix) + text
+            // The ONE reject that keeps the right to retract a committed ghost. Every other filter here
+            // is a quality judgement whose worst case is a slightly worse suggestion, so it defers to the
+            // no-flicker rule; this one is a safety judgement whose worst case is irreversible (`rm -rf `
+            // is harmless until ` /` streams in, and the ghost is one Tab from being typed). A one-frame
+            // flash on the rare hit is the cheaper side of that trade — and the guard is deliberately
+            // narrow, so it is genuinely rare.
             if ShellCommandGuard.isDangerous(fullCommand: fullCommand) {
                 Diag.log("render: dangerous command -> hide")
                 clearSuggestion(); return
             }
             guard text.contains(where: { !$0.isWhitespace }) else {
-                Diag.log("render: shell empty -> hide")
-                clearSuggestion(); return
+                rejectRender("shell empty"); return
             }
         } else {
         text = Self.truncatedAtParagraphBreak(
@@ -1299,22 +1346,19 @@ final class CompletionCoordinator {
         if prefixTransforms { text = applyGlueGuard(text, prefix: activePrefix) }
         if prefixTransforms { text = Self.reconcileLeadingSpace(suggestion: text, prefix: activePrefix) }
         guard !text.isEmpty, !Self.isLowValueSuggestion(text) else {
-            Diag.log("render: low-value -> hide")
-            clearSuggestion(); return
+            rejectRender("low-value"); return
         }
         // Suppress a completion that just loops back over text already typed ("thanks for " +
         // "for reading" -> stutter on inject). Skipped on the accept-remainder re-render, whose
         // `activePrefix` is stale (the accepted word isn't folded into it).
         if prefixTransforms, Self.isPrefixDuplicate(suggestion: text, prefix: activePrefix) {
-            Diag.log("render: prefix-duplicate -> hide")
-            clearSuggestion(); return
+            rejectRender("prefix-duplicate"); return
         }
         // Language-drift guard: a base model sometimes switches language mid-stream (an English ghost in a
         // Spanish doc). Suppress only on a confident, clearly-different language read (skip on the stale
         // remainder re-render). Conservative — never fires on a short/ambiguous prefix.
         if prefixTransforms, Self.languageDrifts(prefix: activePrefix, suggestion: text) {
-            Diag.log("render: lang-drift -> hide")
-            clearSuggestion(); return
+            rejectRender("lang-drift"); return
         }
         // Context-language guard: when the surrounding conversation has a confident dominant language,
         // suppress a completion that drifts to a DIFFERENT language (a base model following the
@@ -1324,16 +1368,14 @@ final class CompletionCoordinator {
         // long + high-confidence. Skipped on the stale accept-remainder re-render.
         if prefixTransforms, let target = generationContextLang,
            Self.suggestionConflictsWithContext(suggestion: text, contextLang: target) {
-            Diag.log("render: context-lang conflict -> hide")
-            clearSuggestion(); return
+            rejectRender("context-lang conflict"); return
         }
         }
         // Drop leading newlines (the model often "ends" the line then starts a template) and require
         // at least one printable char — otherwise the ghost would render as invisible whitespace.
         let display = String(text.drop(while: { $0 == "\n" || $0 == "\r" }))
         guard display.contains(where: { !$0.isWhitespace }) else {
-            Diag.log("render: blank/whitespace-only -> hide")
-            clearSuggestion(); return
+            rejectRender("blank/whitespace-only"); return
         }
         let opacity = capOpacity() ?? 1
         suggestionText = text
@@ -1365,6 +1407,7 @@ final class CompletionCoordinator {
             wordMeter?.recordSuggestionShown()
         }
         suggestionVisible = true
+        generationCommitted = true
         // Cotypist-pattern coexistence nudge for Gmail's Smart Compose. Gated by the per-session/
         // dismiss pre-gate before any AX read so the steady state (already prompted or dismissed) is
         // free. See SmartComposeNudge for the detection heuristic.
@@ -1469,6 +1512,7 @@ final class CompletionCoordinator {
         pendingStreamWork = nil
         pendingStreamSnapshot = nil
         suggestionVisible = false   // didSet notifies the Tab swallow only on transition
+        generationCommitted = false // nothing on screen → the next reject may hide freely
     }
 
     // MARK: - Host font watch (FR-OV-4)
@@ -1842,7 +1886,7 @@ final class CompletionCoordinator {
     // defaults to "unbounded" so existing callers/tests keep the exact prior behavior; the live caller
     // passes a finite budget so a noisy screen capture can't crowd out the caret text or blow the
     // context window (#8 PromptSectionBudget). The prefix is given top fill-priority and is never
-    // dropped — the lower-priority context blocks (OCR first, then clipboard, style, instruction) trim
+    // dropped — the lower-priority context blocks (style first, then OCR, clipboard, instruction) trim
     // or drop to fit — but it is itself capped at a share of the budget so it can't drop ALL of them
     // (see prefixCap below). Surviving blocks keep their original render order.
     // Returns the prompt plus whether the OCR block survived the budget, which the caller needs to decide
@@ -1864,20 +1908,37 @@ final class CompletionCoordinator {
 
         // Build the gated context sections in render order (instruction → style → clipboard → OCR),
         // plus the prefix at top priority so it survives a tight budget. Priorities set the FILL order
-        // (prefix first, OCR last); the allocator trims/drops lowest-priority blocks to fit totalChars.
+        // (prefix first, style last); the allocator trims/drops lowest-priority blocks to fit totalChars.
         var sections: [PromptSection] = []
-        func addContext(_ s: String?, name: String = "ctx", priority: Int) {
+        // `directive` marks a block whose MEANING LIVES IN ITS WORDING — the user's instruction and the
+        // style hint. Trimming those doesn't degrade them, it changes them: "Always reply in formal
+        // Spanish, never use contractions" cut to its tail is the different instruction "never use
+        // contractions", and the style hint cut anywhere loses the explanatory label that makes its word
+        // list interpretable at all, leaving a bare semicolon list the model reads as content to copy. So
+        // a directive declares minChars == its full cost: the allocator takes it WHOLE or drops it.
+        // `.preserveStart` is the matching end (the head carries the directive's subject) — with the
+        // all-or-nothing minChars it never actually trims, but `.preserveEnd` here would be wrong the
+        // moment either number moves. The prose blocks (clipboard, OCR) keep `.preserveEnd`/minChars 0:
+        // their tail is the part nearest the caret and a fragment of it is still useful context.
+        func addContext(_ s: String?, name: String = "ctx", priority: Int, directive: Bool = false) {
             guard let s, !s.isEmpty else { return }
             // maxChars is a BYTE budget (PromptSectionBudget costs in UTF-8 bytes); each section's own
             // max is its full byte length so it's only trimmed when the TOTAL budget binds.
+            let cost = PromptSectionBudget.cost(s)
             sections.append(PromptSection(name: name, content: s, priority: priority,
-                                          minChars: 0, maxChars: PromptSectionBudget.cost(s),
-                                          truncation: .preserveEnd))
+                                          minChars: directive ? cost : 0, maxChars: cost,
+                                          truncation: directive ? .preserveStart : .preserveEnd))
         }
-        if isLicensed { addContext(instruction, priority: 80) }              // FR-PA-3 (paid)
-        if isLicensed && styleEnabled { addContext(styleHint, priority: 60) } // FR-CTX-3 (paid)
-        if isLicensed && clipboardEnabled { addContext(clipboard, priority: 40) } // FR-CTX-2 (paid)
-        if ocrEnabled { addContext(ocr, name: "ocr", priority: 20) }         // FR-CTX-1 (FREE)
+        // Priority is the FILL order — the reverse of the DROP order — and is independent of the render
+        // order below (PromptSectionBudget.allocate returns survivors in their original array order), so
+        // these numbers can be reasoned about on usefulness alone. Style is now the FIRST block dropped,
+        // below screen context: a vocabulary hint nudges word choice, while the screen text is what the
+        // next word is actually ABOUT. At its old 60 it outranked both clipboard and OCR and starved the
+        // far more informative context whenever the budget bound.
+        if isLicensed { addContext(instruction, priority: 80, directive: true) }   // FR-PA-3 (paid)
+        if isLicensed && styleEnabled { addContext(styleHint, priority: 10, directive: true) } // FR-CTX-3 (paid)
+        if isLicensed && clipboardEnabled { addContext(clipboard, priority: 40) }  // FR-CTX-2 (paid)
+        if ocrEnabled { addContext(ocr, name: "ocr", priority: 20) }               // FR-CTX-1 (FREE)
         // The prefix (kept nearest-the-caret tail) — top priority, so it still wins under contention, but
         // CAPPED so it can't take the whole budget. It used to declare its own full length as maxChars:
         // the allocator fills highest-priority first, so any draft longer than the budget consumed 100% of
@@ -1936,10 +1997,12 @@ final class CompletionCoordinator {
     //
     // The header + exemplar block is byte-stable across a typing burst at one prompt (only the tail token
     // grows), so the engine's KV warm path (FR-CE-5) is preserved. `prefix` is the forward-from-caret tail;
-    // its OWN current line (after the last newline) becomes the typed command — earlier prefix lines are
-    // ignored in favour of the richer buffer exemplars.
+    // its OWN current line, with the prompt chrome stripped (shellTypedCommand), becomes the typed command
+    // — earlier prefix lines are ignored in favour of the richer buffer exemplars.
     static func assembleShellPrompt(prefix: String, terminalBuffer: String?, totalChars: Int = 4000) -> String {
-        let typed = trimmingTrailingInlineWhitespace(shellCurrentLine(prefix))
+        // Redacted like the exemplars are: a secret the user is typing RIGHT NOW is the one most worth not
+        // handing to the model, and it used to be the only part of the prompt that went in verbatim.
+        let typed = redactingSecrets(trimmingTrailingInlineWhitespace(shellTypedCommand(prefix)))
         var lines: [String] = []
         if let header = shellContextHeader(terminalBuffer) { lines.append(header) }
         // Recent commands as few-shot exemplars (redacted). Drop any that equal the typed stem so the model
@@ -1960,12 +2023,36 @@ final class CompletionCoordinator {
         return head + "$ " + typed
     }
 
-    // The current command line being typed: the tail of `prefix` after the last newline.
+    // The current command line being typed: the tail of `prefix` after the last newline. RAW — in a
+    // terminal it still carries the live PS1. Consumers want shellTypedCommand below.
     static func shellCurrentLine(_ prefix: String) -> String {
         if let nl = prefix.lastIndex(where: { $0 == "\n" || $0 == "\r" }) {
             return String(prefix[prefix.index(after: nl)...])
         }
         return prefix
+    }
+
+    // The command the user is TYPING: the current line with the terminal's prompt chrome stripped
+    // (`dario@mac ~/proj % git pu` -> `git pu`), using the same sigil rule that made this a shell prompt
+    // in the first place (ActivationPolicy.isShellPromptLine / shellCommandAfterSigil).
+    //
+    // Every consumer of the current line used to get the RAW line, chrome and all, which broke all three:
+    // assembleShellPrompt emitted `$ dario@mac ~/proj % git pu` as its continuation line — not
+    // command-shaped, and duplicating the stem the exemplars already end with; ShellHistory.prefixMatch
+    // compared that chrome-laden stem against chrome-STRIPPED history commands, so the zero-hallucination
+    // fast path could never hit; and the destructive-command guard tokenized `dario@mac …` and saw a
+    // first token that is not `rm`, so `rm -rf /` sailed straight through it.
+    //
+    // Falls back to the raw line when it carries no sigil (some terminals expose only the typed text —
+    // that is the shape every existing test uses). Trailing whitespace is deliberately PRESERVED:
+    // shellCommandAfterSigil trims both ends, but a typed `git ` must complete to `status`, not
+    // ` status`, and the guard must see the space in `rm -rf ` + `/`.
+    static func shellTypedCommand(_ prefix: String) -> String {
+        let line = shellCurrentLine(prefix)
+        guard let cmd = shellCommandAfterSigil(line) else { return line }
+        // Chrome only (`~/proj $ `) → no typed command yet.
+        guard !cmd.isEmpty, let r = line.range(of: cmd, options: .backwards) else { return "" }
+        return String(line[r.lowerBound...])
     }
 
     // Pure: pull recent COMMAND text (not output) from the visible buffer — the lines that carry a shell
@@ -2419,6 +2506,9 @@ final class CompletionCoordinator {
     private func bumpGeneration() -> Int {
         genLock.lock(); defer { genLock.unlock() }
         generation += 1
+        // A new generation owns the ghost from here on: whatever is still on screen belongs to the
+        // superseded one, so its render-reject latch (see rejectRender) no longer protects it.
+        generationCommitted = false
         return generation
     }
 

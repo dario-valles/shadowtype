@@ -1,5 +1,6 @@
-// Pure unit tests for the over-cap prompt trim (InferenceEngine.trimToWindow) and its interaction
-// with the KV-reuse decision (InferenceEngine.reuseLength). Both are static and model-free.
+// Pure unit tests for the prompt-token budget (InferenceEngine.generationReserve / promptCap), the
+// over-cap prompt trim (InferenceEngine.trimToWindow) and its interaction with the KV-reuse decision
+// (InferenceEngine.reuseLength). All static and model-free.
 //
 // The two bugs these pin down:
 //  1. the old `tokens.suffix(cap)` dropped the BOS that tokenize(addSpecial: true) prepends —
@@ -14,6 +15,49 @@ final class EngineTrimTests: XCTestCase {
     // A synthetic prompt: BOS at slot 0, then `body` distinct tokens (1, 2, 3, ...).
     private func prompt(bodyCount: Int, bos: Int32 = 2) -> [Int32] {
         [bos] + (1...bodyCount).map { Int32($0) }
+    }
+
+    // MARK: - Generation reserve / prompt cap
+
+    // The bug: the reserve was a flat 256 while /v1 admits max_tokens up to 2048, so a prompt trimmed
+    // to the cap plus its own generated tokens overran the 4096 KV pool and llama_decode failed
+    // mid-stream (HTTP 500). The cap must leave room for the tokens the call will actually produce.
+    func testPromptCapLeavesRoomForRequestedGeneration() {
+        let nCtx = 4096
+        for maxTokens in [1, 16, 24, 256, 512, 1024, 2048] {
+            let cap = InferenceEngine.promptCap(nCtx: nCtx, maxTokens: maxTokens, maxContextTokens: 4096)
+            XCTAssertLessThanOrEqual(cap + maxTokens, nCtx,
+                                     "prompt cap + max_tokens overruns n_ctx at maxTokens=\(maxTokens)")
+        }
+    }
+
+    func testGhostBudgetIsUnchangedByTheReserveFix() {
+        // Ghost generates ~16-24 tokens, so the 256 floor still binds and the shipping cap stays 3840
+        // — the anchored-trim tests above are written against that number.
+        XCTAssertEqual(InferenceEngine.generationReserve(maxTokens: 24), 256)
+        XCTAssertEqual(InferenceEngine.promptCap(nCtx: 4096, maxTokens: 24, maxContextTokens: 4096), 3840)
+    }
+
+    func testUserContextWindowStillBinds() {
+        // "Context window size" below the derived cap wins — a deliberate user choice, not a failure.
+        XCTAssertEqual(InferenceEngine.promptCap(nCtx: 4096, maxTokens: 16, maxContextTokens: 512), 512)
+    }
+
+    func testMaxTokensCeilingStillLeavesAUsableWindow() {
+        // The routes clamp max_tokens to 2048. At that ceiling the remaining window must stay above
+        // minPromptWindow, or every long-prompt request would be refused outright.
+        XCTAssertGreaterThanOrEqual(4096 - InferenceEngine.generationReserve(maxTokens: 2048),
+                                    InferenceEngine.minPromptWindow)
+        // Past the ceiling the window IS exhausted — that's the case generate() refuses instead of
+        // front-trimming the prompt to a stub.
+        XCTAssertLessThan(4096 - InferenceEngine.generationReserve(maxTokens: 4000),
+                          InferenceEngine.minPromptWindow)
+    }
+
+    func testPromptCapNeverGoesNegative() {
+        // An absurd max_tokens must not produce a negative cap that the trim would then misuse.
+        XCTAssertGreaterThanOrEqual(
+            InferenceEngine.promptCap(nCtx: 4096, maxTokens: 100_000, maxContextTokens: 4096), 8)
     }
 
     // MARK: - Under the cap: untouched

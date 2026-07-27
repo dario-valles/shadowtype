@@ -41,12 +41,15 @@ final class StyleProfile {
             self.recentPhrases = recentPhrases
             self.inputCount = inputCount
         }
-        // Tolerant: a pre-bucket file has no inputCount; absent fields decode to empty/zero.
+        // Tolerant: a pre-bucket file has none of these fields; absent tables/lists decode to empty.
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             nGramCounts   = try c.decodeIfPresent([String: Int].self, forKey: .nGramCounts) ?? [:]
             recentPhrases = try c.decodeIfPresent([String].self, forKey: .recentPhrases) ?? []
-            inputCount    = try c.decodeIfPresent(Int.self, forKey: .inputCount) ?? 0
+            // A pre-bucket file has no inputCount, and styleHint() now stays silent below
+            // `minInputsForHint` — decoding that as 0 would mute a long-trained migrated profile forever.
+            // recentPhrases (bounded by maxRecent) is a conservative lower bound on the accepts behind it.
+            inputCount    = try c.decodeIfPresent(Int.self, forKey: .inputCount) ?? recentPhrases.count
         }
     }
 
@@ -92,6 +95,11 @@ final class StyleProfile {
     private let maxNGrams = 400         // distinct 1-/2-word n-grams retained (lowest counts pruned)
     private let maxPhraseWords = 6      // ignore long phrasings as "style" — they're content, not voice
     private let minWordLength = 2       // skip 1-char tokens from the n-gram table (noise)
+
+    // Evidence floor for emitting a hint at all. Under a handful of accepts the table is just whatever the
+    // user happened to type twice, and a wrong hint is not free: it outranks screen context in the prompt
+    // budget, so silence is strictly better than a guess. Internal so tests can train to the boundary.
+    static let minInputsForHint = 8
 
     // Production: per-install secret from the Keychain, store in Application Support next to the other
     // Shadowtype stores.
@@ -157,14 +165,23 @@ final class StyleProfile {
 
     // MARK: - Prompt hint (FR-CTX-3)
 
-    /// A short, prepend-ready style hint built from the user's most representative material — the most
-    /// recent phrasings plus the most frequent multi-word n-grams (which carry phrasing character better
-    /// than single words) — capped to `maxChars`. Returns nil when the profile is empty (so the
-    /// integrator simply prepends nothing). The shape mirrors how OCR context is surfaced: a tagged
-    /// leading line the model can condition on.
+    /// A short, prepend-ready style hint built from the user's most DISTINCTIVE vocabulary — the 1- and
+    /// 2-word n-grams that are not generic function words (which carry phrasing character; see the
+    /// filtering below) — capped to `maxChars`. Returns nil when the profile is empty, when too few
+    /// inputs have been folded in to mean anything (`minInputsForHint`), or when nothing survives
+    /// filtering: an absent hint is always better than a misleading one, and the integrator then simply
+    /// prepends nothing. The shape mirrors how OCR context is surfaced: a tagged leading line the model
+    /// can condition on.
     func styleHint(maxChars: Int) -> String? {
         guard maxChars > 0 else { return nil }
         lock.lock(); defer { lock.unlock() }
+
+        // Evidence gate: a profile folded from three sentences describes nobody, and the hint it produces
+        // still costs prompt budget the real context needs. Say nothing until the user has actually been
+        // observed writing.
+        let totalInputs = record.legacy.inputCount
+            + record.perApp.values.reduce(0) { $0 + $1.inputCount }
+        guard totalInputs >= StyleProfile.minInputsForHint else { return nil }
 
         // Merge every bucket's n-gram counts (legacy + all per-app) into one frequency table — the hint
         // reflects the user's voice across all apps that contributed. Turning collect-inputs off for an
@@ -175,20 +192,35 @@ final class StyleProfile {
         }
         guard !merged.isEmpty else { return nil }
 
-        // Style = register/vocabulary, NOT verbatim content. Emit only the user's most frequent SHORT
-        // n-grams (1- and 2-word). We deliberately DO NOT surface `recentPhrases` (sentence-level content
-        // the base model parrots verbatim across unrelated contexts — a Notes story bleeding into a Slack
-        // message). Also skip any n-gram containing a digit: stray numerals are noise, not style.
-        let isStyleToken: (String) -> Bool = { !$0.contains(where: { $0.isNumber }) }
+        // Style = register/vocabulary, NOT verbatim content. Emit only the user's most representative
+        // SHORT n-grams (1- and 2-word). We deliberately DO NOT surface `recentPhrases` (sentence-level
+        // content the base model parrots verbatim across unrelated contexts — a Notes story bleeding into
+        // a Slack message). Skip any n-gram containing a digit (stray numerals are noise, not style) and
+        // any n-gram made ENTIRELY of generic function words: ranked by raw count those always win over
+        // any real corpus ("of the; in the; to the; and the; the; and; that; with"), and that line of
+        // English glue both evicts the actual context under a tight budget and, sitting immediately
+        // before the `Text:` marker, reads to a base model as document content to imitate.
+        let isStyleToken: (String) -> Bool = {
+            !$0.contains(where: { $0.isNumber }) && StyleProfile.contentTokenCount($0) > 0
+        }
 
-        // Most frequent multi-word n-grams first (carry phrasing register; ties broken alphabetically).
+        // Most DISTINCTIVE multi-word n-grams first: a bigram of two content words ("baile feliz") is
+        // style, one that is half function word ("el baile") barely is, and raw frequency alone orders
+        // them the wrong way round. Count breaks ties, then alphabetically for stability across launches.
         let topBigrams = merged
             .filter { $0.key.contains(" ") && isStyleToken($0.key) }
-            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .sorted {
+                let l = StyleProfile.contentTokenCount($0.key)
+                let r = StyleProfile.contentTokenCount($1.key)
+                if l != r { return l > r }
+                return $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key
+            }
             .prefix(8)
             .map { $0.key }
 
-        // Most frequent single words — short, so they keep the hint non-empty under a tight budget.
+        // Most frequent single words — short, so they keep the hint non-empty under a tight budget. Every
+        // survivor of `isStyleToken` is a content word here, so frequency order is already distinctiveness
+        // order.
         let topWords = merged
             .filter { !$0.key.contains(" ") && isStyleToken($0.key) }
             .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
@@ -273,6 +305,38 @@ final class StyleProfile {
             .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
             .prefix(max)
         counts = Dictionary(uniqueKeysWithValues: kept.map { ($0.key, $0.value) })
+    }
+
+    // MARK: - Distinctiveness (what makes an n-gram "style" rather than glue)
+
+    // Generic closed-class words — articles, prepositions, conjunctions, pronouns, auxiliaries — in the
+    // two languages this app is written in and used in. These top every frequency table ever built, so
+    // they say nothing about how a PARTICULAR person writes; only content words do. Deliberately no
+    // adverbs/intensifiers ("very", "just"): those genuinely are register. Bounded and hand-written on
+    // purpose — no corpus file, no dependency.
+    private static let functionWords: Set<String> = [
+        // English
+        "a", "am", "an", "and", "any", "are", "as", "at", "be", "been", "being", "but", "by", "can",
+        "could", "did", "do", "does", "for", "from", "had", "has", "have", "he", "her", "him", "his",
+        "how", "i", "if", "in", "into", "is", "it", "its", "me", "might", "more", "most", "must", "my",
+        "no", "not", "of", "on", "or", "our", "out", "over", "she", "shall", "should", "so", "some",
+        "such", "than", "that", "the", "their", "them", "then", "there", "these", "they", "this",
+        "those", "to", "under", "up", "us", "was", "we", "were", "what", "when", "which", "while",
+        "who", "why", "will", "with", "would", "you", "your",
+        // Spanish
+        "al", "algo", "ante", "como", "con", "cual", "cuando", "de", "del", "desde", "donde", "e", "el",
+        "ella", "ellas", "ello", "ellos", "en", "entre", "era", "eran", "es", "esa", "ese", "eso",
+        "esta", "estas", "este", "esto", "estos", "está", "están", "fue", "fueron", "ha", "han", "hasta",
+        "hay", "la", "las", "le", "les", "lo", "los", "mi", "mis", "ni", "nos", "o", "os", "para",
+        "pero", "por", "porque", "que", "qué", "se", "según", "ser", "si", "sí", "sin", "sobre", "su",
+        "sus", "te", "ti", "tu", "tus", "un", "una", "unas", "uno", "unos", "y", "ya", "yo",
+    ]
+
+    // How many of `nGram`'s tokens carry actual voice. 0 means the whole thing is glue ("of the", "the")
+    // and must never reach the hint; higher means more distinctive, which is how the hint is ranked.
+    // Pure + static so the ranking rule is unit-testable without a store, a model, or a prompt.
+    static func contentTokenCount(_ nGram: String) -> Int {
+        nGram.split(separator: " ").reduce(0) { $0 + (functionWords.contains(String($1)) ? 0 : 1) }
     }
 
     // MARK: - Tokenization

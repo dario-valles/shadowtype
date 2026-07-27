@@ -265,15 +265,62 @@ final class CotabbyGrabsTests: XCTestCase {
         XCTAssertTrue(fits.prompt.contains(screen))
 
         // Prefix takes its 65%, the higher-priority (paid) instruction takes the rest → OCR, lowest
-        // priority, trims to nothing and is dropped.
+        // priority, has nothing left and is dropped. The instruction is sized to exactly the room the
+        // prefix leaves: directive blocks are all-or-nothing now (see assemblePrompt), so handing this
+        // case an oversized one would just drop it and leave the remainder to OCR, testing nothing.
+        let budget = 100
+        let draft = String(repeating: "draft ", count: 200)
+        let keptPrefix = PromptSectionBudget.anchoredTail(
+            CompletionCoordinator.trimmingTrailingInlineWhitespace(draft), maxCost: budget / 100 * 65)
+        let instruction = String(repeating: "i", count: budget - PromptSectionBudget.cost(keptPrefix))
         let starved = CompletionCoordinator.assemblePrompt(
-            prefix: String(repeating: "draft ", count: 200), isLicensed: true,
-            instruction: String(repeating: "instruction ", count: 40), styleHint: nil, styleEnabled: false,
+            prefix: draft, isLicensed: true,
+            instruction: instruction, styleHint: nil, styleEnabled: false,
             clipboard: nil, clipboardEnabled: false, ocr: screen, ocrEnabled: true,
-            totalChars: 100)
+            totalChars: budget)
         XCTAssertFalse(starved.ocrKept)
         XCTAssertFalse(starved.prompt.contains("català"))
-        XCTAssertTrue(starved.prompt.contains("instruction"))   // the paid block still wins over OCR
+        XCTAssertTrue(starved.prompt.contains(instruction))   // the paid block still wins over OCR
+    }
+
+    // The style hint used to fill at priority 60 — above clipboard AND above screen context — so under
+    // budget pressure a vocabulary nudge crowded out the text the next word is actually ABOUT. It is now
+    // the first block dropped.
+    func testStyleHintIsDroppedBeforeScreenContext() {
+        let style = "Writing style: favours words like alpha; beta; gamma"
+        let screen = "the meeting is on Thursday and the venue has changed"
+        let tight = CompletionCoordinator.assemblePrompt(
+            prefix: "so I ", isLicensed: true,
+            instruction: nil, styleHint: style, styleEnabled: true,
+            clipboard: nil, clipboardEnabled: false, ocr: screen, ocrEnabled: true,
+            totalChars: 80)
+        XCTAssertTrue(tight.ocrKept)
+        XCTAssertTrue(tight.prompt.contains(screen))
+        XCTAssertFalse(tight.prompt.contains("alpha"))
+        // Control: with room for both, nothing is dropped and the render order is unchanged.
+        let roomy = CompletionCoordinator.assemblePrompt(
+            prefix: "so I ", isLicensed: true,
+            instruction: nil, styleHint: style, styleEnabled: true,
+            clipboard: nil, clipboardEnabled: false, ocr: screen, ocrEnabled: true,
+            totalChars: 2000)
+        XCTAssertEqual(roomy.prompt, "Context:\n\(style)\n\n\(screen)\n\nText:\nso I")
+    }
+
+    // A directive block's meaning lives in its wording, so the budget must never MUTATE one: trimmed to
+    // its tail, "Always reply in formal Spanish, never use contractions" becomes the different — and
+    // contradictory — instruction "never use contractions". It is taken whole or not at all.
+    func testDirectiveBlockIsDroppedWholeNotTruncated() {
+        // The prefix takes its 65%, leaving less than the instruction's full length. Old behaviour kept
+        // whatever fit from the TAIL — "…ply in formal Spanish, never use contractions".
+        let p = CompletionCoordinator.assemblePrompt(
+            prefix: String(repeating: "Hola ", count: 40), isLicensed: true,
+            instruction: "Always reply in formal Spanish, never use contractions",
+            styleHint: nil, styleEnabled: false,
+            clipboard: nil, clipboardEnabled: false, ocr: nil, ocrEnabled: false,
+            totalChars: 100)
+        XCTAssertFalse(p.prompt.contains("never use contractions"))  // no mutated instruction…
+        XCTAssertFalse(p.prompt.contains("Context:"))                // …the block is gone entirely
+        XCTAssertTrue(p.prompt.hasSuffix("Hola"))                    // bare prefix
     }
 
     // The prompt budget is derived from the engine's live token cap instead of a hardcoded 6000 that
