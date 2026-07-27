@@ -81,18 +81,47 @@ enum PromptSectionBudget {
     // next multiple, so the prompt is byte-stable (a strict extension) for ~`anchor` bytes at a time and
     // one cold prefill amortizes over hundreds of keystrokes. Costs at most `anchor` bytes of kept context
     // versus the naive window — cheap next to a re-prefill per keystroke.
+    // The granularity anchoredTail re-anchors at. Rounding up costs at most one step of kept content, so
+    // the step stays small relative to the window — a 512-byte step against a 650-byte cap would throw
+    // away most of the caret text. Exposed because a caller that budgets OTHER sections around the
+    // windowed content must quantize its reservation to the SAME step, or its own arithmetic reintroduces
+    // the per-keystroke drift this whole mechanism exists to remove (see quantizedReservation).
+    static func anchorStep(maxCost: Int, anchor: Int = 512) -> Int {
+        max(1, min(anchor, maxCost / 4))
+    }
+
+    // How many bytes to set aside for a section of `cost` bytes that is capped at `maxCost`, rounded UP to
+    // the anchor step. anchoredTail pins the kept window's START, but its LENGTH still grows a byte per
+    // keystroke — so a budget computed from the live cost shrinks a byte per keystroke, and any section
+    // allocated from the remainder gets re-cut every fire. When that section sits in FRONT of the caret
+    // text (all of them do), that is a mutating prompt head and a cold re-prefill on every keystroke.
+    // Quantizing holds the reservation still between re-anchors while still shrinking to fit a short
+    // prefix, so the context blocks are not starved when the draft is small.
+    static func quantizedReservation(cost: Int, maxCost: Int, anchor: Int = 512) -> Int {
+        guard maxCost > 0, cost > 0 else { return 0 }
+        let step = anchorStep(maxCost: maxCost, anchor: anchor)
+        return min(maxCost, ((cost + step - 1) / step) * step)
+    }
+
     static func anchoredTail(_ s: String, maxCost: Int, anchor: Int = 512) -> String {
         let total = cost(s)
         guard total > maxCost else { return s }
         guard maxCost > 0 else { return "" }
         let minDrop = total - maxCost
-        // Rounding up costs at most `step` bytes of kept context, so the step must stay small relative to
-        // the window — a 512-byte step against a 650-byte cap would throw away most of the caret text.
-        let step = max(1, min(anchor, maxCost / 4))
+        let step = anchorStep(maxCost: maxCost, anchor: anchor)
         // Round the drop UP so the kept window is never larger than maxCost.
         let drop = ((minDrop + step - 1) / step) * step
         guard drop < total else { return "" }
         return truncate(s, toCost: total - drop, end: .preserveEnd)
+    }
+
+    // Head window: as many whole graphemes from the START as fit in `maxCost` bytes. The mirror of
+    // anchoredTail for content whose USEFUL end is the head — today the post-caret block, where the text
+    // nearest the caret is what the completion must not duplicate and the far end is the droppable part.
+    // Needs no anchoring: unlike the prefix, this content does not grow at the kept end while the user
+    // types, so a fixed-cost head cut is already byte-stable across a burst.
+    static func headWithinCost(_ s: String, maxCost: Int) -> String {
+        truncate(s, toCost: max(0, maxCost), end: .preserveStart)
     }
 
     // Keep as many whole graphemes from the requested end as fit within `limit` BYTES, so a multi-byte

@@ -270,9 +270,16 @@ final class CotabbyGrabsTests: XCTestCase {
         // case an oversized one would just drop it and leave the remainder to OCR, testing nothing.
         let budget = 100
         let draft = String(repeating: "draft ", count: 200)
+        // Sized against the QUANTIZED reservation, not the prefix's raw cost: the context blocks are
+        // budgeted from `totalChars - quantizedReservation(...)` so their bytes don't drift a byte per
+        // keystroke (see assemblePrompt). Re-deriving it here keeps this case exactly-sized instead of
+        // one byte over, which would drop the atomic instruction and test the opposite of the intent.
+        let prefixCap = budget / 100 * 65
         let keptPrefix = PromptSectionBudget.anchoredTail(
-            CompletionCoordinator.trimmingTrailingInlineWhitespace(draft), maxCost: budget / 100 * 65)
-        let instruction = String(repeating: "i", count: budget - PromptSectionBudget.cost(keptPrefix))
+            CompletionCoordinator.trimmingTrailingInlineWhitespace(draft), maxCost: prefixCap)
+        let reserve = PromptSectionBudget.quantizedReservation(
+            cost: PromptSectionBudget.cost(keptPrefix), maxCost: prefixCap)
+        let instruction = String(repeating: "i", count: budget - reserve)
         let starved = CompletionCoordinator.assemblePrompt(
             prefix: draft, isLicensed: true,
             instruction: instruction, styleHint: nil, styleEnabled: false,

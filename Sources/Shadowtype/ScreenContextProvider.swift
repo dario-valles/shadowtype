@@ -175,11 +175,27 @@ final class ScreenContextProvider {
 
     // MARK: Helpers
 
-    // Keep the most recent text by clamping to the tail (most recently typed/visible context).
+    // Keep the most recent text by clamping to the tail (most recently typed/visible context), CUT ON A
+    // LINE BOUNDARY. A raw character suffix slid by one character per keystroke as the draft grew, so the
+    // kept window — and with it the `Context:` block that sits in FRONT of the prefix — changed
+    // byte-for-byte on every fire. The engine's KV reuse is a longest-common-PREFIX match, so that cost a
+    // full cold re-prefill on every single fire. Dropping whole leading lines instead holds the block's
+    // head still until an entire line falls out of the budget. Only a single line longer than the whole
+    // budget falls back to a character cut (there is no boundary left to cut on).
     static func clamp(_ text: String?, to maxChars: Int) -> String? {
         guard let text, !text.isEmpty, maxChars > 0 else { return nil }
         if text.count <= maxChars { return text }
-        return String(text.suffix(maxChars))
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        var kept: [Substring] = []
+        var total = 0
+        for line in lines.reversed() {
+            let cost = line.count + (kept.isEmpty ? 0 : 1)   // +1 for the newline that rejoins it
+            if total + cost > maxChars { break }
+            total += cost
+            kept.append(line)
+        }
+        guard !kept.isEmpty else { return String(text.suffix(maxChars)) }
+        return kept.reversed().joined(separator: "\n")
     }
 
     // Conservative chrome filter: drop short, punctuation-free lone-token lines — the shape of buttons,
@@ -361,16 +377,27 @@ final class ScreenContextProvider {
 
     // Strip the user's own current draft from the OCR so it isn't duplicated with the prompt prefix.
     // Removes any line equal to, or starting with, the draft's trailing line (the latter also catches a
-    // ghost the OCR captured AFTER the draft, e.g. "Lighter apple pieIngredients…"). No-op for drafts
-    // under 3 chars (too short to match safely). Pure + testable.
-    static func removingDraftEcho(_ text: String?, draft: String) -> String? {
+    // ghost the OCR captured AFTER the draft, e.g. "Lighter apple pieIngredients…") — AND, in the other
+    // direction, a captured line the draft now starts with.
+    //
+    // That reverse case is the one that leaked: the capture is STALE between shots (≤1/s), so the instant
+    // the user types past the captured point the captured line is SHORTER than `tail`,
+    // `t.hasPrefix(tail)` goes false, the line stops being filtered, and the draft echo flows back into
+    // the `Context:` block — the documented doc-echo word-salad, and (since the prompt-head work) a
+    // per-keystroke mutation of the prompt FRONT that also destroys anchored KV reuse. The reverse match
+    // needs its own floor (`minStaleLen`): a short generic captured line ("Hi", "Thanks") is a prefix of
+    // half the drafts on screen and would over-filter genuine context. No-op for drafts under 3 chars
+    // (too short to match safely). Pure + testable.
+    static func removingDraftEcho(_ text: String?, draft: String, minStaleLen: Int = 8) -> String? {
         guard let text else { return nil }
         let tail = (draft.split(whereSeparator: \.isNewline).last.map(String.init) ?? "")
             .trimmingCharacters(in: .whitespaces)
         guard tail.count >= 3 else { return text }
         let kept = text.split(separator: "\n", omittingEmptySubsequences: false).filter { line in
             let t = line.trimmingCharacters(in: .whitespaces)
-            return !(t == tail || t.hasPrefix(tail))
+            if t == tail || t.hasPrefix(tail) { return false }
+            // Stale capture: the line is an earlier, shorter state of the line being typed.
+            return !(t.count >= minStaleLen && tail.hasPrefix(t))
         }
         let out = kept.joined(separator: "\n")
         return out.isEmpty ? nil : out

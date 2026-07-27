@@ -42,10 +42,14 @@ enum LocalAPIRoutes {
         let active = activeModelName()
         let supportsFIM = server.coordinator?.modelSupportsFIM ?? false
         let supportsChat = server.coordinator?.modelSupportsChat ?? false
+        // `ctx` is what an API request actually gets, read from the engine — NOT the hardcoded 4096 it
+        // used to be, and NOT the ghost's `maxContextTokens` (that is the user's "Context window size"
+        // setting, 1024 by default). Advertising a window larger than the one the decode applies is how
+        // a client ends up sending a 3000-token request that comes back silently front-trimmed.
         let body: [String: Any] = [
             "ok": loaded,
             "model": active,
-            "ctx": 4096,
+            "ctx": server.coordinator?.apiContextTokens ?? 0,
             "supports_fim": supportsFIM,
             "supports_chat": supportsChat,
             "version": appShortVersion(),
@@ -445,6 +449,17 @@ enum LocalAPIRoutes {
             if case InferenceError.fimContextOverflow(let toks, let cap) = inner {
                 return (400, "Bad Request",
                         "FIM prompt+suffix tokenizes to \(toks) tokens but max context is \(cap) — shorten prefix or suffix")
+            }
+            // Same reasoning for a plain over-long prompt: the API path asks the engine for its real
+            // window, so an over-cap prompt has nowhere left to fit. Returning 200 with a front-trimmed
+            // prompt loses the head — the system message — without telling the client, so say 400.
+            if case InferenceError.contextOverflow(let toks, let cap) = inner {
+                return (400, "Bad Request",
+                        "prompt tokenizes to \(toks) tokens but max context is \(cap) — shorten the prompt")
+            }
+            if case InferenceError.promptWindowExhausted(let toks, let cap, let mt) = inner {
+                return (400, "Bad Request",
+                        "prompt tokenizes to \(toks) tokens but only \(cap) fit alongside max_tokens=\(mt) — shorten the prompt or lower max_tokens")
             }
             return (500, "Server Error", "decode failed")
         }

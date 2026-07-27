@@ -116,6 +116,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var idleTimer: Timer?
     private var modelIdleUnloaded = false
 
+    // Focus generation whose field we have already warmed (FR-CE-8). Both warm triggers — app activation
+    // and the tracker's own focus-change callback — go through warmFocusIfFocusChanged(), so an app
+    // switch warms exactly once and the per-keystroke kAXValueChanged republishes warm not at all.
+    private var lastWarmedFocusSeq: UInt64?
+
     // Auto-update (UpdateManager): a once-a-day check timer, rescheduled by syncToggles when the
     // "Automatically check for updates" toggle flips. nil when auto-checks are off.
     private var updateTimer: Timer?
@@ -226,7 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.coordinator.cancel()
             // Let AX focus settle after the activation before reading the caret.
             DispatchQueue.main.async {
-                self.coordinator.warmFocus()
+                self.warmFocusIfFocusChanged()
                 self.refreshBadge()
             }
         }
@@ -248,8 +253,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A left-click on the badge opens the scoped disable/settings menu (Cotypist parity), rebuilt
         // each click so it reflects the current frontmost app + domain.
         badge.menuProvider = { [weak self] in self?.makeBadgeMenu() ?? NSMenu() }
-        // Re-anchor / hide the active-field badge on every focus change (set before start()).
-        contextTracker.onFocusChange = { [weak self] in self?.refreshBadge() }
+        // Re-anchor / hide the active-field badge on every focus change (set before start()), and warm
+        // the KV cache for the newly focused field. The warm used to hang off
+        // NSWorkspace.didActivateApplicationNotification ALONE, so moving between fields WITHIN an app
+        // (compose box → subject → another compose box) never warmed anything and the first keystroke
+        // there always paid a cold prefill. This callback also fires on kAXValueChanged (i.e. every
+        // keystroke), which is exactly why warmFocusIfFocusChanged() gates on the focus SEQUENCE.
+        contextTracker.onFocusChange = { [weak self] in
+            guard let self else { return }
+            self.refreshBadge()
+            self.warmFocusIfFocusChanged()
+        }
         contextTracker.start()
         inputMonitor.start()
         // Global force-activate hotkey (⌃`): same effect as the menu's "Force suggestions here".
@@ -399,6 +413,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // todayCount() applies the local-midnight rollover; there is no daily cap (dailyCap is nil).
         statusItem.setWordCount(wordMeter.todayCount())
+
+        // An API/MCP request counts as activity, exactly like a keystroke: it pushes back the
+        // idle-unload window and lazily reloads a model the idle timer already unloaded. Without this
+        // the API could neither keep the model alive nor wake it — once unloaded, every request failed
+        // at the engine.isLoaded guard until the user physically typed somewhere.
+        coordinator.onExternalActivity = { [weak self] in self?.noteActivityAndReloadIfNeeded() }
 
         // M1: local API server. Started here if the user has flipped the toggle on.
         localAPI.coordinator = coordinator
@@ -729,11 +749,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // Warm the KV cache for the focused field, but only once per focus session (FR-CE-8). Called from the
+    // app-activation observer AND from contextTracker.onFocusChange — the latter is the only signal for a
+    // focus move WITHIN an app, and it also fires on kAXValueChanged (every keystroke), so the sequence
+    // guard is what stops a per-keystroke storm of cold prefills on the inference queue.
+    private func warmFocusIfFocusChanged() {
+        // Also require a resident model: warmFocus() bails on an unloaded engine, and recording the
+        // sequence for a warm that never ran would mark this field warmed for the rest of its focus
+        // session — the launch case, where the model is still loading when focus first resolves.
+        guard enabled, coordinator.isEngineLoaded else { return }
+        let seq = contextTracker.focusChangeSequence
+        guard seq != lastWarmedFocusSeq else { return }
+        lastWarmedFocusSeq = seq
+        coordinator.warmFocus()
+    }
+
     // Unload the resident model after `idleUnloadMinutes` of inactivity (0 == Never). No-op while already
-    // unloaded, mid-reload, or mid-swap (modelReloadInFlight covers both). Main-thread only (the timer
-    // fires on main).
+    // unloaded, mid-reload, mid-swap (modelReloadInFlight covers both), or while an API/MCP request is
+    // decoding — the idle window is measured from keyboard/focus activity plus API requests, but a single
+    // long stream can outlive the window, and unloading under it frees the llama context out from under
+    // the client's own decode. Main-thread only (the timer fires on main).
     private func unloadModelIfIdle() {
         guard idleUnloadMinutes > 0, !modelIdleUnloaded, !modelReloadInFlight,
+              !coordinator.hasInFlightAPIRequests,
               coordinator.isModelLoaded else { return }
         guard Date().timeIntervalSince(lastInputAt) >= Double(idleUnloadMinutes) * 60 else { return }
         coordinator.unloadModel()
@@ -762,7 +800,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tabSwallow.stop()
         inputMonitor.stop()
         contextTracker.stop()
-        engine.unload()
+        // The engine has no internal locking: every other unload/load is serialized onto the
+        // coordinator's inferenceQueue precisely because freeing the llama context under an in-flight
+        // `llama_decode` is a use-after-free. This used to free it straight on MAIN, so quitting
+        // mid-suggestion was a crash-on-quit. unloadModelAndWait() cancels the running decode, then
+        // performs the unload ON that queue and blocks until it is done (the process is exiting; an
+        // async unload would just lose the race).
+        coordinator.unloadModelAndWait()
     }
 
     // MARK: - Accessibility gate (FR-KC-1)

@@ -36,6 +36,12 @@ enum InferenceError: Error, LocalizedError {
     // failure, so the request is refused; routes should surface it as HTTP 400 (fixable by the
     // caller: shorten the prompt or lower max_tokens).
     case promptWindowExhausted(tokens: Int, cap: Int, maxTokens: Int)
+    // The caller passed an explicit `contextTokenCap` (today only the /v1 API path, which asks for the
+    // engine's REAL window rather than the ghost's small one) and the prompt still doesn't fit. There is
+    // no larger window left to fall back to, so front-trimming here would silently drop the head of a
+    // request the caller believes was honored — for a chat prompt that is the system message. Refuse
+    // instead; routes surface it as HTTP 400. The ghost and rewrite paths pass no cap and keep trimming.
+    case contextOverflow(tokens: Int, cap: Int)
 
     var errorDescription: String? {
         switch self {
@@ -47,6 +53,8 @@ enum InferenceError: Error, LocalizedError {
         case .fimContextOverflow(let t, let cap): return "Context overflow: \(t) tokens exceed the \(cap)-token cap."
         case .promptWindowExhausted(let t, let cap, let mt):
             return "Prompt is \(t) tokens but only \(cap) fit alongside max_tokens=\(mt) — shorten the prompt or lower max_tokens."
+        case .contextOverflow(let t, let cap):
+            return "Prompt is \(t) tokens but the context window fits \(cap) — shorten the prompt."
         }
     }
 }
@@ -215,6 +223,16 @@ final class InferenceEngine: InferenceEngineProtocol {
     // Mirrored from @AppStorage by AppDelegate.syncToggles.
     var maxContextTokens: Int = 4096
 
+    // The window the context was actually created with, independent of the ghost's `maxContextTokens`
+    // setting. `llama_n_ctx` once a context exists (it can differ from `contextSize` — llama rounds it
+    // to the batch/seq layout), otherwise the size the next load will request. The API path sizes its
+    // per-call cap from this so a 3000-token editor request is no longer front-trimmed to the ghost's
+    // 1024-token setting, and /v1/health advertises it instead of the old hardcoded 4096.
+    var contextWindowTokens: Int {
+        if let ctx { return Int(llama_n_ctx(ctx)) }
+        return Int(contextSize)
+    }
+
     init() {}
 
     deinit { unload() }
@@ -354,9 +372,28 @@ final class InferenceEngine: InferenceEngineProtocol {
     // configures the sampler chain + stop policy. When `params.useEngineStopPolicy` is true the
     // legacy ghost decode loop runs (word buffering, sentence stops, maxWords); when false the raw
     // API decode loop runs (verbatim piece stream, stop-string scan, maxTokens-only termination).
+    //
+    // Witness for the protocol's uncapped call shape (ghost seq 0, rewrite seq 2). A nil cap is
+    // "use the engine-wide maxContextTokens", i.e. byte-identical to the pre-cap behaviour.
+    func generate(prompt: String, maxTokens: Int,
+                  seqID: Int32, params: SamplingParams,
+                  requiredPrefix: [UInt8]?,
+                  onToken: (String) -> Bool,
+                  onSample: ((_ prob: Float, _ isFirstContent: Bool) -> Void)?) throws {
+        try generate(prompt: prompt, maxTokens: maxTokens, seqID: seqID, params: params,
+                     contextTokenCap: nil, requiredPrefix: requiredPrefix,
+                     onToken: onToken, onSample: onSample)
+    }
+    //
+    // `contextTokenCap` overrides the engine-wide `maxContextTokens` for THIS call only. Ghost and
+    // rewrite pass nil and keep the user's "Context window size"; the API path passes the real window
+    // (see contextWindowTokens) so an editor's long request is not silently cut down to the ghost's
+    // setting. A non-nil cap also makes an over-cap prompt an ERROR rather than a front-trim — see
+    // InferenceError.contextOverflow.
     func generate(prompt: String, maxTokens: Int,
                   seqID: Int32 = 0,
                   params: SamplingParams = .ghostDefaults,
+                  contextTokenCap: Int?,
                   requiredPrefix: [UInt8]? = nil,
                   onToken: (String) -> Bool,
                   onSample: ((_ prob: Float, _ isFirstContent: Bool) -> Void)? = nil) throws {
@@ -398,7 +435,8 @@ final class InferenceEngine: InferenceEngineProtocol {
         // generate (see generationReserve): it used to be a flat 256 while /v1 admits max_tokens up to
         // 2048, so a prompt at the cap plus 2048 generated tokens overran the 4096 pool and the stream
         // died mid-response with a 500.
-        let cap = Self.promptCap(nCtx: nCtx, maxTokens: maxTokens, maxContextTokens: maxContextTokens)
+        let cap = Self.promptCap(nCtx: nCtx, maxTokens: maxTokens,
+                                 maxContextTokens: contextTokenCap ?? maxContextTokens)
         if tokens.count > cap {
             // M5 review #2: refuse to truncate when the prompt is a FIM token stream — front-trim
             // drops `fim_pre` first (and on tighter caps `fim_suf`), leaving the model with framing
@@ -416,6 +454,13 @@ final class InferenceEngine: InferenceEngineProtocol {
             // deliberately set a small "Context window size" still gets the trim they asked for.
             if nCtx - Self.generationReserve(maxTokens: maxTokens) < Self.minPromptWindow {
                 throw InferenceError.promptWindowExhausted(tokens: tokens.count, cap: cap, maxTokens: maxTokens)
+            }
+            // An explicit cap means the caller already asked for the largest window there is, so the
+            // over-cap prompt is a genuine overflow rather than the ghost's deliberate recall/latency
+            // trade. Front-trimming it would drop the HEAD — the system message of a chat request — and
+            // still answer HTTP 200, which is the silent-truncation bug this refuses to reintroduce.
+            if contextTokenCap != nil {
+                throw InferenceError.contextOverflow(tokens: tokens.count, cap: cap)
             }
             // The raw path front-trims (most-recent-context wins), but NOT with a plain suffix: that
             // dropped the BOS that tokenize(addSpecial: true) put at index 0, and Gemma-3 — the
