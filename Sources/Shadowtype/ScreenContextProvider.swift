@@ -34,10 +34,11 @@ final class ScreenContextProvider {
         guard #available(macOS 14.0, *) else { return nil }
 
         guard let image = await captureFocusedWindow() else {
-            return Self.clamp(currentCachedText(), to: maxChars)
+            return nil
         }
         guard let text = await Self.recognizeText(in: image) else {
-            return Self.clamp(currentCachedText(), to: maxChars)
+            Diag.log("ocr: capture yielded no text")
+            return nil
         }
 
         // Drop obvious UI chrome (buttons, prices, chips) BEFORE clamp so the budget + tail go to real
@@ -59,11 +60,6 @@ final class ScreenContextProvider {
         return (true, nil)
     }
 
-    private func currentCachedText() -> String? {
-        stateLock.lock(); defer { stateLock.unlock() }
-        return cachedText
-    }
-
     private func storeCachedText(_ text: String) {
         stateLock.lock(); defer { stateLock.unlock() }
         cachedText = text
@@ -71,7 +67,7 @@ final class ScreenContextProvider {
 
     // MARK: Capture
 
-    // Picks the frontmost app's frontmost on-screen window and captures just that window's bounds.
+    // Picks the frontmost app's largest normal-level on-screen window and captures its bounds.
     // Tight crop matters: OCR latency is dominated by region size (per FR-CTX-1).
     private func captureFocusedWindow() async -> CGImage? {
         do {
@@ -92,8 +88,10 @@ final class ScreenContextProvider {
             config.ignoreShadowsSingleWindow = true
             config.scalesToFit = true
 
-            return try await SCScreenshotManager.captureImage(
+            let image = try await SCScreenshotManager.captureImage(
                 contentFilter: filter, configuration: config)
+            Diag.log("ocr: capture window=\(Int(window.frame.width))x\(Int(window.frame.height))pt image=\(image.width)x\(image.height)px")
+            return image
         } catch {
             // Screen Recording permission missing, window gone, etc. -> degrade to nil.
             Diag.log("ocr: capture FAILED \(error)")
@@ -101,8 +99,8 @@ final class ScreenContextProvider {
         }
     }
 
-    // Best-effort "focused window": the frontmost regular app's frontmost window. Falls back to the
-    // first on-screen window owned by the frontmost app. nil if nothing matches.
+    // Best-effort focused document window: the frontmost regular app's largest layer-0 window.
+    // Falls back to its largest on-screen window when no normal-level window exists.
     private func focusedWindow(in windows: [SCWindow]) -> SCWindow? {
         let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let candidates = windows.filter { win in
@@ -112,13 +110,19 @@ final class ScreenContextProvider {
             }
             return false
         }
-        // Higher windowLayer == frontmost; prefer the largest among the topmost layer.
-        return candidates
-            .sorted { lhs, rhs in
-                if lhs.windowLayer != rhs.windowLayer { return lhs.windowLayer > rhs.windowLayer }
-                return (lhs.frame.width * lhs.frame.height) > (rhs.frame.width * rhs.frame.height)
-            }
-            .first
+        // Layer 0 holds the document window; higher layers can be floating chrome strips or HUDs.
+        // Prefer the largest normal window, falling back to the largest candidate only when needed.
+        let choices = candidates.map {
+            (layer: $0.windowLayer, area: Double($0.frame.width * $0.frame.height))
+        }
+        guard let index = Self.preferredWindowIndex(in: choices) else { return nil }
+        return candidates[index]
+    }
+
+    static func preferredWindowIndex(in candidates: [(layer: Int, area: Double)]) -> Int? {
+        let normal = candidates.indices.filter { candidates[$0].layer == 0 }
+        let eligible = normal.isEmpty ? Array(candidates.indices) : normal
+        return eligible.max { candidates[$0].area < candidates[$1].area }
     }
 
     private static func pointScale(for window: SCWindow) -> CGFloat {

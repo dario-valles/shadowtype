@@ -168,9 +168,10 @@ final class CompletionCoordinator {
 
     // Tier 2a: true while the current generation is a mid-word HEAL — the engine regenerated the typed
     // word from a clean boundary and already stripped the reproduced stem, so the ghost text is final.
-    // renderSuggestion then skips the prefix-relative transforms (reconcile leading space / glue guard /
-    // prefix-dup / language drift), which assume a fresh continuation and would mangle the healed tail
-    // ("at" → " at"). Set per generation in startGeneration. See MidWordHealing / RequiredPrefix.
+    // renderSuggestion then skips only the prefix-relative text transforms (reconcile leading space /
+    // glue guard / prefix-dup), which assume a fresh continuation and would mangle the healed tail
+    // ("at" → " at"). Language safety still applies: a healed wrong-language tail is still wrong.
+    // Set per generation in startGeneration. See MidWordHealing / RequiredPrefix.
     private var generationIsHealed = false
 
     // True while the current generation is a TERMINAL shell-command completion (the buffer was a plain
@@ -384,6 +385,9 @@ final class CompletionCoordinator {
     // The prefix side of the language-drift guard. `.none` = not computed / prefix too short or
     // ambiguous (the guard then never fires, matching languageDrifts' own conservative bail).
     private var generationPrefixLang: NLLanguage?
+    // User-declared onboarding languages latched once with the generation, so every prefix/suggestion
+    // read uses the same candidate set without hitting UserDefaults on every streamed render tick.
+    private var generationLanguageConstraints: [NLLanguage] = []
     // The ONE focus resolution for the current fire() (#9). Every gate in fire() and the render path
     // reads AX facts from here instead of re-walking the tree. Dropped in cancel(); `currentFocusSnapshot`
     // additionally refuses to hand back a snapshot whose focus session has since changed, so a stale
@@ -635,7 +639,11 @@ final class CompletionCoordinator {
         // Steer the base model to the SELECTION's language. The exemplar is English; without an explicit
         // marker the model mirrors it and emits English regardless of what the user selected. Confidence
         // threshold matches languageDrifts (0.50) — selections are user-curated, lower noise than OCR.
-        let lang = Self.dominantLanguage(selection, minConfidence: 0.50).flatMap(Self.englishLanguageName)
+        let declared = UserDefaults.standard.string(forKey: Self.personalizeLanguagesKey) ?? ""
+        let languageConstraints = Self.parsePersonalizedLanguages(declared)
+        let lang = Self.dominantLanguage(selection, minConfidence: 0.50,
+                                         languageConstraints: languageConstraints)
+            .flatMap(Self.englishLanguageName)
         let prompt = RewriteAction.prompt(for: action, selection: selection, userTone: tone, language: lang)
         let budget = RewriteAction.maxTokens(forSelection: selection)
         // Ghost sampling minus the ghost stop policy, plus a fresh seed per call so ⌘R redo actually
@@ -913,6 +921,7 @@ final class CompletionCoordinator {
         generationCaretRect = nil
         generationFont = nil
         generationPrefixLang = nil
+        generationLanguageConstraints = []
         renderSuggestion(remainder)
     }
 
@@ -982,7 +991,10 @@ final class CompletionCoordinator {
         // user is not moving. Each of these ran on EVERY ~33 ms render tick: a full
         // NLLanguageRecognizer pass over the whole prefix, plus an AX caret-rect and an AX caret-font
         // round trip per frame.
-        generationPrefixLang = Self.driftPrefixLanguage(prefix)
+        let declared = UserDefaults.standard.string(forKey: Self.personalizeLanguagesKey) ?? ""
+        generationLanguageConstraints = Self.parsePersonalizedLanguages(declared)
+        generationPrefixLang = Self.driftPrefixLanguage(
+            prefix, languageConstraints: generationLanguageConstraints)
         let caret = currentFocusSnapshot.flatMap { context.caretRectOnScreen(in: $0) }
             ?? context.caretRectOnScreen()
         generationCaretRect = caret
@@ -1541,24 +1553,15 @@ final class CompletionCoordinator {
         if prefixTransforms, Self.isPrefixDuplicate(suggestion: text, prefix: activePrefix) {
             rejectRender("prefix-duplicate"); return
         }
-        // Language-drift guard: a base model sometimes switches language mid-stream (an English ghost in a
-        // Spanish doc). Suppress only on a confident, clearly-different language read (skip on the stale
-        // remainder re-render). Conservative — never fires on a short/ambiguous prefix.
-        // #9: the prefix side of this read is hoisted to startGeneration — `activePrefix` is fixed for
-        // the whole generation, so re-running NLLanguageRecognizer over it on every streamed snapshot
-        // was pure waste. Only the (growing) suggestion is still detected per tick.
-        if prefixTransforms, Self.languageDrifts(prefixLanguage: generationPrefixLang, suggestion: text) {
-            rejectRender("lang-drift"); return
-        }
-        // Context-language guard: when the surrounding conversation has a confident dominant language,
-        // suppress a completion that drifts to a DIFFERENT language (a base model following the
-        // immediate prefix over the far-away Context: block — generic Spanish in a Catalan thread). The
-        // steer above tries to match; this hides what still drifts (user choice: match convo, else hide).
-        // Catches the short-prefix case the prefix-based languageDrifts can't, since the context read is
-        // long + high-confidence. Skipped on the stale accept-remainder re-render.
-        if prefixTransforms, let target = generationContextLang,
-           Self.suggestionConflictsWithContext(suggestion: text, contextLang: target) {
-            rejectRender("context-lang conflict"); return
+        // Language safety is skipped only on the stale accept-remainder re-render. Unlike the text
+        // transforms above, it stays active for healed generations: healing changes token alignment,
+        // not whether a confidently wrong-language completion is safe to show.
+        if let reason = Self.languageRejectionReason(
+            checkPrefixDup: checkPrefixDup, generationIsHealed: generationIsHealed,
+            prefixLanguage: generationPrefixLang, suggestion: text, contextLang: generationContextLang,
+            languageConstraints: generationLanguageConstraints
+        ) {
+            rejectRender(reason); return
         }
         }
         // Drop leading newlines (the model often "ends" the line then starts a template) and require
@@ -1719,6 +1722,7 @@ final class CompletionCoordinator {
         generationCaretRect = nil
         generationFont = nil
         generationPrefixLang = nil
+        generationLanguageConstraints = []
     }
 
     // MARK: - Host font watch (FR-OV-4)
@@ -1963,9 +1967,15 @@ final class CompletionCoordinator {
         // goes into the `Text (in <Language>):` marker sitting immediately before the prefix — a changed
         // prompt head, i.e. a full cold re-prefill, every time it flipped.
         if changed {
+            let declared = UserDefaults.standard.string(forKey: Self.personalizeLanguagesKey) ?? ""
+            let languageConstraints = Self.parsePersonalizedLanguages(declared)
             ocrCacheLang = text.map { Self.caretLocalContextTail($0) }
-                .flatMap { Self.dominantLanguage($0, minConfidence: 0.70) }
+                .flatMap {
+                    Self.dominantLanguage($0, minConfidence: 0.70,
+                                          languageConstraints: languageConstraints)
+                }
         }
+        Diag.log("context: capture steerLang=\(ocrCacheLang?.rawValue ?? "nil")")
         return changed
     }
 
@@ -2101,6 +2111,37 @@ final class CompletionCoordinator {
     // expected English form regardless of the user's UI locale. nil if the code has no known name.
     static func englishLanguageName(_ language: NLLanguage) -> String? {
         Locale(identifier: "en_US").localizedString(forLanguageCode: language.rawValue)
+    }
+
+    private static let personalizeLanguagesKey = "shadowtype.personalize.languages"
+    private static let personalizedLanguageCandidates =
+        Locale.LanguageCode.isoLanguageCodes.map { NLLanguage($0.identifier) }
+
+    // Parse onboarding's free-text language list without consulting defaults. English display names and
+    // raw ISO codes are both accepted case-insensitively; unknown entries are ignored and duplicates
+    // collapse while preserving the user's order.
+    static func parsePersonalizedLanguages(
+        _ value: String,
+        candidates: [NLLanguage] = personalizedLanguageCandidates
+    ) -> [NLLanguage] {
+        let locale = Locale(identifier: "en_US")
+        var byCode: [String: NLLanguage] = [:]
+        var byName: [String: NLLanguage] = [:]
+        for language in candidates {
+            byCode[language.rawValue.lowercased(with: locale), default: language] = language
+            if let name = englishLanguageName(language)?.lowercased(with: locale) {
+                byName[name, default: language] = language
+            }
+        }
+        var seen = Set<NLLanguage>()
+        return value.split(separator: ",").compactMap { rawToken in
+            let token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased(with: locale)
+            guard let language = byCode[token] ?? byName[token], seen.insert(language).inserted else {
+                return nil
+            }
+            return language
+        }
     }
 
     // #8: global BYTE ceiling for the assembled prompt (context blocks + prefix). MIRRORED FROM the
@@ -2630,28 +2671,36 @@ final class CompletionCoordinator {
     // short text. Returns false on any ambiguity, so good completions are never collateral. Pure-ish
     // (NaturalLanguage only, no I/O) and testable.
     static func languageDrifts(prefix: String, suggestion: String,
-                               minPrefixChars: Int = 40, minConfidence: Double = 0.80) -> Bool {
+                               minPrefixChars: Int = 40, minConfidence: Double = 0.80,
+                               languageConstraints: [NLLanguage] = []) -> Bool {
         languageDrifts(prefixLanguage: driftPrefixLanguage(prefix, minPrefixChars: minPrefixChars,
-                                                           minConfidence: minConfidence),
-                       suggestion: suggestion, minConfidence: minConfidence)
+                                                           minConfidence: minConfidence,
+                                                           languageConstraints: languageConstraints),
+                       suggestion: suggestion, minConfidence: minConfidence,
+                       languageConstraints: languageConstraints)
     }
 
     // The prefix half of the drift read, split out so the caller can compute it ONCE per generation
     // instead of once per streamed render tick (#9) — `activePrefix` cannot change while the model is
     // streaming. nil = too short or not confident enough, i.e. the guard must not fire.
     static func driftPrefixLanguage(_ prefix: String,
-                                    minPrefixChars: Int = 40, minConfidence: Double = 0.80) -> NLLanguage? {
+                                    minPrefixChars: Int = 40, minConfidence: Double = 0.80,
+                                    languageConstraints: [NLLanguage] = []) -> NLLanguage? {
         let p = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
         guard p.count >= minPrefixChars else { return nil }
-        return dominantLanguage(p, minConfidence: minConfidence)
+        return dominantLanguage(p, minConfidence: minConfidence,
+                                languageConstraints: languageConstraints)
     }
 
     // The per-tick half: only the (growing) suggestion is re-read.
     static func languageDrifts(prefixLanguage: NLLanguage?, suggestion: String,
-                               minConfidence: Double = 0.80) -> Bool {
+                               minConfidence: Double = 0.80,
+                               languageConstraints: [NLLanguage] = []) -> Bool {
         guard let pl = prefixLanguage else { return false }
         let s = suggestion.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard s.count >= 4, let sl = dominantLanguage(s, minConfidence: minConfidence) else { return false }
+        guard s.count >= 4,
+              let sl = dominantLanguage(s, minConfidence: minConfidence,
+                                        languageConstraints: languageConstraints) else { return false }
         return pl != sl
     }
 
@@ -2663,14 +2712,37 @@ final class CompletionCoordinator {
     // (NaturalLanguage only) and testable.
     static func suggestionConflictsWithContext(suggestion: String, contextLang: NLLanguage,
                                                minSuggestionChars: Int = 8,
-                                               minConfidence: Double = 0.80) -> Bool {
+                                               minConfidence: Double = 0.80,
+                                               languageConstraints: [NLLanguage] = []) -> Bool {
         let s = suggestion.trimmingCharacters(in: .whitespacesAndNewlines)
         guard s.count >= minSuggestionChars,
-              let sl = dominantLanguage(s, minConfidence: minConfidence) else { return false }
+              let sl = dominantLanguage(s, minConfidence: minConfidence,
+                                        languageConstraints: languageConstraints) else { return false }
         return sl != contextLang
     }
 
-    // Best-guess language of `text`, but only when the top hypothesis clears `minConfidence`; else nil.
+    // Pure render policy for the two language backstops. `generationIsHealed` is deliberately not a
+    // gate: healing only exempts prefix-relative text transforms. `checkPrefixDup == false` identifies
+    // the stale accept-remainder re-render, where both language comparisons must stay skipped.
+    static func languageRejectionReason(checkPrefixDup: Bool, generationIsHealed _: Bool,
+                                        prefixLanguage: NLLanguage?, suggestion: String,
+                                        contextLang: NLLanguage?,
+                                        languageConstraints: [NLLanguage] = []) -> String? {
+        guard checkPrefixDup else { return nil }
+        if languageDrifts(prefixLanguage: prefixLanguage, suggestion: suggestion,
+                          languageConstraints: languageConstraints) {
+            return "lang-drift"
+        }
+        if let contextLang,
+           suggestionConflictsWithContext(suggestion: suggestion, contextLang: contextLang,
+                                          languageConstraints: languageConstraints) {
+            return "context-lang conflict"
+        }
+        return nil
+    }
+
+    // Best-guess language of `text`, but only when the top hypothesis clears `minConfidence` and leads
+    // the runner-up by a safe margin; else nil.
     // The de-chromed context nearest the caret (last few non-empty lines), for LANGUAGE detection only.
     // A full-screen OCR capture is mostly far-away UI chrome whose language (usually English) drowns out
     // the conversation; the recent messages at the tail are the reply language. Pure + testable.
@@ -2680,11 +2752,35 @@ final class CompletionCoordinator {
         return tail.count <= maxChars ? tail : String(tail.suffix(maxChars))
     }
 
-    private static func dominantLanguage(_ text: String, minConfidence: Double) -> NLLanguage? {
+    // The declared languages are a TIE-BREAK, never a filter. Reading unconstrained first is what keeps
+    // a language the user never declared detectable: measured, an undeclared German sentence scores
+    // de:1.00 open but en:0.71 when constrained to {en,es,ca} — confident enough to clear both gates
+    // below and steer a German thread into English. So the open read always wins when it is confident.
+    static func dominantLanguage(_ text: String, minConfidence: Double,
+                                 languageConstraints: [NLLanguage] = []) -> NLLanguage? {
+        if let open = confidentLanguage(text, minConfidence: minConfidence, constraints: []) {
+            return open
+        }
+        // Only where the open read was NOT confident do the declared languages get to disambiguate.
+        // Apple scores close Romance pairs flat on short text ("la solucio jo la tiraria mes per alla"
+        // reads ca:0.76/it:0.19 open, ca:0.94/es:0.06 constrained), which is the case this exists for.
+        // This can never invent a language: it only picks among the ones the user says they write in,
+        // and only where the unconstrained read would have returned nil.
+        guard !languageConstraints.isEmpty else { return nil }
+        return confidentLanguage(text, minConfidence: minConfidence, constraints: languageConstraints)
+    }
+
+    private static func confidentLanguage(_ text: String, minConfidence: Double,
+                                          constraints: [NLLanguage]) -> NLLanguage? {
         let recognizer = NLLanguageRecognizer()
+        if !constraints.isEmpty { recognizer.languageConstraints = constraints }
         recognizer.processString(text)
-        guard let top = recognizer.languageHypotheses(withMaximum: 1).max(by: { $0.value < $1.value }),
-              top.value >= minConfidence else { return nil }
+        let hypotheses = recognizer.languageHypotheses(withMaximum: 2)
+            .sorted { $0.value > $1.value }
+        guard let top = hypotheses.first, top.value >= minConfidence else { return nil }
+        // A ten-point lead is conservative enough to keep clear prose while refusing mixed blobs where
+        // Apple's close Romance-language scores make a single winner look more certain than it is.
+        if hypotheses.count > 1, top.value - hypotheses[1].value < 0.10 { return nil }
         return top.key
     }
 
@@ -2756,7 +2852,11 @@ final class CompletionCoordinator {
     private func computeSpuriousGlue(suggestion: String, prefix: String) -> String? {
         // Lenient language read (looser than the 40-char/0.80 drift gate) so short prefixes can resolve, but
         // keep a small floor — NLLanguageRecognizer is noise on a handful of chars. Below it, bail (keep).
-        guard prefix.count >= 12, let lang = Self.dominantLanguage(prefix, minConfidence: 0.50) else {
+        guard prefix.count >= 12,
+              let lang = Self.dominantLanguage(
+                prefix, minConfidence: 0.50,
+                languageConstraints: generationLanguageConstraints
+              ) else {
             return nil
         }
         let checker = NSSpellChecker.shared

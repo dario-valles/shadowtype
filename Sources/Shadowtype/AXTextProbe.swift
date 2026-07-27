@@ -414,40 +414,51 @@ enum AXTextProbe {
         return best
     }
 
-    // Full visible text of a web area (the whole page), capped. Used as exact, permission-free,
+    // Full visible text of a web area (the whole page), capped to the recent tail. The messages nearest
+    // the composer carry the reply language and continuation context. Used as exact, permission-free,
     // synchronous context — strictly better fidelity than OCR where a web area exists. Best-effort
     // with three fallbacks; nil if none yields text.
     static func webAreaFullText(of webArea: AXUIElement, maxChars: Int = 20_000) -> String? {
         // (1) The element's own full text-marker range (the clean Chromium/WebKit way).
         if let range = copyParam(webArea, textMarkerRangeForUIElement, webArea),
            let s = copyParam(webArea, stringForTextMarkerRange, range) as? String, !s.isEmpty {
-            return String(s.prefix(maxChars))
+            return recentText(s, maxChars: maxChars)
         }
         // (2) Document start→end markers.
         if let docStart = copyValue(webArea, startTextMarker),
            let docEnd = copyValue(webArea, endTextMarker),
            let range = makeMarkerRange(webArea, start: docStart, end: docEnd),
            let s = copyParam(webArea, stringForTextMarkerRange, range) as? String, !s.isEmpty {
-            return String(s.prefix(maxChars))
+            return recentText(s, maxChars: maxChars)
         }
-        // (3) Fallback: bounded BFS gathering descendant text values.
+        // (3) Fallback: bounded tail-first walk gathering descendant text values.
         return gatherText(webArea, maxChars: maxChars)
     }
 
-    // Bounded BFS collecting kAXValue strings from descendants (AXStaticText etc.). Visit-capped so a
-    // huge page can't stall the hot path; stops once maxChars of text is gathered.
+    static func recentText(_ text: String, maxChars: Int) -> String {
+        String(text.suffix(maxChars))
+    }
+
+    // Bounded tail-first walk collecting kAXValue strings from descendants (AXStaticText etc.).
+    // Composer-adjacent text carries the reply language and continuation context; the character and
+    // visit caps keep the AX walk bounded.
     private static func gatherText(_ root: AXUIElement, maxChars: Int, visitCap: Int = 4000) -> String? {
-        var out = ""
+        var chunks: [String] = []
         var frontier = children(of: root)
         var visited = 0
-        while !frontier.isEmpty, out.count < maxChars, visited < visitCap {
-            let node = frontier.removeFirst()
+        var collected = 0
+        while !frontier.isEmpty, collected < maxChars, visited < visitCap {
+            let node = frontier.removeLast()
             visited += 1
-            if let v = stringValue(node), !v.isEmpty { out += v; out += "\n" }
+            if let v = stringValue(node), !v.isEmpty {
+                chunks.append(v)
+                collected += v.count + 1
+            }
             frontier.append(contentsOf: children(of: node))
         }
-        let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : String(trimmed.prefix(maxChars))
+        let trimmed = chunks.reversed().joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : recentText(trimmed, maxChars: maxChars)
     }
 
     private static func role(of element: AXUIElement) -> String? {
