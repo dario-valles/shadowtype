@@ -174,6 +174,89 @@ final class OCRCleanupTests: XCTestCase {
         XCTAssertNil(ScreenContextProvider.removingDraftEcho("Lighter apple", draft: "Lighter apple"))
     }
 
+    // THE STALE CASE. The capture is throttled to <=1/s, so between shots the CAPTURED draft line is a
+    // SHORTER prefix of what the user has now typed. The old one-directional match (`t == tail ||
+    // t.hasPrefix(tail)`) went false the instant the user typed one more character, the line stopped
+    // being filtered, and the draft echoed back into the `Context:` block — the doc-echo word-salad, and
+    // a per-keystroke mutation of the prompt head that also kills anchored KV reuse.
+    func testRemovingDraftEchoStripsStaleShorterCapturedLine() {
+        let captured = "Can you review the deployment plan before Friday?\nThe launch checklist is"
+        // The user has typed well past the captured state of their own line.
+        let draft = "The launch checklist is nearly done, I just need"
+        let out = ScreenContextProvider.removingDraftEcho(captured, draft: draft)
+        XCTAssertEqual(out, "Can you review the deployment plan before Friday?")
+    }
+
+    // …and it must stay stripped for EVERY later keystroke, i.e. the cleaned block is byte-stable while
+    // the draft grows. That stability is the whole point: the block sits in front of the prefix.
+    func testRemovingDraftEchoIsStableAsTheDraftGrows() {
+        let captured = "Can you review the deployment plan before Friday?\nThe launch checklist is"
+        let base = "The launch checklist is"
+        let growth = [" nearly", " nearly done", " nearly done, I just need", " nearly done, I just need to"]
+        let outputs = growth.map { ScreenContextProvider.removingDraftEcho(captured, draft: base + $0) }
+        for out in outputs {
+            XCTAssertEqual(out, "Can you review the deployment plan before Friday?")
+        }
+    }
+
+    // The reverse match must not over-filter: a SHORT generic captured line is a prefix of half the
+    // drafts on screen, so it stays (only lines at least `minStaleLen` long can match backwards).
+    func testRemovingDraftEchoKeepsShortGenericLineThatPrefixesTheDraft() {
+        let captured = "Hi Ana\nAre we still on for the design review this afternoon?"
+        let out = ScreenContextProvider.removingDraftEcho(captured, draft: "Hi Ana, thanks for the notes")
+        XCTAssertEqual(out, captured)
+    }
+
+    // MARK: - clamp (line-boundary tail: the prompt head must not slide per keystroke)
+
+    func testClampCutsOnALineBoundary() throws {
+        let text = "line one is here\nline two is here\nline three is here"
+        // Budget fits the last two lines (17 + 1 + 19 = 37) but not the first.
+        let out = try XCTUnwrap(ScreenContextProvider.clamp(text, to: 40))
+        XCTAssertEqual(out, "line two is here\nline three is here")
+        XCTAssertFalse(out.hasPrefix("e one"))    // never a mid-line character cut
+    }
+
+    // The regression this replaces: a raw character suffix moved by one byte for every character that
+    // appeared on screen, so the kept window — and the `Context:` block built from it — changed
+    // byte-for-byte on every fire, and the engine's longest-common-prefix KV reuse found nothing.
+    func testClampWindowHoldsStillWhileTheLastLineGrows() {
+        let head = "an older message that is still on screen\nsome more context above the caret\n"
+        var previous: String?
+        for suffix in ["a", "ab", "abc", "abcd", "abcde"] {
+            let out = ScreenContextProvider.clamp(head + "draft " + suffix, to: 80)
+            let keptHead = out.map { String($0.prefix(20)) }
+            if let previous { XCTAssertEqual(keptHead, previous) }
+            previous = keptHead
+        }
+    }
+
+    func testClampFallsBackToCharacterCutForOneOverlongLine() {
+        let single = String(repeating: "x", count: 50)
+        XCTAssertEqual(ScreenContextProvider.clamp(single, to: 10)?.count, 10)
+    }
+
+    // MARK: - language-drift split (per-generation prefix read vs per-tick suggestion read)
+
+    // The composed entry point and the split pair must agree; the split exists only so the prefix side
+    // can be computed once per generation instead of once per ~33 ms render tick.
+    func testLanguageDriftSplitMatchesComposedForm() {
+        let prefix = "Bon dia, aquest matí he estat revisant el pressupost i encara falten dades del proveïdor."
+        let suggestion = "and then we should ship the release"
+        let composed = CompletionCoordinator.languageDrifts(prefix: prefix, suggestion: suggestion)
+        let split = CompletionCoordinator.languageDrifts(
+            prefixLanguage: CompletionCoordinator.driftPrefixLanguage(prefix), suggestion: suggestion)
+        XCTAssertEqual(composed, split)
+    }
+
+    // A short prefix yields no latched language, and the guard must then never fire — same conservative
+    // bail the composed form has always had.
+    func testDriftPrefixLanguageIsNilForShortPrefixSoGuardNeverFires() {
+        XCTAssertNil(CompletionCoordinator.driftPrefixLanguage("hola"))
+        XCTAssertFalse(CompletionCoordinator.languageDrifts(prefixLanguage: nil,
+                                                            suggestion: "a clearly English continuation"))
+    }
+
     // MARK: - ocrTextEquivalent (re-capture change guard: only a meaningful change busts the KV cache)
 
     func testOCREquivalentIgnoresWhitespaceReflow() {
@@ -428,8 +511,8 @@ final class OCRCleanupTests: XCTestCase {
             instruction: nil, styleHint: nil, styleEnabled: false,
             clipboard: nil, clipboardEnabled: false,
             ocr: ctx, ocrEnabled: true, steerLanguageName: "Catalan")
-        XCTAssertTrue(steered.contains("\n\nText (in Catalan):\n"))
-        XCTAssertFalse(steered.contains("\n\nText:\n"))
+        XCTAssertTrue(steered.prompt.contains("\n\nText (in Catalan):\n"))
+        XCTAssertFalse(steered.prompt.contains("\n\nText:\n"))
 
         // nil steer is byte-identical to the bare-marker output (guards KV-reuse identity).
         let bare = CompletionCoordinator.assemblePrompt(
@@ -437,8 +520,8 @@ final class OCRCleanupTests: XCTestCase {
             instruction: nil, styleHint: nil, styleEnabled: false,
             clipboard: nil, clipboardEnabled: false,
             ocr: ctx, ocrEnabled: true)
-        XCTAssertTrue(bare.contains("\n\nText:\n"))
-        XCTAssertFalse(bare.contains("Text (in"))
+        XCTAssertTrue(bare.prompt.contains("\n\nText:\n"))
+        XCTAssertFalse(bare.prompt.contains("Text (in"))
     }
 
     func testSuggestionConflictsWithContext() {

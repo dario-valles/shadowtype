@@ -4,13 +4,26 @@
 // answers yes/no. Bias is conservative: false on normal words, proper nouns, short
 // words, numbers, code-ish tokens. A false positive merely skips one suggestion; a
 // false negative just lets a suggestion fire off a misspelling — so we err toward false.
-import Foundation
+//
+// The authority on "is this a real word" is the on-device system dictionary (NSSpellChecker,
+// offline, already linked via AppKit). Everything below only judges words the dictionary REJECTS.
+import AppKit
 
 final class TypoGuard {
     // Tiny built-in lexicon of very common English words. Used only as an edit-distance
-    // anchor: a 4+ letter word that is exactly one edit away from a common word is almost
-    // certainly that word being mistyped (e.g. "teh"->"the", "becuase"->"because").
-    // Kept small on purpose — this is a signal, not a spell-checker.
+    // anchor for words the system dictionary already rejected: a 4+ letter misspelling that is
+    // exactly one edit away from a common word is almost certainly that word being mistyped
+    // ("becuase"->"because", "thier"->"their"). Kept small on purpose — it is a nearness anchor,
+    // NOT a word list: treating "not in this set" as "misspelled" is exactly the bug that made the
+    // guard suppress the ghost on 38/38 ordinary English words (weeks, must, form, hers, ...).
+    //
+    // Note the canonical "teh"->"the" case never reaches here: "teh" is 3 letters and the n >= 4
+    // gate in looksLikeTypo() drops it first. That is deliberate — lowering the gate to 3 floods
+    // false positives across the huge space of valid 3-letter words/abbrevs, and the cost of a
+    // missed flag is only one un-suppressed suggestion. Autocorrect's own floor is 3 (it has a
+    // concrete target to justify the fix), but the coordinator only consults it AFTER looksLikeTypo
+    // has already said yes — so the 3-letter case is reachable in Autocorrect's unit tests, not in
+    // the product.
     private static let common: Set<String> = [
         "the", "and", "that", "have", "for", "not", "with", "you", "this", "but",
         "his", "from", "they", "she", "her", "will", "would", "there", "their",
@@ -46,6 +59,14 @@ final class TypoGuard {
         // never flag (avoids suppressing on legitimate proper nouns). ALL-CAPS acronyms too.
         if isLikelyProperNounOrAcronym(raw) { return false }
 
+        // Real-word gate: if the system dictionary spells this word correctly, it is not a typo —
+        // full stop. This MUST run before every signal below, not just before the edit-distance one:
+        // signal 3 flags real words with long consonant runs ("lengths", "strengths" — 5 consonants)
+        // and signal 2 flags vowel-less real tokens ("brrr", "psst"). We check the word as typed
+        // rather than the lowercased form so correctly-cased tokens the exclusions let through
+        // ("iPhone") are judged as the user wrote them.
+        if TypoGuard.isRealWord(raw) { return false }
+
         // Signal 1: improbable same-letter run (3+ identical letters in a row).
         // e.g. "helllo", "abbbout". Real English maxes at 2 ("ll", "ss").
         if hasRun(chars, ofAtLeast: 3) { return true }
@@ -58,12 +79,67 @@ final class TypoGuard {
         // Signal 3: long consonant cluster (4+ consonants in a row). e.g. "thgnk", "schrt".
         if longestConsonantRun(chars, vowels: vowels) >= 4 { return true }
 
-        // Signal 4: edit-distance == 1 to a common word -> almost certainly that word
-        // being mistyped. The strongest signal; gated to 4+ letters above to avoid noise.
+        // Signal 4: the word is misspelled (the dictionary said so above) AND is exactly one edit
+        // from a common word -> almost certainly that word being mistyped. The nearness requirement
+        // is what keeps us off the names, jargon and foreign words the dictionary simply doesn't
+        // carry: suppressing the ghost on every unknown token would be far too aggressive.
         if isOneEditFromCommon(lower) { return true }
 
         return false
     }
+
+    // MARK: - System dictionary
+
+    /// True when the on-device system dictionary spells `word` correctly in ANY of the languages we
+    /// consult. Shared with Autocorrect so the Free suppressor and the paid corrector apply the exact
+    /// same "is this a real word" test and can never drift apart.
+    ///
+    /// Threading: NSSpellChecker is AppKit and main-thread-affine. Every caller reaches here from
+    /// CompletionCoordinator.fire(), which only ever runs on main — the debounce posts it via
+    /// DispatchQueue.main.asyncAfter, forceActivate() comes off the hotkey/menu handlers, and the
+    /// context re-fire runs inside MainActor.run — so we call the shared checker directly, with no
+    /// hop and no cache. Cost is one word per typing pause: ~0.2ms when a dictionary accepts it (we
+    /// stop at the first hit), ~1.3ms worst case walking the whole list for a genuine typo.
+    static func isRealWord(_ word: String) -> Bool {
+        guard !word.isEmpty else { return false }
+        return spellLanguages.contains { language in
+            // checkSpelling returns the range of the first MISSPELLING; a correctly-spelled word
+            // yields "none found".
+            let miss = NSSpellChecker.shared.checkSpelling(
+                of: word, startingAt: 0, language: language, wrap: false,
+                inSpellDocumentWithTag: 0, wordCount: nil)
+            return miss.location == NSNotFound || miss.length == 0
+        }
+    }
+
+    // The dictionaries isRealWord consults, resolved once on first use (~17ms, on the first typing
+    // pause). We pass EXPLICIT languages instead of letting the checker auto-identify: language ID on
+    // a single word is a coin flip, and falling back to the UI locale would flag every Spanish or
+    // Catalan word as an English typo and kill the ghost for non-English users. Three rules, all
+    // measured on a real machine:
+    //   * English first — the lexicon and the edit-distance signal are English-only, and it is the
+    //     language most tokens are in, so the any-dictionary check usually stops on the first call.
+    //   * Then the user's OWN spelling languages (System Settings > Keyboard > Text Input > Spelling,
+    //     which is what userPreferredLanguages reports), so a Spanish writer's words are real words.
+    //   * DROP any language whose dictionary isn't actually installed. macOS lists those in
+    //     availableLanguages anyway (ca, uk, ko, hi, ar, he, te on the dev box) and they answer "no
+    //     misspelling" for EVERY input — including "thgnk" — so a single one of them in this list
+    //     would silently disable the whole guard. We probe each with a garbage sentinel and keep only
+    //     the dictionaries that reject it.
+    // Catalan ships no macOS dictionary at all, so Catalan words rest on the remaining defences (the
+    // Spanish dictionary accepts many of them, and signal 4 needs nearness to an English word).
+    private static let spellLanguages: [String] = {
+        let checker = NSSpellChecker.shared
+        let available = checker.availableLanguages
+        var candidates = available.filter { $0 == "en" }
+        candidates += checker.userPreferredLanguages.filter {
+            available.contains($0) && !candidates.contains($0)
+        }
+        return candidates.filter { language in
+            checker.checkSpelling(of: "zzqxjvw", startingAt: 0, language: language, wrap: false,
+                                  inSpellDocumentWithTag: 0, wordCount: nil).length > 0
+        }
+    }()
 
     // MARK: - Helpers (pure)
 

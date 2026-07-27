@@ -44,6 +44,13 @@ protocol InferenceEngineProtocol: AnyObject {
     func unload()
     func requestCancel()
 
+    // Drop a sequence's KV cells and cached token stream. `kv_unified = true` means every seq draws from
+    // ONE n_ctx-sized pool, so a seq that will never reuse its prefix should hand the cells back rather
+    // than hold them against the ghost: ghost + rewrite both prefilling near the cap would otherwise ask
+    // for more cells than exist and `llama_decode` fails with no KV slot. Rewrite is exactly that case —
+    // every rewrite prompt diverges at token 0, so its cache is never reused.
+    func releaseSeq(_ seqID: Int32)
+
     // Full-surface generate. Ghost callers use the defaulted extension below (`seqID: 0`,
     // `params: .ghostDefaults`); API/MCP callers stamp their own seq ID + clamped params so the two
     // workloads can coexist in the same context with independent KV slots.
@@ -54,9 +61,48 @@ protocol InferenceEngineProtocol: AnyObject {
                   requiredPrefix: [UInt8]?,
                   onToken: (String) -> Bool,
                   onSample: ((_ prob: Float, _ isFirstContent: Bool) -> Void)?) throws
+
+    // The engine's REAL context window, as opposed to `maxContextTokens` — which is engine-WIDE but is
+    // driven from the GHOST's "Context window size" setting (1024 by default). Because generate()
+    // applies that cap with no reference to seqID, a 3000-token Cursor/Claude Code request on seq 1 is
+    // silently front-trimmed to the last 1024 tokens — the system prompt is dropped — and still returns
+    // HTTP 200, while /v1/health advertises the full window. The API path reads this to size its own
+    // cap. Declared here (not only in the extension) so a backend CAN override it: InferenceEngine
+    // reports its live `llama_n_ctx`, and the extension default below (the engine-wide setting) is the
+    // conservative fallback for a backend that has no separate notion of a window.
+    var contextWindowTokens: Int { get }
+
+    // Per-call prompt cap. `contextTokenCap` overrides the engine-wide `maxContextTokens` for THIS call
+    // only, so the ghost keeps the user's small window while an API request gets the real one. A
+    // requirement rather than extension-only so a backend that implements it is dispatched to
+    // dynamically — InferenceEngine threads it into `promptCap` and turns an over-cap prompt into
+    // `InferenceError.contextOverflow` (HTTP 400) instead of a silent front-trim. The extension default
+    // below ignores the cap and forwards to the engine-wide path, for backends that have no such notion.
+    func generate(prompt: String,
+                  maxTokens: Int,
+                  seqID: Int32,
+                  params: SamplingParams,
+                  contextTokenCap: Int?,
+                  requiredPrefix: [UInt8]?,
+                  onToken: (String) -> Bool,
+                  onSample: ((_ prob: Float, _ isFirstContent: Bool) -> Void)?) throws
 }
 
 extension InferenceEngineProtocol {
+    var contextWindowTokens: Int { maxContextTokens }
+
+    func generate(prompt: String,
+                  maxTokens: Int,
+                  seqID: Int32,
+                  params: SamplingParams,
+                  contextTokenCap: Int?,
+                  requiredPrefix: [UInt8]?,
+                  onToken: (String) -> Bool,
+                  onSample: ((_ prob: Float, _ isFirstContent: Bool) -> Void)?) throws {
+        try generate(prompt: prompt, maxTokens: maxTokens, seqID: seqID, params: params,
+                     requiredPrefix: requiredPrefix, onToken: onToken, onSample: onSample)
+    }
+
     // Legacy ghost-text shape. Forwards to the new method with `seq 0` + `.ghostDefaults` so all
     // existing call sites (CompletionCoordinator.startGeneration / rewrite / warmFocus) remain
     // source-compatible and byte-identical in behavior.
@@ -118,10 +164,12 @@ final class InferenceEngineRouter: InferenceEngineProtocol {
     var modelArchitecture: String? { active.modelArchitecture }
     var modelSupportsChat: Bool { active.modelSupportsChat }
     var supportsFIM: Bool { active.supportsFIM }
+    var contextWindowTokens: Int { active.contextWindowTokens }
 
     func load(modelPath: String) throws { try active.load(modelPath: modelPath) }
     func unload() { active.unload() }
     func requestCancel() { active.requestCancel() }
+    func releaseSeq(_ seqID: Int32) { active.releaseSeq(seqID) }
 
     func generate(prompt: String, maxTokens: Int,
                   seqID: Int32, params: SamplingParams,
@@ -130,6 +178,21 @@ final class InferenceEngineRouter: InferenceEngineProtocol {
                   onSample: ((_ prob: Float, _ isFirstContent: Bool) -> Void)?) throws {
         try active.generate(prompt: prompt, maxTokens: maxTokens,
                             seqID: seqID, params: params,
+                            requiredPrefix: requiredPrefix,
+                            onToken: onToken, onSample: onSample)
+    }
+
+    // Forwarded explicitly so the per-call cap reaches the backend that implements it; a backend that
+    // doesn't picks up the protocol extension's default (ignore + forward) at this call site.
+    func generate(prompt: String, maxTokens: Int,
+                  seqID: Int32, params: SamplingParams,
+                  contextTokenCap: Int?,
+                  requiredPrefix: [UInt8]?,
+                  onToken: (String) -> Bool,
+                  onSample: ((_ prob: Float, _ isFirstContent: Bool) -> Void)?) throws {
+        try active.generate(prompt: prompt, maxTokens: maxTokens,
+                            seqID: seqID, params: params,
+                            contextTokenCap: contextTokenCap,
                             requiredPrefix: requiredPrefix,
                             onToken: onToken, onSample: onSample)
     }
@@ -156,6 +219,7 @@ final class FoundationModelsEngine: InferenceEngineProtocol {
 
     func unload() {}
     func requestCancel() {}
+    func releaseSeq(_ seqID: Int32) {}
 
     func generate(prompt: String, maxTokens: Int,
                   seqID: Int32, params: SamplingParams,

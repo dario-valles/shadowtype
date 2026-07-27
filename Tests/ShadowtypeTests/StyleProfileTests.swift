@@ -18,6 +18,23 @@ final class StyleProfileTests: XCTestCase {
         StyleProfile(storeURL: url, secret: secret)
     }
 
+    // styleHint() stays silent below `minInputsForHint` accepts (a profile built from two sentences is
+    // noise), so every test that asserts on hint CONTENT has to train past that floor first.
+    private func train(_ p: StyleProfile, _ phrases: [String], bundleId: String? = nil,
+                       rounds: Int = StyleProfile.minInputsForHint) {
+        for _ in 0..<rounds {
+            for phrase in phrases { p.recordAccepted(phrase, bundleId: bundleId) }
+        }
+    }
+
+    private static let hintPrefix = "User writing style — favors: "
+
+    // The hint's items, so tests can assert on what was emitted rather than on substrings of the line.
+    private func hintItems(_ hint: String) -> [String] {
+        guard hint.hasPrefix(Self.hintPrefix) else { return [] }
+        return String(hint.dropFirst(Self.hintPrefix.count)).components(separatedBy: "; ")
+    }
+
     // MARK: - Empty profile
 
     func testEmptyProfileHintIsNil() {
@@ -34,8 +51,7 @@ final class StyleProfileTests: XCTestCase {
 
     func testRecordingThenHintIsNonNil() {
         let p = profile(tempURL())
-        p.recordAccepted("Thanks so much for reaching out")
-        p.recordAccepted("Happy to help with that")
+        train(p, ["Thanks so much for reaching out", "Happy to help with that"])
         let hint = p.styleHint(maxChars: 300)
         XCTAssertNotNil(hint)
         // The hint surfaces the user's own phrasing.
@@ -49,6 +65,26 @@ final class StyleProfileTests: XCTestCase {
         XCTAssertNil(p.styleHint(maxChars: 200))
     }
 
+    // MARK: - Evidence floor: a tiny profile describes nobody
+
+    func testTinyCorpusYieldsNoHint() {
+        // Three sentences is not a writing style, and the hint it would produce costs prompt budget that
+        // the real context needs — stay silent until there is enough material.
+        let p = profile(tempURL())
+        p.recordAccepted("kindly regards always")
+        p.recordAccepted("looking forward to hearing back")
+        p.recordAccepted("happy to help with that")
+        XCTAssertNil(p.styleHint(maxChars: 400), "3 inputs must not produce a style hint")
+    }
+
+    func testHintAppearsExactlyAtTheEvidenceFloor() {
+        let p = profile(tempURL())
+        for _ in 0..<(StyleProfile.minInputsForHint - 1) { p.recordAccepted("kindly regards always") }
+        XCTAssertNil(p.styleHint(maxChars: 400), "below the floor the hint must stay nil")
+        p.recordAccepted("kindly regards always")
+        XCTAssertNotNil(p.styleHint(maxChars: 400), "at the floor the hint must appear")
+    }
+
     // MARK: - Vocabulary-only: no verbatim content / digit bleed (FR-CTX-3 anti-regurgitation)
 
     func testHintDoesNotSurfaceVerbatimPhrase() {
@@ -56,7 +92,7 @@ final class StyleProfileTests: XCTestCase {
         // otherwise the base model parrots it across unrelated apps (Notes story -> Slack message).
         let p = profile(tempURL())
         let phrase = "una princesa vive en castillo"     // 5 words, learned, but never emitted whole
-        for _ in 0..<3 { p.recordAccepted(phrase) }
+        train(p, [phrase])
         let hint = p.styleHint(maxChars: 400)
         XCTAssertNotNil(hint)
         XCTAssertFalse(hint!.contains(phrase), "verbatim phrase leaked into the style hint")
@@ -66,17 +102,70 @@ final class StyleProfileTests: XCTestCase {
     func testHintExcludesDigitNGrams() {
         // Stray numerals (the old "2 …" garbage) are noise, not style — never surface them.
         let p = profile(tempURL())
-        for _ in 0..<3 { p.recordAccepted("2 y el baile feliz") }
+        train(p, ["2 y el baile feliz"])
         let hint = p.styleHint(maxChars: 400)
         XCTAssertNotNil(hint)
         XCTAssertFalse(hint!.contains("2"), "digit n-gram leaked into the style hint")
     }
 
     func testLongPhrasingNotLearned() {
-        // Above maxPhraseWords the input is content, not voice — ignored entirely.
+        // Above maxPhraseWords the input is content, not voice — ignored entirely. Fed well past the
+        // evidence floor so a nil hint can only mean "never learned", not "not enough inputs yet".
         let p = profile(tempURL())
-        p.recordAccepted("this is a long sentence with definitely more than six words total")
+        train(p, ["this is a long sentence with definitely more than six words total"])
         XCTAssertNil(p.styleHint(maxChars: 300))
+    }
+
+    // MARK: - Distinctiveness: function words are not a writing style
+
+    func testOrdinaryEnglishDoesNotProduceAStopwordHint() {
+        // Ranked by raw frequency this corpus yields exactly "of the; the; and ..." — a line of English
+        // glue that says nothing about the user, outranks the real screen context in the prompt budget,
+        // and reads to a base model as document content to imitate. Every emitted item must carry at
+        // least one content word.
+        let p = profile(tempURL())
+        train(p, [
+            "the state of the art",
+            "one of the best",
+            "part of the team",
+            "most of the time",
+            "the end of the day",
+            "the rest of the file",
+        ])
+        let hint = p.styleHint(maxChars: 400)
+        XCTAssertNotNil(hint)
+        let items = hintItems(hint!)
+        XCTAssertFalse(items.isEmpty, "could not parse hint items from: \(hint!)")
+        for item in items {
+            XCTAssertGreaterThan(StyleProfile.contentTokenCount(item), 0,
+                                 "pure-stopword item '\(item)' leaked into the style hint")
+        }
+        for junk in ["of the", "the", "and", "that", "in the", "to the"] {
+            XCTAssertFalse(items.contains(junk), "'\(junk)' leaked into the style hint")
+        }
+    }
+
+    func testDistinctiveVocabularyOutranksMoreFrequentGlue() {
+        // The filler is fed MORE often than the distinctive phrasing on purpose: raw frequency would put
+        // "is one" first, distinctiveness puts the two-content-word bigram first.
+        let p = profile(tempURL())
+        train(p, ["it is one of the"], rounds: StyleProfile.minInputsForHint * 2)
+        train(p, ["kubernetes operator reconciled the pods"])
+        let hint = p.styleHint(maxChars: 400)
+        XCTAssertNotNil(hint)
+        let items = hintItems(hint!)
+        XCTAssertEqual(items.first, "kubernetes operator",
+                       "distinctive vocabulary should lead the hint, got: \(items)")
+        XCTAssertTrue(items.contains("kubernetes"), "distinctive words must still surface: \(items)")
+    }
+
+    func testContentTokenCountIgnoresFunctionWords() {
+        XCTAssertEqual(StyleProfile.contentTokenCount("the"), 0)
+        XCTAssertEqual(StyleProfile.contentTokenCount("of the"), 0)
+        XCTAssertEqual(StyleProfile.contentTokenCount("de la"), 0)      // same trap in Spanish
+        XCTAssertEqual(StyleProfile.contentTokenCount("the meeting"), 1)
+        XCTAssertEqual(StyleProfile.contentTokenCount("una princesa"), 1)
+        XCTAssertEqual(StyleProfile.contentTokenCount("baile feliz"), 2)
     }
 
     // MARK: - maxChars respected
@@ -95,7 +184,7 @@ final class StyleProfileTests: XCTestCase {
 
     func testHintNilWhenMaxCharsTooSmallForPrefix() {
         let p = profile(tempURL())
-        p.recordAccepted("hello there friend")
+        train(p, ["hello there friend"])   // past the evidence floor: nil must be the cap's doing
         XCTAssertNil(p.styleHint(maxChars: 5)) // smaller than the leading label
         XCTAssertNil(p.styleHint(maxChars: 0))
     }
@@ -106,8 +195,9 @@ final class StyleProfileTests: XCTestCase {
         let url = tempURL()
         do {
             let p = profile(url)
-            p.recordAccepted("kindly let me know if you have questions")
-            p.recordAccepted("looking forward to hearing back")
+            // Both phrasings are <= maxPhraseWords so they are actually learned (the longer variant of
+            // the first one used to be silently dropped, making this test assert on one phrase only).
+            train(p, ["kindly let me know", "looking forward to hearing back"])
             XCTAssertNotNil(p.styleHint(maxChars: 300))
             p.flushPendingWrites()   // writes are async; flush before reopening from disk
         }
@@ -142,7 +232,7 @@ final class StyleProfileTests: XCTestCase {
     func testWipeEmptiesAndRemovesFile() throws {
         let url = tempURL()
         let p = profile(url)
-        p.recordAccepted("some learned phrasing here")
+        train(p, ["some learned phrasing here"])
         p.flushPendingWrites()
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
         XCTAssertNotNil(p.styleHint(maxChars: 200))
@@ -178,6 +268,9 @@ final class StyleProfileTests: XCTestCase {
         let p = profile(tempURL())
         p.recordAccepted("kindly regards", bundleId: "com.apple.mail")
         p.recordAccepted("lol yeah", bundleId: "com.tinyspeck.slackmacgap")
+        // The evidence floor is on the MERGED total, so neither app alone has to clear it.
+        train(p, ["kindly regards"], bundleId: "com.apple.mail", rounds: 4)
+        train(p, ["lol yeah"], bundleId: "com.tinyspeck.slackmacgap", rounds: 4)
         let hint = p.styleHint(maxChars: 400)
         XCTAssertNotNil(hint)
         // Both apps' vocabulary contributes to the single merged hint.
@@ -187,11 +280,12 @@ final class StyleProfileTests: XCTestCase {
 
     func testDeleteAppRemovesOnlyThatApp() {
         let p = profile(tempURL())
-        p.recordAccepted("kindly regards always", bundleId: "com.apple.mail")
-        p.recordAccepted("lmao yeah totally", bundleId: "com.tinyspeck.slackmacgap")
+        train(p, ["kindly regards always"], bundleId: "com.apple.mail")
+        train(p, ["lmao yeah totally"], bundleId: "com.tinyspeck.slackmacgap")
         p.deleteApp(bundleId: "com.apple.mail")
         XCTAssertEqual(p.inputCount(forBundleId: "com.apple.mail"), 0)
-        XCTAssertEqual(p.inputCount(forBundleId: "com.tinyspeck.slackmacgap"), 1)
+        XCTAssertEqual(p.inputCount(forBundleId: "com.tinyspeck.slackmacgap"),
+                       StyleProfile.minInputsForHint)
         let hint = p.styleHint(maxChars: 400)
         XCTAssertNotNil(hint)
         XCTAssertFalse(hint!.contains("kindly"), "deleted app's vocabulary must not survive")
@@ -202,11 +296,11 @@ final class StyleProfileTests: XCTestCase {
         let url = tempURL()
         do {
             let p = profile(url)
-            p.recordAccepted("kindly let me know", bundleId: "com.apple.mail")
+            train(p, ["kindly let me know"], bundleId: "com.apple.mail")
             p.flushPendingWrites()
         }
         let reopened = profile(url)
-        XCTAssertEqual(reopened.inputCount(forBundleId: "com.apple.mail"), 1)
+        XCTAssertEqual(reopened.inputCount(forBundleId: "com.apple.mail"), StyleProfile.minInputsForHint)
         XCTAssertTrue(reopened.styleHint(maxChars: 300)?.contains("kindly") == true)
     }
 
@@ -214,15 +308,21 @@ final class StyleProfileTests: XCTestCase {
 
     func testMigratesOldGlobalProfile() throws {
         let url = tempURL()
-        // Write an OLD-shape record (top-level nGramCounts/recentPhrases, no perApp), sealed with the
-        // test secret exactly as the previous build would have.
-        let oldJSON = #"{"nGramCounts":{"kindly":3,"kindly regards":2},"recentPhrases":["kindly regards"]}"#
-        let sealed = try AES.GCM.seal(Data(oldJSON.utf8),
+        // Write an OLD-shape record (top-level nGramCounts/recentPhrases, no perApp AND no inputCount),
+        // sealed with the test secret exactly as the previous build would have.
+        let learned = StyleProfile.minInputsForHint + 1
+        let old: [String: Any] = [
+            "nGramCounts": ["kindly": learned, "regards": learned, "kindly regards": learned],
+            "recentPhrases": (0..<learned).map { "kindly regards \($0)" },
+        ]
+        let sealed = try AES.GCM.seal(JSONSerialization.data(withJSONObject: old),
                                       using: SymmetricKey(data: Self.testSecret)).combined!
         try sealed.write(to: url)
 
         let p = profile(url)   // first load migrates the old shape into `legacy`
         let hint = p.styleHint(maxChars: 300)
+        // The old shape has no inputCount; it is backfilled from recentPhrases so a long-trained profile
+        // isn't muted by the evidence floor on upgrade.
         XCTAssertNotNil(hint, "migrated old profile should still produce a hint")
         XCTAssertTrue(hint!.contains("kindly"))
         // New per-app learning coexists with the migrated legacy data.
@@ -237,7 +337,7 @@ final class StyleProfileTests: XCTestCase {
         let url = tempURL()
         do {
             let p = profile(url, secret: Self.testSecret)
-            p.recordAccepted("unreadable phrasing under this key")
+            train(p, ["unreadable phrasing under this key"])
             XCTAssertNotNil(p.styleHint(maxChars: 200))
             p.flushPendingWrites()
         }
@@ -246,7 +346,7 @@ final class StyleProfileTests: XCTestCase {
         XCTAssertNil(mismatched.styleHint(maxChars: 200))
 
         // And it can still learn + persist under its own key afterward (overwrites the file).
-        mismatched.recordAccepted("fresh start under the new key")
+        train(mismatched, ["fresh start under the new key"])
         XCTAssertNotNil(mismatched.styleHint(maxChars: 200))
         mismatched.flushPendingWrites()
         XCTAssertNotNil(profile(url, secret: Self.otherSecret).styleHint(maxChars: 200))

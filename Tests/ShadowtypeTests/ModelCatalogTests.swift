@@ -75,7 +75,42 @@ final class ModelCatalogTests: XCTestCase {
         }
     }
 
-    // MARK: - RAM gate (FR-LM-2, PRD §6 ~75% budget)
+    /// The model cards used to hardcode "Q4_K_M" for every row, mislabeling the four Google QAT `q4_0`
+    /// GGUFs. `quant` is the field the UI must render, so it has to be set and has to agree with the
+    /// actual file name — a copy-pasted entry with the wrong quant is exactly the mislabel we just fixed.
+    func testEveryEntryDeclaresItsQuantAndItMatchesTheFileName() {
+        for entry in ModelCatalog.entries {
+            guard let quant = entry.quant else {
+                XCTFail("\(entry.id): missing quant — the UI would have to guess")
+                continue
+            }
+            let file = entry.fileName.lowercased()
+            let expected: String
+            if file.contains("q4_k_m") {
+                expected = "Q4_K_M"
+            } else if file.contains("q4_0") {
+                expected = "Q4_0"
+            } else {
+                XCTFail("\(entry.id): filename \(entry.fileName) declares no recognizable quant")
+                continue
+            }
+            XCTAssertEqual(quant, expected, "\(entry.id): quant \(quant) contradicts file \(entry.fileName)")
+        }
+    }
+
+    /// Llama 3.1 8B Instruct was removed: dominated by the ~4B-class 2026 entries at twice their size,
+    /// a 2023-12 knowledge cutoff, the only non-permissive license in the catalog, and the only instruct
+    /// entry that violated the base-variant-for-raw-continuation rule. Guards against a revert.
+    func testLlama31IsNotInTheCatalog() {
+        XCTAssertFalse(ModelCatalog.entries.contains { $0.id.contains("llama") },
+                       "llama-3.1-8b-instruct was deliberately removed; do not re-add it")
+    }
+
+    // MARK: - RAM gate (FR-LM-2, PRD §6)
+    // The budget is min(75% of RAM, RAM - 3 GB OS floor) and the model costs weights + 10% KV cache
+    // (F16 KV at the engine's n_ctx=4096). The old gate compared 75% of RAM against the WEIGHTS ALONE,
+    // which left an 8 GB Mac 6.44 GB for the model and nothing for macOS, the app being typed into, or
+    // the KV cache — and on Apple Silicon the GPU shares that same unified pool.
 
     func testRamOKTrueForSmallModelOnBigMachine() {
         let small = ModelCatalogEntry(
@@ -90,33 +125,99 @@ final class ModelCatalogTests: XCTestCase {
             id: "huge", name: "Huge", fileName: "huge.gguf",
             url: URL(string: "https://example.com/huge.gguf")!,
             sha256: nil, approxRAMGB: 7.5, downloadGB: 4.9, paidOnly: true)
-        // 8 GB machine -> budget is 6 GB; a 7.5 GB model must be blocked.
+        // 8 GB machine -> budget is 5 GB (8 - 3 OS floor); a 7.5 GB model must be blocked.
         XCTAssertFalse(ModelCatalog.ramOK(for: huge, physicalBytes: machine(8)))
     }
 
-    func testRamOKBoundaryAtSeventyFivePercent() {
-        // Exactly at the 75% budget is allowed (<=). 6 GB model on an 8 GB machine: budget == 6 GB.
+    /// WAS `testRamOKBoundaryAtSeventyFivePercent`, which asserted a 6.0 GB model IS RAM-OK on an 8 GB
+    /// machine. That assertion LOCKED IN the bug: 6.0 GB of weights + ~0.6 GB of KV on an 8 GB Mac
+    /// leaves under 1.4 GB for macOS and the app being typed into, so it swaps. New expectation: with
+    /// the 3 GB OS floor the budget is 5 GB and a 6.0 GB model is correctly blocked.
+    func testRamOKBlocksSixGBModelOnEightGBMachine() {
         let edge = ModelCatalogEntry(
             id: "edge", name: "Edge", fileName: "edge.gguf",
             url: URL(string: "https://example.com/edge.gguf")!,
             sha256: nil, approxRAMGB: 6.0, downloadGB: 3.5, paidOnly: true)
-        XCTAssertTrue(ModelCatalog.ramOK(for: edge, physicalBytes: machine(8)))
+        XCTAssertFalse(ModelCatalog.ramOK(for: edge, physicalBytes: machine(8)),
+                       "6 GB weights + KV cannot coexist with macOS on an 8 GB Mac")
+    }
+
+    /// The concrete shipped case: Gemma 4 E4B (6.3 GB) reported RAM-OK on an 8 GB Mac under the old
+    /// weights-only 75% rule and so never got the "Tight on RAM" tag in the Models pane.
+    func testGemma4E4BIsNotRamOKOnEightGBMachine() {
+        let e4b = ModelCatalog.entries.first { $0.id == "gemma-4-e4b-it-qat-q4_0" }!
+        XCTAssertFalse(ModelCatalog.ramOK(for: e4b, physicalBytes: machine(8)),
+                       "E4B (6.3 GB) must be tagged tight on an 8 GB Mac")
+    }
+
+    func testRamOKBudgetBoundaryOnA16GBMachine() {
+        // 16 GB -> budget = min(12, 13) = 12 GB, and the model costs weights * 1.1 (KV cache).
+        // 10.0 GB of weights costs 11.0 -> fits; 11.0 GB costs 12.1 -> does not.
+        func entry(_ ram: Double) -> ModelCatalogEntry {
+            ModelCatalogEntry(
+                id: "edge-\(ram)", name: "Edge", fileName: "edge.gguf",
+                url: URL(string: "https://example.com/edge.gguf")!,
+                sha256: nil, approxRAMGB: ram, downloadGB: 1.0, paidOnly: false)
+        }
+        XCTAssertTrue(ModelCatalog.ramOK(for: entry(10.0), physicalBytes: machine(16)))
+        XCTAssertFalse(ModelCatalog.ramOK(for: entry(11.0), physicalBytes: machine(16)),
+                       "the KV cache term must push an 11 GB model past the 12 GB budget")
+    }
+
+    func testRamOKSeventyFivePercentStillBindsOnLargeMachines() {
+        // On a big Mac the OS floor is slack, so the original 75% headroom rule is what binds:
+        // 64 GB -> budget = min(48, 61) = 48; 44 GB of weights costs 48.4 and must be blocked.
+        let big = ModelCatalogEntry(
+            id: "big", name: "Big", fileName: "big.gguf",
+            url: URL(string: "https://example.com/big.gguf")!,
+            sha256: nil, approxRAMGB: 44.0, downloadGB: 30.0, paidOnly: false)
+        XCTAssertFalse(ModelCatalog.ramOK(for: big, physicalBytes: machine(64)))
     }
 
     // MARK: - Recommendation (FR-LM-3)
 
-    func testRecommendedPicksWithinRAM() {
-        // On a generous machine, every entry fits, so the recommendation is the largest entry and it
-        // must itself be RAM-OK.
-        let rec = ModelCatalog.recommended(physicalBytes: machine(64))
-        XCTAssertTrue(ModelCatalog.ramOK(for: rec, physicalBytes: machine(64)))
-        let largest = ModelCatalog.entries.max(by: { $0.approxRAMGB < $1.approxRAMGB })
-        XCTAssertEqual(rec.id, largest?.id)
+    /// WAS `testRecommendedPicksWithinRAM`, which asserted the recommendation on a 64 GB Mac IS the
+    /// LARGEST catalog entry. That assertion LOCKED IN the wrong objective: `recommended()` is the
+    /// pre-selected FIRST-RUN download, and the largest entry (qwen3-30b-a3b, 18.6 GB down / ~20 GB
+    /// resident) cannot produce a first token inside the coordinator's ~400 ms deadline on a ~1500-token
+    /// prompt — the ghost is silently dropped and the product reads as broken. New expectation: even a
+    /// 64 GB Mac is recommended the 4B class; the big entries stay manually selectable.
+    func testRecommendedIsCappedAtTheFourBClassEvenOnHugeMachines() {
+        for gigs: UInt64 in [16, 24, 32, 64, 128] {
+            let rec = ModelCatalog.recommended(physicalBytes: machine(gigs))
+            XCTAssertEqual(rec.id, "qwen3-4b-base-q4_k_m", "\(gigs)GB recommended \(rec.id)")
+            XCTAssertTrue(ModelCatalog.ramOK(for: rec, physicalBytes: machine(gigs)))
+        }
+        let largest = ModelCatalog.entries.max(by: { $0.approxRAMGB < $1.approxRAMGB })!
+        XCTAssertNotEqual(ModelCatalog.recommended(physicalBytes: machine(64)).id, largest.id,
+                          "the recommendation must not be 'largest that fits'")
     }
 
-    func testRecommendedFitsConstrainedMachine() {
-        // On a tight machine, the recommendation must be one that actually fits the 75% budget.
+    /// The "product reads as broken" regression, pinned STRUCTURALLY so it survives a catalog reshuffle
+    /// that renames or replaces `qwen3-4b-base-q4_k_m`: on a 32 GB Mac the first-run pick must stay in
+    /// the small class, because anything heavier misses the ~400 ms first-token deadline and the ghost
+    /// never appears at all. Bounded by `recommendedCapRAMGB`, not by a hardcoded id.
+    func testRecommendedOnAThirtyTwoGBMacStaysInTheFastClass() {
+        let rec = ModelCatalog.recommended(physicalBytes: machine(32))
+        let cap = ModelCatalog.recommendedCapRAMGB(physicalBytes: machine(32))
+        XCTAssertLessThanOrEqual(rec.approxRAMGB, cap,
+                                 "32GB pick \(rec.id) (\(rec.approxRAMGB) GB) exceeds the deadline cap")
+        XCTAssertLessThanOrEqual(rec.approxRAMGB, 4.0, "32GB pick must stay in the ~4B class")
+        // The failure this encodes: an 18.6 GB 30B MoE fits 32 GB of RAM and was picked by the old
+        // largest-that-fits rule, then showed no ghost.
+        let heaviest = ModelCatalog.entries.max(by: { $0.approxRAMGB < $1.approxRAMGB })!
+        XCTAssertTrue(ModelCatalog.ramOK(for: heaviest, physicalBytes: machine(32)),
+                      "precondition: the heaviest entry does fit 32 GB — that is why the cap exists")
+        XCTAssertNotEqual(rec.id, heaviest.id)
+        // A base model, so it continues raw-prefix text instead of emitting end-of-turn (bug 3).
+        XCTAssertFalse(rec.isInstruct)
+    }
+
+    func testRecommendedOnEightGBIsTheSmallGemma() {
+        // 8 GB Macs share unified memory with the browser/editor being typed into, so the first-run
+        // pick stays at the ~1.5 GB class rather than the 4B that would technically fit the budget.
         let rec = ModelCatalog.recommended(physicalBytes: machine(8))
+        XCTAssertEqual(rec.id, "gemma-3-1b-pt-q4_k_m")
         XCTAssertTrue(ModelCatalog.ramOK(for: rec, physicalBytes: machine(8)))
     }
 
@@ -144,27 +245,40 @@ final class ModelCatalogTests: XCTestCase {
     }
 
     func testRecommendedPrefersBaseOverLargerInstruct() {
-        // 17 GB (75% ≈ 12.75): Llama-3.1-8B-Instruct (7.5) is the largest-that-fits overall, but the
-        // near-identical Qwen3-8B-Base (6.8) must win — the exact case that put this user on a
-        // completion-dropping instruct model.
+        // WAS: 17 GB expected qwen3-8b-base (6.8), beating the now-removed Llama-3.1-8B-Instruct (7.5).
+        // With the first-token-deadline cap the pick is the 4B base instead — still a BASE model, which
+        // is what this test is about: instruct models emit end-of-turn on dangling prefixes and drop
+        // the ghost, so the recommender must never hand a first-run user one.
         let rec = ModelCatalog.recommended(physicalBytes: machine(17))
         XCTAssertFalse(rec.isInstruct)
-        XCTAssertEqual(rec.id, "qwen3-8b-base-q4_k_m")
+        XCTAssertEqual(rec.id, "qwen3-4b-base-q4_k_m")
     }
 
     func testRecommendedPickIsStillRamSafe() {
+        // 4 GB is below the OS floor + the smallest model, so nothing clears the budget there and the
+        // documented fallback (smallest entry, knowingly over budget) applies — the app must still have
+        // something to load. Everywhere else the pick must be genuinely RAM-safe.
+        let smallest = ModelCatalog.entries.min(by: { $0.approxRAMGB < $1.approxRAMGB })!
         for gigs: UInt64 in [4, 8, 16, 17, 24, 32, 64] {
             let rec = ModelCatalog.recommended(physicalBytes: machine(gigs))
-            XCTAssertTrue(ModelCatalog.ramOK(for: rec, physicalBytes: machine(gigs)),
-                          "\(gigs)GB: recommended \(rec.id) exceeds the RAM budget")
+            let nothingFits = !ModelCatalog.entries.contains {
+                ModelCatalog.ramOK(for: $0, physicalBytes: machine(gigs))
+            }
+            if nothingFits {
+                XCTAssertEqual(rec.id, smallest.id, "\(gigs)GB: fallback must be the smallest entry")
+            } else {
+                XCTAssertTrue(ModelCatalog.ramOK(for: rec, physicalBytes: machine(gigs)),
+                              "\(gigs)GB: recommended \(rec.id) exceeds the RAM budget")
+            }
         }
     }
 
     func testInstructFlagTagsExactlyTheInstructEntries() {
         let instruct = Set(ModelCatalog.entries.filter { $0.isInstruct }.map { $0.id })
+        // Only the Gemma 4 family, which ships instruct-only (no base GGUF exists for it).
         XCTAssertEqual(instruct, [
             "gemma-4-e2b-it-qat-q4_0", "gemma-4-e4b-it-qat-q4_0", "gemma-4-12b-it-qat-q4_0",
-            "llama-3.1-8b-instruct-q4_k_m", "gemma-4-26b-a4b-it-qat-q4_0",
+            "gemma-4-26b-a4b-it-qat-q4_0",
         ])
     }
 

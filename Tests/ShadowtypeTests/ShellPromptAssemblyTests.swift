@@ -65,6 +65,70 @@ final class ShellPromptAssemblyTests: XCTestCase {
         XCTAssertEqual(CompletionCoordinator.shellCurrentLine("git pu"), "git pu")
     }
 
+    // MARK: - Prompt chrome on the CURRENT line
+    //
+    // Every test above hands the assembler a pre-cleaned stem ("git pu"), which baked in the assumption
+    // that the current line arrives chrome-free. In a real terminal it does not: the AX prefix ends with
+    // the live PS1 — the very thing isShellPromptLine matched to enter shell mode.
+
+    func testShellTypedCommandStripsPromptChrome() {
+        XCTAssertEqual(CompletionCoordinator.shellTypedCommand("~ $ cd proj\ndario@mac ~/proj % git pu"),
+                       "git pu")
+        // Trailing space is PRESERVED: a typed `git ` must complete to `status`, not ` status`.
+        XCTAssertEqual(CompletionCoordinator.shellTypedCommand("~/proj $ git "), "git ")
+        // Chrome only — nothing typed yet.
+        XCTAssertEqual(CompletionCoordinator.shellTypedCommand("~/proj $ "), "")
+        // No sigil (terminals that expose only the typed text) → the raw line, unchanged behaviour.
+        XCTAssertEqual(CompletionCoordinator.shellTypedCommand("line1\ngit pu"), "git pu")
+    }
+
+    // The continuation line must stay command-shaped. With the chrome it read
+    // `$ dario@mac ~/proj % git pu` — not a command, and repeating the stem the exemplars already end on.
+    func testAssembleShellPromptStripsChromeFromTheTypedTail() {
+        let buf = """
+        ~ $ cd proj
+        ~/proj $ git status
+        dario@mac ~/proj % git pu
+        """
+        let out = CompletionCoordinator.assembleShellPrompt(
+            prefix: "~ $ cd proj\ndario@mac ~/proj % git pu", terminalBuffer: buf)
+        XCTAssertTrue(out.hasSuffix("$ git pu"))
+        XCTAssertFalse(out.contains("$ dario@mac"))
+        // The exemplar equal to the typed stem is dropped, so the stem appears exactly once.
+        XCTAssertEqual(out.components(separatedBy: "$ git pu").count - 1, 1)
+    }
+
+    // Redaction was applied to the exemplars but not to the typed tail, so a secret on the line the user
+    // is typing RIGHT NOW — the one most worth withholding — went to the model verbatim.
+    func testAssembleShellPromptRedactsTheTypedTail() {
+        let out = CompletionCoordinator.assembleShellPrompt(
+            prefix: "~ $ export AWS_SECRET_ACCESS_KEY=abc123", terminalBuffer: "~ $ ls")
+        XCTAssertFalse(out.contains("abc123"))
+        XCTAssertTrue(out.hasSuffix("$ export AWS_SECRET_ACCESS_KEY=•••"))
+    }
+
+    // The zero-hallucination fast path compares the stem against chrome-STRIPPED history commands, so a
+    // chrome-laden stem could never match anything and the path was dead in a real terminal.
+    func testHistoryPrefixMatchNeedsTheChromeStrippedStem() {
+        let buf = "~ $ git status\n~ $ docker compose up -d\n~/proj % doc"
+        let prefix = "~ $ git status\n~/proj % doc"
+        XCTAssertNil(ShellHistory.prefixMatch(currentLine: CompletionCoordinator.shellCurrentLine(prefix),
+                                              buffer: buf))
+        XCTAssertEqual(ShellHistory.prefixMatch(currentLine: CompletionCoordinator.shellTypedCommand(prefix),
+                                                buffer: buf),
+                       "ker compose up -d")
+    }
+
+    // The destructive-command guard tokenizes the JOINED line: with the chrome its first token was
+    // `dario@mac`, never `rm`, so the whole denylist was bypassed at a real shell prompt.
+    func testDangerGuardOnlySeesTheCommandOnceChromeIsStripped() {
+        let prefix = "~ $ ls\ndario@mac ~/proj % rm -rf "
+        XCTAssertFalse(ShellCommandGuard.isDangerous(
+            fullCommand: CompletionCoordinator.shellCurrentLine(prefix) + "/"))
+        XCTAssertTrue(ShellCommandGuard.isDangerous(
+            fullCommand: CompletionCoordinator.shellTypedCommand(prefix) + "/"))
+    }
+
     func testTruncatedAtNewlineKeepsOneLine() {
         XCTAssertEqual(CompletionCoordinator.truncatedAtNewline("sh\nmore"), "sh")
         XCTAssertEqual(CompletionCoordinator.truncatedAtNewline("\n\npush"), "push")

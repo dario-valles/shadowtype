@@ -27,6 +27,63 @@ private final class RewriteActionPayload: NSObject {
     }
 }
 
+// Adaptive back-off for an always-on background app. Nothing used to consult thermalState or Low
+// Power Mode, so Shadowtype ran the identical GPU inference on every typing pause whether the Mac was
+// cool on wall power or already thermally throttled on battery — the difference between "invisible"
+// and "my fan is on and my battery is gone". This maps the two free ProcessInfo signals onto the
+// three knobs AppDelegate already pushes (coordinator.debounce / coordinator.maxTokens /
+// engine.maxContextTokens): fire less often, generate less, prefill less.
+//
+// Pure + static so the mapping is unit-testable without a hot Mac.
+struct PowerPolicy {
+    /// The knobs the policy adapts, in the units AppDelegate pushes them.
+    struct Settings: Equatable {
+        var debounce: TimeInterval
+        var maxTokens: Int
+        var maxContextTokens: Int
+    }
+
+    // `nominal` (not `none`) so a `.none` at a call site can never be read as `Optional.none`.
+    enum Tier { case nominal, moderate, heavy }
+
+    /// `.fair` is the steady state of any laptop doing real work, so treating it as pressure would
+    /// mean throttling almost always; back off from `.serious` up. Low Power Mode is an explicit
+    /// user request to spend less energy, so it earns the same treatment as `.serious` — and it
+    /// never softens `.critical`.
+    static func tier(thermalState: ProcessInfo.ThermalState, lowPower: Bool) -> Tier {
+        switch thermalState {
+        case .critical: return .heavy
+        case .serious:  return .moderate
+        default:        return lowPower ? .moderate : .nominal
+        }
+    }
+
+    /// Adaptation may only make things LIGHTER: the debounce can only grow, tokens/context can only
+    /// shrink, so the user's own settings stay the ceiling. Suggestions are never switched off — a
+    /// silently dead product is worse than a slower one.
+    static func adjust(_ base: Settings,
+                       thermalState: ProcessInfo.ThermalState,
+                       lowPower: Bool) -> Settings {
+        switch tier(thermalState: thermalState, lowPower: lowPower) {
+        case .nominal:
+            return base
+        case .moderate:
+            return lighter(base, debounceScale: 2, debounceCap: 0.6, maxTokens: 12, contextTokens: 1024)
+        case .heavy:
+            return lighter(base, debounceScale: 3, debounceCap: 1.0, maxTokens: 8, contextTokens: 512)
+        }
+    }
+
+    // The caps are absolute, the debounce stretch is relative — but a user who already asked for a
+    // long delay must not be sped up by the cap, hence the max() against the configured value.
+    private static func lighter(_ base: Settings, debounceScale: Double, debounceCap: TimeInterval,
+                                maxTokens: Int, contextTokens: Int) -> Settings {
+        Settings(debounce: max(base.debounce, min(debounceCap, base.debounce * debounceScale)),
+                 maxTokens: min(base.maxTokens, maxTokens),
+                 maxContextTokens: min(base.maxContextTokens, contextTokens))
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     // P0
     let engine = InferenceEngine()
@@ -68,6 +125,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let screenContext = ScreenContextProvider()
     private var ocrSettingObserver: NSObjectProtocol?
     private var appSettingsObserver: NSObjectProtocol?
+    // Thermal pressure / Low Power Mode (see PowerPolicy). Both signals only ever loosen the live
+    // knobs; the stored settings they are derived from are untouched.
+    private var thermalObserver: NSObjectProtocol?
+    private var powerModeObserver: NSObjectProtocol?
     // Per-app "we can't read this app" banner (Google Docs et al). Coordinator posts the trigger; this
     // owns the floating panel + persisted "don't show again" state (AXNudgeStore).
     private let axNudge = AccessibilityNudgeController()
@@ -115,6 +176,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastInputAt = Date()
     private var idleTimer: Timer?
     private var modelIdleUnloaded = false
+
+    // Focus generation whose field we have already warmed (FR-CE-8). Both warm triggers — app activation
+    // and the tracker's own focus-change callback — go through warmFocusIfFocusChanged(), so an app
+    // switch warms exactly once and the per-keystroke kAXValueChanged republishes warm not at all.
+    private var lastWarmedFocusSeq: UInt64?
 
     // Auto-update (UpdateManager): a once-a-day check timer, rescheduled by syncToggles when the
     // "Automatically check for updates" toggle flips. nil when auto-checks are off.
@@ -226,7 +292,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.coordinator.cancel()
             // Let AX focus settle after the activation before reading the caret.
             DispatchQueue.main.async {
-                self.coordinator.warmFocus()
+                self.warmFocusIfFocusChanged()
                 self.refreshBadge()
             }
         }
@@ -248,8 +314,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A left-click on the badge opens the scoped disable/settings menu (Cotypist parity), rebuilt
         // each click so it reflects the current frontmost app + domain.
         badge.menuProvider = { [weak self] in self?.makeBadgeMenu() ?? NSMenu() }
-        // Re-anchor / hide the active-field badge on every focus change (set before start()).
-        contextTracker.onFocusChange = { [weak self] in self?.refreshBadge() }
+        // Re-anchor / hide the active-field badge on every focus change (set before start()), and warm
+        // the KV cache for the newly focused field. The warm used to hang off
+        // NSWorkspace.didActivateApplicationNotification ALONE, so moving between fields WITHIN an app
+        // (compose box → subject → another compose box) never warmed anything and the first keystroke
+        // there always paid a cold prefill. This callback also fires on kAXValueChanged (i.e. every
+        // keystroke), which is exactly why warmFocusIfFocusChanged() gates on the focus SEQUENCE.
+        contextTracker.onFocusChange = { [weak self] in
+            guard let self else { return }
+            self.refreshBadge()
+            self.warmFocusIfFocusChanged()
+        }
         contextTracker.start()
         inputMonitor.start()
         // Global force-activate hotkey (⌃`): same effect as the menu's "Force suggestions here".
@@ -359,6 +434,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateTabDisableForFrontmost()
         }
 
+        // Thermal pressure / Low Power Mode: re-apply the knobs so a hot or battery-saving Mac gets a
+        // longer pause and a shorter generation, and gets its full settings back when it recovers.
+        // Both notifications can be delivered on any thread; queue: .main because every knob they
+        // touch is main-thread-owned (as with the settings observers above).
+        thermalObserver = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.applyPowerPolicy() }
+        powerModeObserver = NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
+        ) { [weak self] _ in self?.applyPowerPolicy() }
+
         // FR-CE-3: the Context length picker writes CompletionLength.defaultsKey then posts this.
         lengthObserver = NotificationCenter.default.addObserver(
             forName: .shadowtypeCompletionLengthChanged, object: nil, queue: .main
@@ -399,6 +485,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // todayCount() applies the local-midnight rollover; there is no daily cap (dailyCap is nil).
         statusItem.setWordCount(wordMeter.todayCount())
+
+        // An API/MCP request counts as activity, exactly like a keystroke: it pushes back the
+        // idle-unload window and lazily reloads a model the idle timer already unloaded. Without this
+        // the API could neither keep the model alive nor wake it — once unloaded, every request failed
+        // at the engine.isLoaded guard until the user physically typed somewhere.
+        coordinator.onExternalActivity = { [weak self] in self?.noteActivityAndReloadIfNeeded() }
 
         // M1: local API server. Started here if the user has flipped the toggle on.
         localAPI.coordinator = coordinator
@@ -497,10 +589,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UserDefaults.standard.object(forKey: "styleProfileEnabled") == nil
             ? true
             : UserDefaults.standard.bool(forKey: "styleProfileEnabled")
-        // General → "Suggestion trigger delay". Default 50 ms when unset; clamp to the slider range.
-        // This is the adaptive-pause FLOOR (see CompletionCoordinator.adaptiveDelay).
-        let delayMs = UserDefaults.standard.object(forKey: "shadowtype.triggerDelayMs") as? Double ?? 50
-        coordinator.debounce = max(0.04, min(0.4, delayMs / 1000))
+        // General → "Suggestion trigger delay" + Context → "Context window size" + the completion-length
+        // preset's token ceiling all land through the thermal/Low-Power policy (see applyPowerPolicy).
+        applyPowerPolicy()
         // General → "Aggressiveness": scales the confirmed-pause threshold on top of the delay floor.
         coordinator.pauseMultiplier = Aggressiveness.current().pauseMultiplier
         // General → "Show active-field indicator" (default ON when unset). Re-evaluate the badge live.
@@ -527,9 +618,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Personalization → "strength" (0...3, default 3 when unset). 0 disables the style hint.
         coordinator.personalizationStrength =
             (UserDefaults.standard.object(forKey: "shadowtype.personalizationStrength") as? Int) ?? 3
-        // Context → "Context window size" (tokens; default 1024 when unset). Drives the engine prefix cap.
-        engine.maxContextTokens =
-            (UserDefaults.standard.object(forKey: "shadowtype.contextWindowTokens") as? Int) ?? 1024
         // Models → "Unload model when idle" (minutes; 0 == Never; default 10 matches the picker). The
         // idle timer reads this.
         idleUnloadMinutes =
@@ -622,10 +710,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applyCompletionLength() {
         let length = CompletionLength.current()
         engine.maxWords = length.maxWords
-        coordinator.maxTokens = length.maxTokens
+        // The preset's token ceiling reaches coordinator.maxTokens through applyPowerPolicy, which may
+        // cap it further under thermal pressure / Low Power Mode.
+        applyPowerPolicy()
         // Longer presets end on a sentence boundary after their grace word-count instead of truncating
         // at the hard maxWords cap (short/medium pass 0 = legacy word-cap-only behaviour).
         engine.stopAtSentenceAfterWords = length.sentenceStopAfterWords
+    }
+
+    /// The user's own settings, read fresh from the store. This is the ceiling PowerPolicy adapts DOWN
+    /// from — deliberately re-derived on every apply instead of snapshotted before a throttle, so a
+    /// setting the user changes WHILE throttled is not clobbered when the Mac cools down again.
+    private func configuredSettings() -> PowerPolicy.Settings {
+        // General → "Suggestion trigger delay". Default 50 ms when unset; clamp to the slider range.
+        // This is the adaptive-pause FLOOR (see CompletionCoordinator.adaptiveDelay).
+        let delayMs = UserDefaults.standard.object(forKey: "shadowtype.triggerDelayMs") as? Double ?? 50
+        // Context → "Context window size" (tokens; default 1024 when unset).
+        let contextTokens =
+            (UserDefaults.standard.object(forKey: "shadowtype.contextWindowTokens") as? Int) ?? 1024
+        return PowerPolicy.Settings(debounce: max(0.04, min(0.4, delayMs / 1000)),
+                                    maxTokens: CompletionLength.current().maxTokens,
+                                    maxContextTokens: contextTokens)
+    }
+
+    /// Push the configured settings through the thermal / Low Power Mode policy into the live knobs.
+    /// Called from syncToggles, applyCompletionLength, and the two power notifications.
+    private func applyPowerPolicy() {
+        let info = ProcessInfo.processInfo
+        let applied = PowerPolicy.adjust(configuredSettings(),
+                                         thermalState: info.thermalState,
+                                         lowPower: info.isLowPowerModeEnabled)
+        coordinator.debounce = applied.debounce
+        coordinator.maxTokens = applied.maxTokens
+        // The context window drives the engine prefix cap AND the coordinator's prompt byte budget —
+        // THE TWO MUST STAY IN SYNC, which is why they are set together here (this is the only place
+        // that knows the effective value). InferenceEngine.generate() front-trims the tokenized prompt
+        // to this cap, and the front of the prompt is the `Context:` header plus every context block,
+        // so a budget bigger than the cap silently throws away the context we just paid to build. See
+        // CompletionCoordinator.promptBudgetBytes.
+        engine.maxContextTokens = applied.maxContextTokens
+        coordinator.promptCharBudget =
+            CompletionCoordinator.promptBudgetBytes(forContextTokens: applied.maxContextTokens)
     }
 
     // FR-LM-1: download+verify the chosen catalog entry, then swap the active model live on the
@@ -721,11 +846,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // Warm the KV cache for the focused field, but only once per focus session (FR-CE-8). Called from the
+    // app-activation observer AND from contextTracker.onFocusChange — the latter is the only signal for a
+    // focus move WITHIN an app, and it also fires on kAXValueChanged (every keystroke), so the sequence
+    // guard is what stops a per-keystroke storm of cold prefills on the inference queue.
+    private func warmFocusIfFocusChanged() {
+        // Also require a resident model: warmFocus() bails on an unloaded engine, and recording the
+        // sequence for a warm that never ran would mark this field warmed for the rest of its focus
+        // session — the launch case, where the model is still loading when focus first resolves.
+        guard enabled, coordinator.isEngineLoaded else { return }
+        let seq = contextTracker.focusChangeSequence
+        guard seq != lastWarmedFocusSeq else { return }
+        lastWarmedFocusSeq = seq
+        coordinator.warmFocus()
+    }
+
     // Unload the resident model after `idleUnloadMinutes` of inactivity (0 == Never). No-op while already
-    // unloaded, mid-reload, or mid-swap (modelReloadInFlight covers both). Main-thread only (the timer
-    // fires on main).
+    // unloaded, mid-reload, mid-swap (modelReloadInFlight covers both), or while an API/MCP request is
+    // decoding — the idle window is measured from keyboard/focus activity plus API requests, but a single
+    // long stream can outlive the window, and unloading under it frees the llama context out from under
+    // the client's own decode. Main-thread only (the timer fires on main).
     private func unloadModelIfIdle() {
         guard idleUnloadMinutes > 0, !modelIdleUnloaded, !modelReloadInFlight,
+              !coordinator.hasInFlightAPIRequests,
               coordinator.isModelLoaded else { return }
         guard Date().timeIntervalSince(lastInputAt) >= Double(idleUnloadMinutes) * 60 else { return }
         coordinator.unloadModel()
@@ -743,7 +886,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let ocrSettingObserver {
             NotificationCenter.default.removeObserver(ocrSettingObserver)
         }
-        for obs in [lengthObserver, selectModelObserver, appSettingsObserver, rewriteHotkeyObserver].compactMap({ $0 }) {
+        for obs in [lengthObserver, selectModelObserver, appSettingsObserver, rewriteHotkeyObserver,
+                    thermalObserver, powerModeObserver].compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(obs)
         }
         idleTimer?.invalidate()
@@ -754,7 +898,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tabSwallow.stop()
         inputMonitor.stop()
         contextTracker.stop()
-        engine.unload()
+        // The engine has no internal locking: every other unload/load is serialized onto the
+        // coordinator's inferenceQueue precisely because freeing the llama context under an in-flight
+        // `llama_decode` is a use-after-free. This used to free it straight on MAIN, so quitting
+        // mid-suggestion was a crash-on-quit. unloadModelAndWait() cancels the running decode, then
+        // performs the unload ON that queue and blocks until it is done (the process is exiting; an
+        // async unload would just lose the race).
+        coordinator.unloadModelAndWait()
     }
 
     // MARK: - Accessibility gate (FR-KC-1)

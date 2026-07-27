@@ -102,6 +102,33 @@ final class RewriteActionTests: XCTestCase {
         }
     }
 
+    // ⌘R "redo" re-issues the SAME selection + action, so the prompt is identical and the sampler is
+    // rebuilt per generate(); with a fixed seed the redo returned byte-identical text (a silent no-op).
+    // Successive parameter builds must therefore differ in seed — and in seed only.
+    func testRewriteParamsVarySeedPerInvocation() {
+        let first = SamplingParams.rewriteDefaults()
+        let second = SamplingParams.rewriteDefaults()
+        XCTAssertNotEqual(first.seed, second.seed, "redo must sample from a different seed")
+
+        var normalized = second
+        normalized.seed = first.seed
+        XCTAssertEqual(first, normalized, "only the seed may vary between rewrite invocations")
+
+        // The rest of the rewrite chain: ghost sampling with the ghost stop policy OFF.
+        XCTAssertEqual(first.temperature, SamplingParams.ghostDefaults.temperature)
+        XCTAssertFalse(first.useEngineStopPolicy)
+        XCTAssertEqual(first.stopStrings, ["\nText:", "\nText (", "\nRewritten:"])
+    }
+
+    // The ghost path must stay deterministic: same prompt → same suggestion, or inline ghost text
+    // flickers between keystrokes. Varying the rewrite seed must not have leaked into ghostDefaults.
+    func testGhostDefaultsKeepFixedSeed() {
+        XCTAssertEqual(SamplingParams.ghostDefaults.seed, 0xACE1)
+        _ = SamplingParams.rewriteDefaults()
+        XCTAssertEqual(SamplingParams.ghostDefaults.seed, 0xACE1,
+                       "a rewrite must not mutate the ghost seed")
+    }
+
     // The localized halt markers (`Text (in Spanish):`, `Rewritten (in Spanish):`) must cut runaway
     // just like the plain ones — otherwise the model's next fresh exemplar block leaks into the result.
     func testCleanOutputStopsAtLocalizedTextMarker() {

@@ -45,6 +45,30 @@ final class ConfidenceGateTests: XCTestCase {
         XCTAssertTrue(gate.meanRejected)
     }
 
+    // With a single sample the geometric mean IS the first token's probability, so letting the mean
+    // reject there would quietly re-decide the first token at the mean's (looser) threshold instead of
+    // the first-token gate's. It only starts speaking from the second token.
+    func testMeanGateStaysSilentUntilASecondToken() {
+        var gate = ConfidenceGate(firstTokenMinProb: 0.05, meanMinProb: 0.03)
+        gate.record(prob: 0.01, isFirst: true)
+        XCTAssertTrue(gate.firstTokenRejected)     // the first-token gate owns this one…
+        XCTAssertFalse(gate.meanRejected)          // …and the mean does not double up on it
+        gate.record(prob: 0.01, isFirst: false)
+        XCTAssertTrue(gate.meanRejected)
+    }
+
+    // The mean is read PER TOKEN so the decode can be cut at the point the model came apart. Read only
+    // after the fact (as it used to be) the sole remaining options are retracting a ghost the user is
+    // already reading, or nothing — and the code refused the retract, so it did nothing.
+    func testRunningMeanTripsMidStreamAfterAConfidentStart() {
+        var gate = ConfidenceGate(firstTokenMinProb: 0.05, meanMinProb: 0.03)
+        gate.record(prob: 0.80, isFirst: true)
+        gate.record(prob: 0.40, isFirst: false)
+        XCTAssertFalse(gate.meanRejected)          // a healthy completion keeps decoding…
+        gate.record(prob: 1e-5, isFirst: false)    // …until it collapses
+        XCTAssertTrue(gate.meanRejected)
+    }
+
     func testOnlyFirstContentTokenSetsFirstProb() {
         var gate = ConfidenceGate(firstTokenMinProb: 0.10, meanMinProb: 0.0)
         gate.record(prob: 0.5, isFirst: true)

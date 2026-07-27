@@ -5,6 +5,10 @@
 // (CJK 。！？, Arabic ۔ ؟, Devanagari danda ।॥, Ethiopic ።). No model/format dependency, so the
 // whole policy is unit-tested without loading a model. Consulted by InferenceEngine's ghost decode
 // loop via firstStopIndex(in:before:).
+//
+// It also owns the WORD-boundary half of the same problem — isSpacelessScript — because the ghost
+// decode loop and MidWordHealing both need one answer to "does this script separate words with
+// whitespace?" and that answer belongs next to the terminator table, not duplicated in two files.
 enum SentenceBoundary {
 
     // Terminators that ALWAYS end a sentence — no Latin-period ambiguity. Clause separators
@@ -29,6 +33,38 @@ enum SentenceBoundary {
         "z.b", "d.h", "u.a", "bzw", "ggf", "usw", "ca", "approx", "inc", "ltd", "co",
         "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sept", "sep", "oct", "nov", "dec",
     ]
+
+    // Is `c` written in a script that does NOT separate words with whitespace? Such a character is a
+    // word boundary in its own right.
+    //
+    // Everything downstream of the decode loop used to key off whitespace alone, which made those
+    // languages structurally broken: nothing ever streamed (the whole completion escaped only via the
+    // end-of-run fallback), the word counter never advanced so BOTH maxWords and
+    // stopAtSentenceAfterWords were unreachable, and the completion became one all-or-nothing event
+    // against the 400 ms deadline with no early first-token render. MidWordHealing has the mirror
+    // problem: with no interior spaces the trailing word-char run is the whole clause.
+    //
+    // Scalar ranges rather than a Unicode-script dependency. Hangul is deliberately ABSENT — Korean
+    // does put spaces between words, so the whitespace rule already works there.
+    static func isSpacelessScript(_ c: Character) -> Bool {
+        guard let v = c.unicodeScalars.first?.value else { return false }
+        switch v {
+        case 0x0E00...0x0E7F,     // Thai
+             0x0E80...0x0EFF,     // Lao
+             0x1000...0x109F,     // Myanmar
+             0x1780...0x17FF,     // Khmer
+             0x3040...0x30FF,     // Hiragana + Katakana
+             0x31F0...0x31FF,     // Katakana phonetic extensions
+             0x3400...0x4DBF,     // CJK Unified Ideographs Extension A
+             0x4E00...0x9FFF,     // CJK Unified Ideographs
+             0xF900...0xFAFF,     // CJK Compatibility Ideographs
+             0xFF66...0xFF9D,     // Halfwidth katakana
+             0x20000...0x2FA1F:   // CJK Ext B–F + Compatibility Ideographs Supplement
+            return true
+        default:
+            return false
+        }
+    }
 
     // Does the terminator `c` genuinely end a sentence, given the text immediately before it
     // (`before`, excluding the terminator) and the character right after (nil when not yet decoded —

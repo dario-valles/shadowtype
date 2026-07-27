@@ -27,7 +27,8 @@ spell-check: invisible until useful, never in the way.
 - **Local OpenAI-compatible API + MCP bridge** — Shadowtype exposes a local HTTP API and ships an
   MCP bridge so editors and agents (Claude Code, Cursor, any MCP host) can use the on-device model.
 - **Multi-model catalog** — a curated set of GGUF models with RAM-fit gating, plus bring-your-own
-  GGUF import. Models are downloaded on demand and SHA-256-verified; none are bundled.
+  GGUF import. Models are downloaded on demand and checked against the publisher's SHA-256 when one
+  is published; none are bundled.
 - **Context-aware** — optional local screen OCR, clipboard context, and learned typing style feed
   the model. Per-app / per-domain enable/disable. Password and secure fields are never read.
 

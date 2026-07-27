@@ -53,6 +53,38 @@ final class SentenceBoundaryTests: XCTestCase {
         XCTAssertFalse(stop(",", "hello", " "))     // ASCII comma
     }
 
+    // MARK: - Space-less scripts (word boundaries)
+    // The ghost decode loop's word flush and word cap keyed off whitespace alone, so for these
+    // languages nothing ever streamed and wordCount stayed 0 — maxWords and stopAtSentenceAfterWords
+    // were both unreachable and the completion ran to maxTokens as one all-or-nothing event.
+
+    func testSpacelessScriptsAreWordBoundaries() {
+        for c in "資料準備日本語" { XCTAssertTrue(SentenceBoundary.isSpacelessScript(c), "CJK: \(c)") }
+        for c in "もうひらがな" { XCTAssertTrue(SentenceBoundary.isSpacelessScript(c), "hiragana: \(c)") }
+        for c in "カタカナ" { XCTAssertTrue(SentenceBoundary.isSpacelessScript(c), "katakana: \(c)") }
+        for c in "สวัสดีครับ" { XCTAssertTrue(SentenceBoundary.isSpacelessScript(c), "Thai: \(c)") }
+        for c in "ຂໍ້ຄວາມ" { XCTAssertTrue(SentenceBoundary.isSpacelessScript(c), "Lao: \(c)") }
+        for c in "សួស្តី" { XCTAssertTrue(SentenceBoundary.isSpacelessScript(c), "Khmer: \(c)") }
+        XCTAssertTrue(SentenceBoundary.isSpacelessScript("𠀋"), "CJK Extension B (astral plane)")
+    }
+
+    func testSpacedScriptsAreNotWordBoundaries() {
+        for c in "hello wörld" { XCTAssertFalse(SentenceBoundary.isSpacelessScript(c), "Latin: \(c)") }
+        for c in "привет" { XCTAssertFalse(SentenceBoundary.isSpacelessScript(c), "Cyrillic: \(c)") }
+        for c in "مرحبا" { XCTAssertFalse(SentenceBoundary.isSpacelessScript(c), "Arabic: \(c)") }
+        // Korean DOES space its words, so the whitespace rule already covers it — treating each
+        // syllable block as a word would cap a Hangul completion at maxWords syllables.
+        for c in "안녕하세요" { XCTAssertFalse(SentenceBoundary.isSpacelessScript(c), "Hangul: \(c)") }
+    }
+
+    func testCJKPunctuationIsNotAWordCharacter() {
+        // U+3000–U+303F is punctuation, not script: 。 and 、 must stay with the terminator policy
+        // rather than being flushed as a word of their own.
+        XCTAssertFalse(SentenceBoundary.isSpacelessScript("。"))
+        XCTAssertFalse(SentenceBoundary.isSpacelessScript("、"))
+        XCTAssertFalse(SentenceBoundary.isSpacelessScript("！"))
+    }
+
     func testFirstStopIndexScansWithContext() {
         // "Mr. Smith arrived." — the first period (Mr.) is not a stop; the last one is.
         let piece = "Mr. Smith arrived."

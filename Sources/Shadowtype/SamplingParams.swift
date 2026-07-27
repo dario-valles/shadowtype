@@ -72,6 +72,32 @@ struct SamplingParams: Sendable, Equatable {
         fim: nil
     )
 
+    // Monotonic counter behind `rewriteDefaults()`. Language mode v5 and bumped only from the rewrite
+    // trigger (main thread), so no lock; a torn increment would at worst repeat one seed, never corrupt.
+    private static var rewriteSeedCounter: UInt32 = 0
+
+    // Sampling for a selection rewrite. Keeps the ghost chain's low temperature + repeat penalty (good
+    // for faithful rewrites) but turns the engine stop policy OFF: a rewrite is a FULL multi-sentence
+    // transformation, and the ghost policy's maxWords cap + first-sentence/newline stop truncated a
+    // multi-sentence selection to just the first ~5 words ("Have you installed the beta"). Bounded
+    // instead by maxTokens + the few-shot block markers (`\nText (` also catches the language-tagged
+    // `Text (in Spanish):` variant).
+    //
+    // A FUNCTION, not a `static let`, because the seed must CHANGE per invocation: ⌘R "redo rewrite"
+    // re-issues the identical selection + action, so the prompt is identical, and the sampler chain
+    // (including `llama_sampler_init_dist(seed)`) is rebuilt inside every generate() call — with the
+    // fixed ghost seed the redo returned byte-identical text, i.e. a silent no-op. `ghostDefaults.seed`
+    // itself stays fixed on purpose: identical prompt → identical ghost is what keeps inline
+    // suggestions stable instead of flickering between keystrokes.
+    static func rewriteDefaults() -> SamplingParams {
+        var p = ghostDefaults
+        p.useEngineStopPolicy = false
+        p.stopStrings = ["\nText:", "\nText (", "\nRewritten:"]
+        rewriteSeedCounter &+= 1
+        p.seed = ghostDefaults.seed &+ rewriteSeedCounter
+        return p
+    }
+
     // OpenAI-ish defaults for API requests: temp 0.7, no top-k (we still apply a high cap to keep
     // candidate scans cheap), no repeat penalty (clients add their own). `apiClamped` overrides
     // these from the request body and re-flags `greedy` when temperature is exactly 0.
