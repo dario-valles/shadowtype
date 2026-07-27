@@ -696,15 +696,39 @@ final class EditContextTracker {
     // holds the conversation) and reads its full text. nil for native apps / no web area / secure
     // fields — the caller then falls back to OCR. Best-effort: never throws, never returns wrong text.
     func pageContextText() -> String? {
-        guard let element = currentFocusedElement(), !isSecure(element),
-              let webArea = AXTextProbe.topWebArea(from: element) else { return nil }
-        return AXTextProbe.webAreaFullText(of: webArea)
+        guard let element = currentFocusedElement(), !isSecure(element) else {
+            return pageContextText(from: nil)
+        }
+        return pageContextText(from: AXTextProbe.topWebArea(from: element))
     }
 
     /// Same text from a snapshot, reusing the web area it already walked up to.
     func pageContextText(in snapshot: FocusSnapshot) -> String? {
-        guard !snapshot.isSecure, let webArea = snapshot.webArea else { return nil }
-        return AXTextProbe.webAreaFullText(of: webArea)
+        pageContextText(from: snapshot.isSecure ? nil : snapshot.webArea)
+    }
+
+    private func pageContextText(from webArea: AXUIElement?) -> String? {
+        guard let webArea else {
+            return Self.loggedPageContextText(webAreaFound: false, text: nil, log: Diag.log)
+        }
+        return Self.loggedPageContextText(
+            webAreaFound: true,
+            text: AXTextProbe.webAreaFullText(of: webArea),
+            log: Diag.log)
+    }
+
+    static func loggedPageContextText(webAreaFound: Bool, text: String?,
+                                      log: (String) -> Void) -> String? {
+        guard webAreaFound else {
+            log("pagectx: no web area")
+            return nil
+        }
+        guard let text, !text.isEmpty else {
+            log("pagectx: web area empty")
+            return nil
+        }
+        log("pagectx: ok chars=\(text.count)")
+        return text
     }
 
     // True when the focused field is STRUCTURED input (a search box, or a browser's address/omnibox /

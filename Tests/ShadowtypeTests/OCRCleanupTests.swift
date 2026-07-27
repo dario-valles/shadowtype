@@ -1,11 +1,25 @@
-// OCRCleanupTests — pure-function coverage for the FR-CTX-1 screen-OCR cleanup helpers that feed the
-// completion prompt: denoise (chrome filtering) and removingDraftEcho (de-duplicating the user's own
-// draft). No ScreenCaptureKit / Vision needed — runs under `swift test`.
+// OCRCleanupTests — pure-function coverage for the FR-CTX-1 screen-OCR selection and cleanup helpers
+// that feed the completion prompt. No ScreenCaptureKit / Vision needed — runs under `swift test`.
 import XCTest
 import NaturalLanguage
 @testable import Shadowtype
 
 final class OCRCleanupTests: XCTestCase {
+
+    // MARK: - focused window selection
+
+    func testFocusedWindowPrefersLargestNormalWindowOverElectronChrome() {
+        let candidates: [(layer: Int, area: Double)] = [
+            (layer: 26, area: 1512 * 33),
+            (layer: 0, area: 1512 * 32),
+            (layer: 0, area: 1512 * 949),
+        ]
+
+        XCTAssertEqual(ScreenContextProvider.preferredWindowIndex(in: candidates), 2)
+
+        let floatingOnly = [(layer: 26, area: 100.0), (layer: 8, area: 200.0)]
+        XCTAssertEqual(ScreenContextProvider.preferredWindowIndex(in: floatingOnly), 1)
+    }
 
     // MARK: - denoise
 

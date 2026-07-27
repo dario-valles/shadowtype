@@ -59,4 +59,9 @@ final class LineRemainderClassifyTests: XCTestCase {
         XCTAssertEqual(AXTextProbe.classifyLineRemainder(" x"), .midLine)
         XCTAssertEqual(AXTextProbe.classifyLineRemainder("\tx"), .midLine)
     }
+
+    func testPageContextCapKeepsComposerAdjacentTail() {
+        let page = "oldest-message\nolder-message\nResponder en español"
+        XCTAssertEqual(AXTextProbe.recentText(page, maxChars: 20), "Responder en español")
+    }
 }

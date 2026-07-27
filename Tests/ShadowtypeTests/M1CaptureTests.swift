@@ -101,6 +101,26 @@ final class M1CaptureTests: XCTestCase {
         XCTAssertNil(tracker.focusedElement(), "no focused field / untrusted -> nil, no crash")
     }
 
+    func testPageContextLoggingReportsOutcomesWithoutContent() {
+        var logs: [String] = []
+        let log: (String) -> Void = { logs.append($0) }
+
+        XCTAssertNil(EditContextTracker.loggedPageContextText(
+            webAreaFound: false, text: nil, log: log))
+        XCTAssertNil(EditContextTracker.loggedPageContextText(
+            webAreaFound: true, text: "", log: log))
+        let pageText = "private page payload"
+        XCTAssertEqual(EditContextTracker.loggedPageContextText(
+            webAreaFound: true, text: pageText, log: log), pageText)
+
+        XCTAssertEqual(logs, [
+            "pagectx: no web area",
+            "pagectx: web area empty",
+            "pagectx: ok chars=20",
+        ])
+        XCTAssertFalse(logs.joined().contains(pageText))
+    }
+
     // Injector with a nil element falls back to the Unicode path and reports placement (FR-IN-3).
     // Empty text is a no-op success. Neither requires AX writes, so both are CI-safe.
     func testInjectorEmptyTextIsNoOpSuccess() {
