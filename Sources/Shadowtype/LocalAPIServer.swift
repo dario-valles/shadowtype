@@ -14,6 +14,7 @@
 import Foundation
 import Darwin
 import AppKit
+import CryptoKit
 
 final class LocalAPIServer {
 
@@ -21,6 +22,8 @@ final class LocalAPIServer {
 
     static let portCandidates: [Int] = [5666, 5667, 5668, 5669, 5670]
     static let maxPendingDepth: Int = 4
+    static let defaultHeaderReceiveTimeout: TimeInterval = 5
+    static let defaultBodyReceiveTimeout: TimeInterval = 10
 
     // Human-readable all-ports-busy reason — surfaced verbatim in Settings, so phrase it for users.
     static var allPortsBusyMessage: String {
@@ -33,6 +36,11 @@ final class LocalAPIServer {
         return dir + "/Shadowtype/api.sock"
     }
 
+    static var discoveryPath: String {
+        let dir = (udsPath as NSString).deletingLastPathComponent
+        return dir + "/api-endpoint.json"
+    }
+
     // --- State ------------------------------------------------------------------------------
 
     private(set) var isRunning = false
@@ -43,6 +51,15 @@ final class LocalAPIServer {
     private var udsFD: Int32 = -1
     private var tcpAcceptSource: DispatchSourceRead?
     private var udsAcceptSource: DispatchSourceRead?
+    private let configuredPorts: [Int]
+    private let configuredUDSPath: String?
+    private let configuredDiscoveryPath: String
+    private let apiKeyProvider: () -> String?
+    private let headerReceiveTimeout: TimeInterval
+    private let bodyReceiveTimeout: TimeInterval
+    private var activeAPIKey: String?
+    private var publishedDiscovery = false
+    private var publishedDiscoveryData: Data?
 
     // Worker queue per connection — concurrent because each connection is just I/O + a single
     // inferenceQueue.async dispatch; cheap to spawn but bounded by `pendingDepth`.
@@ -55,6 +72,29 @@ final class LocalAPIServer {
     weak var coordinator: CompletionCoordinator?
     weak var modelManager: ModelManager?
 
+    convenience init() {
+        self.init(portCandidates: Self.portCandidates,
+                  udsPath: Self.udsPath,
+                  discoveryPath: Self.discoveryPath,
+                  apiKeyProvider: APIKeyStore.verifiedAPIKey,
+                  headerReceiveTimeout: Self.defaultHeaderReceiveTimeout,
+                  bodyReceiveTimeout: Self.defaultBodyReceiveTimeout)
+    }
+
+    init(portCandidates: [Int],
+         udsPath: String?,
+         discoveryPath: String,
+         apiKeyProvider: @escaping () -> String?,
+         headerReceiveTimeout: TimeInterval = LocalAPIServer.defaultHeaderReceiveTimeout,
+         bodyReceiveTimeout: TimeInterval = LocalAPIServer.defaultBodyReceiveTimeout) {
+        self.configuredPorts = portCandidates
+        self.configuredUDSPath = udsPath
+        self.configuredDiscoveryPath = discoveryPath
+        self.apiKeyProvider = apiKeyProvider
+        self.headerReceiveTimeout = headerReceiveTimeout
+        self.bodyReceiveTimeout = bodyReceiveTimeout
+    }
+
     // --- Public API -------------------------------------------------------------------------
 
     // Start TCP + UDS listeners. Idempotent — second call is a no-op while running. Returns the
@@ -63,12 +103,17 @@ final class LocalAPIServer {
     func start() -> Int? {
         if isRunning { return boundPort }
         lastError = nil
+        guard let apiKey = apiKeyProvider(), APIKeyStore.isValidAPIKey(apiKey) else {
+            lastError = "Could not securely store the local API key"
+            return nil
+        }
+        activeAPIKey = apiKey
 
         // TCP — cycle through candidate ports until one binds.
-        for port in Self.portCandidates {
-            if let fd = bindTCP(port: port) {
-                tcpFD = fd
-                boundPort = port
+        for port in configuredPorts {
+            if let binding = bindTCP(port: port) {
+                tcpFD = binding.fd
+                boundPort = binding.port
                 break
             }
         }
@@ -76,19 +121,31 @@ final class LocalAPIServer {
             // Leave state fully stopped: isRunning stays false, no FDs were kept, no accept sources
             // started. Callers read `lastError` to tell the user why start() returned nil.
             lastError = Self.allPortsBusyMessage
+            activeAPIKey = nil
             return nil
         }
 
-        // UDS — best-effort. If the UDS bind fails (sandbox / permissions / stale path), the
-        // server still serves TCP; we just log and continue. Stale paths from a previous run are
-        // unlinked first.
-        udsFD = bindUDS(path: Self.udsPath)
-        if udsFD < 0 {
-            NSLog("Shadowtype: LocalAPIServer UDS bind failed at \(Self.udsPath); TCP only")
+        if let path = configuredUDSPath {
+            udsFD = bindUDS(path: path)
+            if udsFD < 0 {
+                NSLog("Shadowtype: LocalAPIServer UDS security/bind failed at \(path); TCP only")
+            }
+        }
+
+        guard let port = boundPort,
+              publishDiscovery(port: port, apiKey: apiKey) else {
+            lastError = "Could not securely publish the local API endpoint"
+            closeBoundSockets()
+            boundPort = nil
+            activeAPIKey = nil
+            return nil
         }
 
         startAccept()
         isRunning = true
+        NotificationCenter.default.addObserver(self,
+            selector: #selector(handleAPIKeyChanged(_:)),
+            name: .shadowtypeAPIKeyDidChange, object: nil)
         observeSleepWake()
         return boundPort
     }
@@ -98,9 +155,13 @@ final class LocalAPIServer {
         tcpAcceptSource?.cancel(); tcpAcceptSource = nil
         udsAcceptSource?.cancel(); udsAcceptSource = nil
         if tcpFD >= 0 { close(tcpFD); tcpFD = -1 }
-        // Only unlink the socket path if WE bound it — a server that never started (e.g. all ports
-        // busy) must not delete a live instance's UDS socket from its deinit.
-        if udsFD >= 0 { close(udsFD); udsFD = -1; unlink(Self.udsPath) }
+        if udsFD >= 0 {
+            close(udsFD)
+            udsFD = -1
+            if let path = configuredUDSPath { unlink(path) }
+        }
+        removePublishedDiscovery()
+        activeAPIKey = nil
         boundPort = nil
         NotificationCenter.default.removeObserver(self)
     }
@@ -115,7 +176,7 @@ final class LocalAPIServer {
 
     // --- TCP bind ---------------------------------------------------------------------------
 
-    private func bindTCP(port: Int) -> Int32? {
+    private func bindTCP(port: Int) -> (fd: Int32, port: Int)? {
         let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
         if fd < 0 { return nil }
 
@@ -138,16 +199,31 @@ final class LocalAPIServer {
         }
         if bindStatus < 0 { close(fd); return nil }
         if Darwin.listen(fd, 16) < 0 { close(fd); return nil }
-        return fd
+        var actual = addr
+        var actualLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameStatus = withUnsafeMutablePointer(to: &actual) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                getsockname(fd, sa, &actualLen)
+            }
+        }
+        guard nameStatus == 0 else { close(fd); return nil }
+        return (fd, Int(UInt16(bigEndian: actual.sin_port)))
     }
 
     // --- UDS bind ---------------------------------------------------------------------------
 
     private func bindUDS(path: String) -> Int32 {
-        // Ensure parent dir exists.
         let dir = (path as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        unlink(path)   // remove any stale node from a previous run
+        guard path.utf8.count < MemoryLayout.size(ofValue: sockaddr_un().sun_path),
+              ensureProtectedDirectory(dir) else { return -1 }
+        var stale = stat()
+        if lstat(path, &stale) == 0 {
+            guard stale.st_uid == geteuid(),
+                  stale.st_mode & S_IFMT == S_IFSOCK,
+                  unlink(path) == 0 else { return -1 }
+        } else if errno != ENOENT {
+            return -1
+        }
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         if fd < 0 { return -1 }
@@ -156,12 +232,11 @@ final class LocalAPIServer {
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        // Copy path bytes into the fixed-size sun_path tuple. Truncate at 103 chars (sun_path
-        // is 104 bytes including the nul) — paths longer than that are rejected by the kernel.
-        let pathBytes = path.utf8.prefix(103)
+        let pathBytes = Array(path.utf8)
+        let pathCapacity = MemoryLayout.size(ofValue: addr.sun_path)
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            ptr.withMemoryRebound(to: CChar.self, capacity: 104) { cptr in
-                memset(cptr, 0, 104)
+            ptr.withMemoryRebound(to: CChar.self, capacity: pathCapacity) { cptr in
+                memset(cptr, 0, pathCapacity)
                 for (i, b) in pathBytes.enumerated() { cptr[i] = CChar(bitPattern: b) }
             }
         }
@@ -173,11 +248,131 @@ final class LocalAPIServer {
             }
         }
         if bindStatus < 0 { close(fd); return -1 }
-        // Restrict to owner only — the kernel uses filesystem perms for connect() auth, so this
-        // IS the auth gate for UDS. 0600 = read/write for owner, nothing for group/world.
-        chmod(path, 0o600)
-        if Darwin.listen(fd, 16) < 0 { close(fd); return -1 }
+        guard chmod(path, 0o600) == 0,
+              verifyNode(path: path, type: S_IFSOCK, mode: 0o600),
+              Darwin.listen(fd, 16) == 0 else {
+            close(fd)
+            unlink(path)
+            return -1
+        }
         return fd
+    }
+
+    private func ensureProtectedDirectory(_ path: String) -> Bool {
+        var info = stat()
+        if lstat(path, &info) == 0 {
+            guard info.st_uid == geteuid(),
+                  info.st_mode & S_IFMT == S_IFDIR else { return false }
+        } else {
+            guard errno == ENOENT else { return false }
+            do {
+                try FileManager.default.createDirectory(atPath: path,
+                                                        withIntermediateDirectories: true,
+                                                        attributes: [.posixPermissions: 0o700])
+            } catch {
+                return false
+            }
+            guard lstat(path, &info) == 0,
+                  info.st_uid == geteuid(),
+                  info.st_mode & S_IFMT == S_IFDIR else { return false }
+        }
+        guard chmod(path, 0o700) == 0 else { return false }
+        return verifyNode(path: path, type: S_IFDIR, mode: 0o700)
+    }
+
+    private func verifyNode(path: String, type: mode_t, mode: mode_t) -> Bool {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return false }
+        return info.st_uid == geteuid()
+            && info.st_mode & S_IFMT == type
+            && info.st_mode & 0o777 == mode
+    }
+
+    private func publishDiscovery(port: Int, apiKey: String) -> Bool {
+        let dir = (configuredDiscoveryPath as NSString).deletingLastPathComponent
+        guard ensureProtectedDirectory(dir) else { return false }
+        let object: [String: Any] = ["version": 1, "port": port, "api_key": apiKey]
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return false }
+        let temp = dir + "/.api-endpoint-\(UUID().uuidString).tmp"
+        let fd = open(temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { return false }
+        var succeeded = writeFile(fd: fd, data: data)
+        if succeeded { succeeded = fsync(fd) == 0 }
+        if close(fd) != 0 { succeeded = false }
+        guard succeeded,
+              chmod(temp, 0o600) == 0,
+              verifyNode(path: temp, type: S_IFREG, mode: 0o600),
+              rename(temp, configuredDiscoveryPath) == 0,
+              verifyNode(path: configuredDiscoveryPath, type: S_IFREG, mode: 0o600) else {
+            unlink(temp)
+            return false
+        }
+        publishedDiscovery = true
+        publishedDiscoveryData = data
+        return true
+    }
+
+    private func writeFile(fd: Int32, data: Data) -> Bool {
+        var offset = 0
+        return data.withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else { return data.isEmpty }
+            while offset < bytes.count {
+                let amount = Darwin.write(fd, base.advanced(by: offset), bytes.count - offset)
+                if amount > 0 {
+                    offset += amount
+                } else if amount < 0, errno == EINTR {
+                    continue
+                } else {
+                    return false
+                }
+            }
+            return true
+        }
+    }
+
+    private func removePublishedDiscovery() {
+        guard publishedDiscovery else { return }
+        if let expected = publishedDiscoveryData,
+           readProtectedFile(configuredDiscoveryPath) == expected {
+            unlink(configuredDiscoveryPath)
+        }
+        publishedDiscovery = false
+        publishedDiscoveryData = nil
+    }
+
+    private func readProtectedFile(_ path: String) -> Data? {
+        let fd = open(path, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              info.st_uid == geteuid(),
+              info.st_mode & S_IFMT == S_IFREG,
+              info.st_mode & 0o777 == 0o600,
+              info.st_size >= 0, info.st_size <= 4096 else { return nil }
+        var output = Data()
+        var buffer = [UInt8](repeating: 0, count: 512)
+        while output.count < Int(info.st_size) {
+            let amount = Darwin.read(fd, &buffer, min(buffer.count, Int(info.st_size) - output.count))
+            if amount > 0 {
+                output.append(buffer, count: amount)
+            } else if amount < 0, errno == EINTR {
+                continue
+            } else {
+                return nil
+            }
+        }
+        return output
+    }
+
+    private func closeBoundSockets() {
+        if tcpFD >= 0 { close(tcpFD); tcpFD = -1 }
+        if udsFD >= 0 {
+            close(udsFD)
+            udsFD = -1
+            if let path = configuredUDSPath { unlink(path) }
+        }
+        removePublishedDiscovery()
     }
 
     // --- Accept loop --------------------------------------------------------------------------
@@ -214,71 +409,126 @@ final class LocalAPIServer {
         var yes: Int32 = 1
         setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
 
+        let admitted: Bool = stateQueue.sync {
+            if pendingDepth >= Self.maxPendingDepth { return false }
+            pendingDepth += 1
+            return true
+        }
+        guard admitted else {
+            LocalHTTPParser.writeResponse(to: clientFD, status: 503, reason: "Service Unavailable",
+                                          body: errorJSON("server busy"))
+            close(clientFD)
+            return
+        }
+
         workerQueue.async { [weak self] in
-            self?.handleConnection(fd: clientFD, isUDS: isUDS)
+            guard let self else {
+                close(clientFD)
+                return
+            }
+            self.handleConnection(fd: clientFD, isUDS: isUDS)
         }
     }
 
     // --- Request handling ---------------------------------------------------------------------
 
     private func handleConnection(fd: Int32, isUDS: Bool) {
-        defer { close(fd) }
+        defer {
+            close(fd)
+            stateQueue.sync { pendingDepth -= 1 }
+        }
 
-        let req: HTTPRequest?
+        guard let request = readRequest(fd: fd) else { return }
+        let expectsFollowup = handleParsedRequest(request, fd: fd, isUDS: isUDS,
+                                                  identityAllowed: true)
+        if expectsFollowup, let followup = readRequest(fd: fd) {
+            _ = handleParsedRequest(followup, fd: fd, isUDS: isUDS,
+                                    identityAllowed: false)
+        }
+    }
+
+    private func readRequest(fd: Int32) -> HTTPRequest? {
         do {
-            req = try LocalHTTPParser.read(from: fd)
+            let started = DispatchTime.now()
+            return try LocalHTTPParser.read(
+                from: fd,
+                headerDeadline: started + headerReceiveTimeout,
+                bodyDeadline: started + bodyReceiveTimeout
+            )
         } catch LocalHTTPError.clientClosed {
-            return
+            return nil
+        } catch LocalHTTPError.deadlineExceeded {
+            LocalHTTPParser.writeResponse(to: fd, status: 408, reason: "Request Timeout",
+                                          body: errorJSON("request receive deadline exceeded"))
+            return nil
         } catch {
             LocalHTTPParser.writeResponse(to: fd, status: 400, reason: "Bad Request",
                                           body: errorJSON("malformed request"))
-            return
+            return nil
         }
-        guard let req else { return }
+    }
 
-        // CORS preflight short-circuit so browsers don't trip on the auth gate.
+    @discardableResult
+    private func handleParsedRequest(_ req: HTTPRequest,
+                                     fd: Int32,
+                                     isUDS: Bool,
+                                     identityAllowed: Bool) -> Bool {
+        if !isUDS, !Self.isLoopbackHost(req.header("Host")) {
+            LocalHTTPParser.writeResponse(to: fd, status: 421, reason: "Misdirected Request",
+                                          body: errorJSON("Host must be loopback"))
+            return false
+        }
+        if let origin = req.header("Origin"), !Self.isAllowedOrigin(origin) {
+            LocalHTTPParser.writeResponse(to: fd, status: 403, reason: "Forbidden",
+                                          body: errorJSON("Origin must be loopback"))
+            return false
+        }
+
         if req.method.uppercased() == "OPTIONS" {
+            guard !isUDS, validPreflight(req) else {
+                LocalHTTPParser.writeResponse(to: fd, status: 403, reason: "Forbidden",
+                                              body: errorJSON("invalid CORS preflight"))
+                return false
+            }
             LocalHTTPParser.writeResponse(to: fd, status: 204, reason: "No Content",
                                           headers: corsHeaders(req: req))
-            return
+            return false
+        }
+
+        if identityAllowed, !isUDS,
+           req.method.uppercased() == "GET", req.path == "/v1/identity" {
+            return handleIdentity(request: req, fd: fd)
         }
 
         // Auth: UDS bypass (filesystem perm gate); TCP requires Bearer match.
         if !isUDS {
-            let configured = APIKeyStore.ensureAPIKey()
+            guard let configured = currentAPIKey() else {
+                LocalHTTPParser.writeResponse(to: fd, status: 503, reason: "Service Unavailable",
+                                              body: errorJSON("API authentication unavailable"))
+                return false
+            }
             let presented: String? = {
                 guard let h = req.header("Authorization"),
-                      h.lowercased().hasPrefix("bearer ") else { return nil }
-                return String(h.dropFirst("bearer ".count)).trimmingCharacters(in: .whitespaces)
+                      h.count > "Bearer ".count,
+                      h.prefix("Bearer ".count).caseInsensitiveCompare("Bearer ") == .orderedSame
+                else { return nil }
+                let token = String(h.dropFirst("Bearer ".count))
+                guard APIKeyStore.isValidAPIKey(token) else { return nil }
+                return token
             }()
             let authorized = presented.map { Self.constantTimeEquals($0, configured) } ?? false
             if !authorized {
                 LocalHTTPParser.writeResponse(to: fd, status: 401, reason: "Unauthorized",
                                               headers: corsHeaders(req: req),
                                               body: errorJSON("invalid bearer token"))
-                return
+                return false
             }
         }
-
-        // Backpressure: cap simultaneous queued requests so a misbehaving client can't pile up
-        // minutes of work behind ghost text. 503 is the standard "try again later" signal; clients
-        // (Cursor, llm-cli) handle it with automatic retry/backoff.
-        let admitted: Bool = stateQueue.sync {
-            if pendingDepth >= Self.maxPendingDepth { return false }
-            pendingDepth += 1
-            return true
-        }
-        if !admitted {
-            LocalHTTPParser.writeResponse(to: fd, status: 503, reason: "Service Unavailable",
-                                          headers: corsHeaders(req: req),
-                                          body: errorJSON("server busy"))
-            return
-        }
-        defer { stateQueue.sync { pendingDepth -= 1 } }
 
         // Route — pure dispatch over path. Each handler owns its own response/SSE writes; we just
         // give it the fd + request + a CORS-header bag it should include on its response.
         LocalAPIRoutes.dispatch(server: self, request: req, fd: fd, cors: corsHeaders(req: req), isUDS: isUDS)
+        return false
     }
 
     // --- CORS ---------------------------------------------------------------------------------
@@ -292,14 +542,119 @@ final class LocalAPIServer {
             "Access-Control-Allow-Headers": "Authorization, Content-Type",
             "Access-Control-Max-Age": "600",
         ]
-        if let origin = req.header("Origin") {
-            if origin.hasPrefix("http://localhost") || origin.hasPrefix("http://127.0.0.1")
-                || origin == "null" || origin.hasPrefix("file://") {
-                hdrs["Access-Control-Allow-Origin"] = origin
-                hdrs["Vary"] = "Origin"
-            }
+        if let origin = req.header("Origin"), Self.isAllowedOrigin(origin) {
+            hdrs["Access-Control-Allow-Origin"] = origin
+            hdrs["Vary"] = "Origin"
         }
         return hdrs
+    }
+
+    static func isLoopbackHost(_ value: String?) -> Bool {
+        guard let value, !value.isEmpty,
+              value == value.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.contains("@") else { return false }
+        let components = URLComponents(string: "http://\(value)")
+        guard let components,
+              components.user == nil, components.password == nil,
+              components.path.isEmpty,
+              components.query == nil, components.fragment == nil,
+              let host = components.host?.lowercased() else { return false }
+        return host == "localhost" || host == "127.0.0.1" || host == "::1"
+    }
+
+    static func isAllowedOrigin(_ value: String) -> Bool {
+        if value == "null" { return true }
+        guard value == value.trimmingCharacters(in: .whitespacesAndNewlines),
+              let components = URLComponents(string: value),
+              components.scheme?.lowercased() == "http",
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil,
+              components.path.isEmpty,
+              let host = components.host?.lowercased() else { return false }
+        return host == "localhost" || host == "127.0.0.1" || host == "::1"
+    }
+
+    private func validPreflight(_ req: HTTPRequest) -> Bool {
+        guard req.header("Origin") != nil,
+              let requestedMethod = req.header("Access-Control-Request-Method")?.uppercased()
+        else { return false }
+        let expectedMethod: String?
+        switch req.path {
+        case "/v1/health", "/v1/models": expectedMethod = "GET"
+        case "/v1/completions", "/v1/chat/completions": expectedMethod = "POST"
+        default: expectedMethod = nil
+        }
+        guard requestedMethod == expectedMethod else { return false }
+        if let requestedHeaders = req.header("Access-Control-Request-Headers") {
+            let allowed = Set(["authorization", "content-type"])
+            let supplied = requestedHeaders.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            guard !supplied.isEmpty, supplied.allSatisfy(allowed.contains) else { return false }
+        }
+        return true
+    }
+
+    private func handleIdentity(request: HTTPRequest, fd: Int32) -> Bool {
+        guard let challenge = request.header("X-Shadowtype-Challenge"),
+              challenge.utf8.count == 64,
+              challenge.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102) }),
+              let apiKey = currentAPIKey() else {
+            LocalHTTPParser.writeResponse(to: fd, status: 400, reason: "Bad Request",
+                                          body: errorJSON("invalid identity challenge"))
+            return false
+        }
+        let input = Data(("shadowtype-mcp:" + challenge).utf8)
+        let code = HMAC<SHA256>.authenticationCode(
+            for: input,
+            using: SymmetricKey(data: Data(apiKey.utf8))
+        )
+        let proof = code.map { String(format: "%02x", $0) }.joined()
+        let body = (try? JSONSerialization.data(withJSONObject: ["proof": proof])) ?? Data()
+        return LocalHTTPParser.writeResponse(
+            to: fd,
+            status: 200,
+            reason: "OK",
+            headers: [
+                "Content-Type": "application/json",
+                "Connection": "keep-alive",
+            ],
+            body: body,
+            connectionClose: false
+        )
+    }
+
+    private func currentAPIKey() -> String? {
+        stateQueue.sync { activeAPIKey }
+    }
+
+    @objc private func handleAPIKeyChanged(_ notification: Notification) {
+        guard isRunning,
+              let key = notification.userInfo?["apiKey"] as? String,
+              APIKeyStore.isValidAPIKey(key),
+              let port = boundPort else { return }
+        stateQueue.sync { activeAPIKey = key }
+        guard publishDiscovery(port: port, apiKey: key) else {
+            NSLog("Shadowtype: API key rotated but endpoint discovery update failed; stopping local API")
+            stop()
+            return
+        }
+    }
+
+    var udsIsAvailable: Bool { udsFD >= 0 }
+    var admittedConnectionCount: Int { stateQueue.sync { pendingDepth } }
+
+    func boundTCPIPv4Address() -> String? {
+        guard tcpFD >= 0 else { return nil }
+        var addr = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let result = withUnsafeMutablePointer(to: &addr) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(tcpFD, $0, &len) }
+        }
+        guard result == 0 else { return nil }
+        var copied = addr.sin_addr
+        var output = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        guard inet_ntop(AF_INET, &copied, &output, socklen_t(output.count)) != nil else { return nil }
+        return String(cString: output)
     }
 
     // --- Sleep/wake re-bind -------------------------------------------------------------------

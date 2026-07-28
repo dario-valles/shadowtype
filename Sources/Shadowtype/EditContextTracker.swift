@@ -5,13 +5,19 @@ import ApplicationServices
 import Carbon.HIToolbox
 
 final class EditContextTracker {
+    typealias FocusReader = (AXUIElement) -> (AXError, AXUIElement?)
+    typealias ElementPIDReader = (AXUIElement) -> pid_t?
+
     var frontmostBundleId: String?
 
-    // Fired on every focus/value/app change (see refreshFocus) so the active-field badge can
-    // re-anchor or hide. Called on the main run loop.
+    // Fired on focus/app changes (see refreshFocus) so the active-field badge can re-anchor or hide.
+    // Value changes invalidate text caches only. Called on the main run loop.
     var onFocusChange: (() -> Void)?
 
-    private let system = AXUIElementCreateSystemWide()
+    private let system: AXUIElement
+    private let focusReader: FocusReader
+    private let frontmostPID: () -> pid_t?
+    private let elementPID: ElementPIDReader
 
     // Monotonic counter that increments whenever the focused element actually changes (a different
     // element, or focus dropping to nil). Distinct from CompletionCoordinator's `generation` (a
@@ -46,7 +52,34 @@ final class EditContextTracker {
     static let maxPlausibleLineHeight: CGFloat = 40
     static let defaultLineHeight: CGFloat = 20
 
-    init() {}
+    init(system: AXUIElement = AXUIElementCreateSystemWide(),
+         focusReader: @escaping FocusReader = EditContextTracker.defaultFocusReader,
+         frontmostPID: @escaping () -> pid_t? = {
+             NSWorkspace.shared.frontmostApplication?.processIdentifier
+         },
+         elementPID: @escaping ElementPIDReader = EditContextTracker.defaultElementPIDReader) {
+        self.system = system
+        self.focusReader = focusReader
+        self.frontmostPID = frontmostPID
+        self.elementPID = elementPID
+    }
+
+    private static func defaultFocusReader(_ system: AXUIElement) -> (AXError, AXUIElement?) {
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(
+            system, kAXFocusedUIElementAttribute as CFString, &value)
+        guard error == .success, let value,
+              CFGetTypeID(value) == AXUIElementGetTypeID() else {
+            return (error, nil)
+        }
+        return (error, value as! AXUIElement)
+    }
+
+    private static func defaultElementPIDReader(_ element: AXUIElement) -> pid_t? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success else { return nil }
+        return pid
+    }
 
     func start() {
         guard !started else { return }
@@ -135,6 +168,14 @@ final class EditContextTracker {
         let suffix: String?
     }
 
+    static func protectedCaretSides(
+        isSecure: Bool,
+        read: () -> (prefix: String?, suffix: String?)
+    ) -> (prefix: String?, suffix: String?) {
+        guard !isSecure else { return (nil, nil) }
+        return read()
+    }
+
     // Negative read cache: the focus generation + element + the character count the element reported at
     // the moment the read failed. A hollow focus (a real diag showed role=AXWindow, descend=AXSplitter,
     // prefix=nil) used to re-walk the entire tree — descend BFS, marker chains, index probes — on EVERY
@@ -152,20 +193,34 @@ final class EditContextTracker {
 
     private func resolveTextAroundCaret() -> CaretText? {
         guard let element = currentFocusedElement(), !isSecure(element) else { return nil }
-        return resolveTextAroundCaret(of: element)
+        let descended = AXTextProbe.descendToEditable(element)
+        guard descended.map({ !isSecure($0) }) ?? true else { return nil }
+        return resolveTextAroundCaret(
+            of: element,
+            descended: .some(descended),
+            markerSession: AXTextProbe.MarkerSession(element: element),
+            descendedMarkerSession: descended.map {
+                AXTextProbe.MarkerSession(element: $0)
+            })
     }
 
     // `preDescended`: pass `.some(…)` when the caller already resolved descendToEditable (a
     // FocusSnapshot has) so the BFS isn't repeated; the default resolves it lazily, and only if the
     // direct paths fail.
     private func resolveTextAroundCaret(of element: AXUIElement,
-                                        descended preDescended: AXUIElement?? = nil) -> CaretText? {
+                                        descended preDescended: AXUIElement?? = nil,
+                                        markerSession: AXTextProbe.MarkerSession? = nil,
+                                        descendedMarkerSession: AXTextProbe.MarkerSession? = nil) -> CaretText? {
         // Known-bad focus: one cheap attribute read decides whether anything changed (see prefixFailure).
         if let f = prefixFailure, f.seq == focusChangeSequence, cfEqual(f.element, element) {
             if (characterCount(of: element) ?? -1) == f.chars { return nil }
             prefixFailure = nil
         }
-        if let text = readTextAroundCaret(of: element, descended: preDescended) {
+        if let text = readTextAroundCaret(
+            of: element,
+            descended: preDescended,
+            markerSession: markerSession,
+            descendedMarkerSession: descendedMarkerSession) {
             lastGoodReadFocusSeq = focusChangeSequence
             return text
         }
@@ -181,7 +236,7 @@ final class EditContextTracker {
         }
         if Diag.isEnabled {
             let descended = preDescended ?? AXTextProbe.descendToEditable(element)
-            Diag.log("prefix: nil role=\(roleSubrole(element)) web=\(AXTextProbe.webPrefixFailureStep(of: element)) idx=[\(AXTextProbe.indexCapabilities(of: element))] descend=\(descended.map { roleSubrole($0) } ?? "none") url=\(frontmostDomainHost() ?? "?")")
+            Diag.log("prefix: nil role=\(roleSubrole(element)) web=\(AXTextProbe.webPrefixFailureStep(of: element)) idx=[\(AXTextProbe.indexCapabilities(of: element))] descend=\(descended.map { roleSubrole($0) } ?? "none") domainKnown=\(frontmostDomainHost() != nil)")
             // One-shot per focus session: dump the full AX attribute surface of the focused element, its
             // descended node, and its ancestors — the supported-attribute lists reveal which read path a
             // hollow-proxy web area (modern Mail) actually implements. Gated so it logs once, not per key.
@@ -195,7 +250,9 @@ final class EditContextTracker {
 
     // The read itself, in resolution order. nil = no path could see the caret's text.
     private func readTextAroundCaret(of element: AXUIElement,
-                                     descended preDescended: AXUIElement??) -> CaretText? {
+                                     descended preDescended: AXUIElement??,
+                                     markerSession: AXTextProbe.MarkerSession?,
+                                     descendedMarkerSession: AXTextProbe.MarkerSession?) -> CaretText? {
         // (1) Native path: kAXValue + kAXSelectedTextRange (Cocoa/AppKit fields).
         if let caret = caretLocation(of: element), let text = elementString(element) {
             let t = caretText(text, caret: caret)
@@ -205,7 +262,7 @@ final class EditContextTracker {
 
         // (2) Web/Electron/Chromium path (Slack/Warp/VS Code): text-marker string before the caret
         // (PRD R2). Read forward-from-caret only — webPrefix is document-start→caret (FR-KC-2).
-        if let webText = AXTextProbe.webPrefix(of: element) {
+        if let webText = AXTextProbe.webPrefix(of: element, session: markerSession) {
             Diag.log("prefix: ok via=web len=\(webText.utf16.count) role=\(roleSubrole(element))")
             return CaretText(prefix: Self.normalizingSpaces(webText), suffix: nil)
         }
@@ -218,7 +275,8 @@ final class EditContextTracker {
                 Diag.log("prefix: ok via=descend-native len=\(t.prefix.utf16.count) role=\(roleSubrole(editable))")
                 return t
             }
-            if let webText = AXTextProbe.webPrefix(of: editable) {
+            if let webText = AXTextProbe.webPrefix(
+                of: editable, session: descendedMarkerSession) {
                 Diag.log("prefix: ok via=descend-web len=\(webText.utf16.count) role=\(roleSubrole(editable))")
                 return CaretText(prefix: Self.normalizingSpaces(webText), suffix: nil)
             }
@@ -228,7 +286,8 @@ final class EditContextTracker {
         // AXStartTextMarkerForTextMarkerRange (so the marker chain in webPrefix dead-ends) but DOES
         // answer the caret bounds, AXTextMarkerForPosition, AXStartTextMarker and the unordered-range
         // builder. Derive the caret marker from its on-screen point and read document-start→caret.
-        if let s = AXTextProbe.webPrefixViaPosition(of: element), !s.isEmpty {
+        if let s = AXTextProbe.webPrefixViaPosition(
+            of: element, session: markerSession), !s.isEmpty {
             Diag.log("prefix: ok via=web-position len=\(s.utf16.count) role=\(roleSubrole(element))")
             return CaretText(prefix: Self.normalizingSpaces(s), suffix: nil)
         }
@@ -288,12 +347,16 @@ final class EditContextTracker {
         guard !snapshot.isSecure else { return true }
         return caretAtLineEnd(element: snapshot.element,
                               descended: .some(snapshot.descendedEditable),
-                              descendedIsSecure: snapshot.descendedIsSecure)
+                              descendedIsSecure: snapshot.descendedIsSecure,
+                              markerSession: snapshot.markerSession,
+                              descendedMarkerSession: snapshot.descendedMarkerSession)
     }
 
     private func caretAtLineEnd(element: AXUIElement,
                                 descended preDescended: AXUIElement??,
-                                descendedIsSecure preDescendedIsSecure: Bool?) -> Bool {
+                                descendedIsSecure preDescendedIsSecure: Bool?,
+                                markerSession: AXTextProbe.MarkerSession? = nil,
+                                descendedMarkerSession: AXTextProbe.MarkerSession? = nil) -> Bool {
         // The editable node under the focused wrapper, skipping a secure one. Resolved at most once per
         // call — the branches below are mutually exclusive — and not at all when the caller passed one.
         func editableDescendant() -> AXUIElement? {
@@ -310,9 +373,13 @@ final class EditContextTracker {
             // Probe the focused element AND the descended editable; Reddit/Lexical focuses a wrapper whose
             // marker range is nil, so the real answer often lives on the descended text node. Take the
             // first DEFINITE (non-.unavailable) answer; only a definite mid-line suppresses.
-            let focused = AXTextProbe.webCaretLinePosition(of: element)
+            let focused = AXTextProbe.webCaretLinePosition(
+                of: element, session: markerSession)
             let descend = editableDescendant()
-                .map { AXTextProbe.webCaretLinePosition(of: $0) } ?? .unavailable
+                .map {
+                    AXTextProbe.webCaretLinePosition(
+                        of: $0, session: descendedMarkerSession)
+                } ?? .unavailable
             let probe = focused != .unavailable ? focused : descend
             switch probe {
             case .midLine:
@@ -412,20 +479,26 @@ final class EditContextTracker {
         return caretRect(element: snapshot.element,
                          descended: .some(snapshot.descendedEditable),
                          descendedIsSecure: snapshot.descendedIsSecure,
-                         prefix: .some(snapshot.prefix))
+                         prefix: .some(snapshot.prefix),
+                         markerSession: snapshot.markerSession,
+                         descendedMarkerSession: snapshot.descendedMarkerSession)
     }
 
     private func caretRect(element: AXUIElement,
                            descended preDescended: AXUIElement??,
                            descendedIsSecure preDescendedIsSecure: Bool?,
-                           prefix prefixResolved: String??) -> CGRect? {
+                           prefix prefixResolved: String??,
+                           markerSession: AXTextProbe.MarkerSession? = nil,
+                           descendedMarkerSession: AXTextProbe.MarkerSession? = nil) -> CGRect? {
         // (a) Real caret geometry on the focused element (native kAXBoundsForRange or web markers).
-        if let rect = caretBounds(of: element) { return rect }
+        if let rect = caretBounds(of: element, markerSession: markerSession) { return rect }
 
         // (b) Web/Electron often keep the editable node a level down; retry caret geometry there.
         let editable = preDescended ?? AXTextProbe.descendToEditable(element)
         let editableIsSecure = editable.map { preDescendedIsSecure ?? isSecure($0) } ?? false
-        if let editable, !editableIsSecure, let rect = caretBounds(of: editable) { return rect }
+        if let editable, !editableIsSecure,
+           let rect = caretBounds(
+               of: editable, markerSession: descendedMarkerSession) { return rect }
 
         // (c) Last resort (Chromium/Electron expose no usable caret rect): anchor on the editable
         // element's own frame — the actual text line — and ESTIMATE the caret X by measuring the
@@ -488,7 +561,8 @@ final class EditContextTracker {
 
     // AX caret rect (top-left origin) for one element, native path then web fallbacks, converted to
     // Cocoa bottom-left. A caret is a ZERO-WIDTH rect — never reject it via CGRect.isEmpty.
-    private func caretBounds(of element: AXUIElement) -> CGRect? {
+    private func caretBounds(of element: AXUIElement,
+                             markerSession: AXTextProbe.MarkerSession? = nil) -> CGRect? {
         // (1) Native kAXBoundsForRange at the selected-range caret.
         if let caret = caretLocation(of: element) {
             var range = CFRange(location: caret, length: 0)
@@ -537,7 +611,8 @@ final class EditContextTracker {
         }
 
         // (2) Web text-marker bounds (PRD R2, FR-OV-6).
-        if let axRect = AXTextProbe.webCaretBounds(of: element), caretRectIsPlausible(axRect, element: element) {
+        if let axRect = AXTextProbe.webCaretBounds(of: element, session: markerSession),
+           caretRectIsPlausible(axRect, element: element) {
             Diag.log("caret: path=web axRect=\(Int(axRect.minX)),\(Int(axRect.minY)) \(Int(axRect.width))x\(Int(axRect.height))")
             return convertAXRectToCocoa(axRect)
         }
@@ -589,7 +664,13 @@ final class EditContextTracker {
     // Injection into secure fields is gated upstream — the coordinator never shows, and so never
     // accepts, a suggestion in a secure field — so no secure-field check is needed here.
     func focusedElement() -> AXUIElement? {
-        return currentFocusedElement()
+        currentFocusedElement(allowCachedFallback: false)
+    }
+
+    // Read-only context continuity may use the last element after a transient AX failure, provided it
+    // still belongs to the frontmost process. Never expose this accessor to injection code.
+    func focusedElementForRead() -> AXUIElement? {
+        currentFocusedElement(allowCachedFallback: true)
     }
 
     // MARK: - Selection (rewrite feature)
@@ -608,7 +689,10 @@ final class EditContextTracker {
     // editable). Native path first (kAXSelectedText + range), then the web text-marker path, then a
     // descend to the real editable node — mirroring currentPrefix()'s resolution order.
     func currentSelection() -> CurrentSelection? {
-        guard let element = currentFocusedElement(), !isSecure(element) else { return nil }
+        // This element becomes a later rewrite/injection target, so transient AX failure must never
+        // substitute the cached read-only focus.
+        guard let element = currentFocusedElement(allowCachedFallback: false),
+              !isSecure(element) else { return nil }
         if let sel = nativeSelection(of: element) { return sel }
         if let text = AXTextProbe.webSelectedText(of: element) {
             return CurrentSelection(text: text, element: element, range: nil)
@@ -691,30 +775,56 @@ final class EditContextTracker {
         return Self.host(fromDocumentURL: url)
     }
 
-    // Whole visible page text of the focused web host, for thread-aware reply context (FR-CTX-1, AX
-    // backend). Walks up to the top-level AXWebArea (crossing the compose iframe to the page that
-    // holds the conversation) and reads its full text. nil for native apps / no web area / secure
-    // fields — the caller then falls back to OCR. Best-effort: never throws, never returns wrong text.
+    // Visible page text of the focused web host, for thread-aware reply context (FR-CTX-1, AX backend).
+    // The top-level web area is used only as a traversal root; the probe never stringifies its whole
+    // document range. nil for native apps / no web area / secure fields.
     func pageContextText() -> String? {
         guard let element = currentFocusedElement(), !isSecure(element) else {
-            return pageContextText(from: nil)
+            return pageContextText(from: nil, focusSequence: focusChangeSequence)
         }
-        return pageContextText(from: AXTextProbe.topWebArea(from: element))
+        return pageContextText(
+            from: AXTextProbe.topWebArea(from: element),
+            focusSequence: focusChangeSequence)
     }
 
     /// Same text from a snapshot, reusing the web area it already walked up to.
     func pageContextText(in snapshot: FocusSnapshot) -> String? {
-        pageContextText(from: snapshot.isSecure ? nil : snapshot.webArea)
+        pageContextText(
+            from: snapshot.isSecure ? nil : snapshot.webArea,
+            focusSequence: snapshot.focusSeq)
     }
 
-    private func pageContextText(from webArea: AXUIElement?) -> String? {
+    private func pageContextText(
+        from webArea: AXUIElement?,
+        focusSequence: UInt64
+    ) -> String? {
         guard let webArea else {
             return Self.loggedPageContextText(webAreaFound: false, text: nil, log: Diag.log)
         }
         return Self.loggedPageContextText(
             webAreaFound: true,
-            text: AXTextProbe.webAreaFullText(of: webArea),
+            text: AXTextProbe.webAreaFullText(
+                of: webArea, focusSequence: focusSequence),
             log: Diag.log)
+    }
+
+    // Async form for callers that need the first freshly-walked result rather than the prior cached
+    // value. Completion arrives on the main queue; a newer focus/web-area request cancels this one.
+    func requestPageContextText(
+        in snapshot: FocusSnapshot,
+        completion: @escaping (String?) -> Void
+    ) {
+        guard !snapshot.isSecure, let webArea = snapshot.webArea else {
+            completion(nil)
+            return
+        }
+        _ = AXTextProbe.webAreaFullText(
+            of: webArea,
+            focusSequence: snapshot.focusSeq,
+            completion: { text in
+                completion(Self.loggedPageContextText(
+                    webAreaFound: true, text: text, log: Diag.log))
+            })
     }
 
     static func loggedPageContextText(webAreaFound: Bool, text: String?,
@@ -766,7 +876,7 @@ final class EditContextTracker {
             hasWebAreaAncestor: hasWebArea, isProseContentRole: proseRole,
             isStructuredWebMailField: structuredMail)
         if nonProse {
-            Diag.log("nonProse: role=\(r ?? "?") search=\(searchSub) editable=\(editable) webArea=\(hasWebArea) host=\(host ?? "?") structuredMail=\(structuredMail)")
+            Diag.log("nonProse: role=\(r ?? "?") search=\(searchSub) editable=\(editable) webArea=\(hasWebArea) domainKnown=\(host != nil) structuredMail=\(structuredMail)")
             return true
         }
         // Web-mail recipient/subject suppression — broader than the host+role short-circuit above
@@ -778,12 +888,12 @@ final class EditContextTracker {
         let targets: [AXUIElement] = snapshot.descendedEditable.map { [element, $0] } ?? [element]
         let descriptors = targets.flatMap { AXTextProbe.fieldDescriptors(of: $0) }
         if ActivationPolicy.isWebMailRecipientOrSubject(descriptors: descriptors) {
-            Diag.log("nonProse: webMail field descriptors=\(descriptors)")
+            Diag.log("nonProse: webMail descriptorMatch=true count=\(descriptors.count)")
             return true
         }
         let chipDescs = targets.flatMap { AXTextProbe.buttonChildRoleDescriptions(of: $0) }
         if ActivationPolicy.hasRecipientChip(buttonRoleDescriptions: chipDescs) {
-            Diag.log("nonProse: webMail chips=\(chipDescs)")
+            Diag.log("nonProse: webMail chipMatch=true count=\(chipDescs.count)")
             return true
         }
         return false
@@ -904,6 +1014,8 @@ final class EditContextTracker {
         // nil in a secure field — the read is never even attempted there.
         let prefix: String?
         let suffix: String?
+        let markerSession: AXTextProbe.MarkerSession?
+        let descendedMarkerSession: AXTextProbe.MarkerSession?
 
         // Positive evidence the focus sits in web CONTENT (a browser's omnibox/find bar carries neither).
         var hasWebArea: Bool { webArea != nil || documentURL != nil }
@@ -915,24 +1027,39 @@ final class EditContextTracker {
         guard let element = currentFocusedElement() else { return nil }
         let secure = isSecure(element)
         let descended = AXTextProbe.descendToEditable(element)
+        let descendedSecure = descended.map { isSecure($0) } ?? false
+        let snapshotSecure = secure || descendedSecure
+        let markerSession = snapshotSecure ? nil : AXTextProbe.MarkerSession(element: element)
+        let descendedMarkerSession = snapshotSecure
+            ? nil
+            : descended.map { AXTextProbe.MarkerSession(element: $0) }
         // Never read text out of a secure field (FR-KC-4) — neither side of the caret.
-        let text = secure ? nil : resolveTextAroundCaret(of: element, descended: .some(descended))
+        let text = Self.protectedCaretSides(isSecure: snapshotSecure) {
+            let resolved = resolveTextAroundCaret(
+                of: element,
+                descended: .some(descended),
+                markerSession: markerSession,
+                descendedMarkerSession: descendedMarkerSession)
+            return (resolved?.prefix, resolved?.suffix)
+        }
         let url = AXTextProbe.documentURL(near: element)
         return FocusSnapshot(
             focusSeq: focusChangeSequence,
             element: element,
             role: role(of: element),
             subrole: subrole(of: element),
-            isSecure: secure,
+            isSecure: snapshotSecure,
             isEditable: AXTextProbe.isEditable(element),
             descendedEditable: descended,
             descendedRole: descended.flatMap { role(of: $0) },
-            descendedIsSecure: descended.map { isSecure($0) } ?? false,
+            descendedIsSecure: descendedSecure,
             webArea: AXTextProbe.topWebArea(from: element),
             documentURL: url,
             domainHost: url.flatMap { Self.host(fromDocumentURL: $0) },
-            prefix: text?.prefix,
-            suffix: text?.suffix)
+            prefix: text.prefix,
+            suffix: text.suffix,
+            markerSession: markerSession,
+            descendedMarkerSession: descendedMarkerSession)
     }
 
     // Drop the per-focus state a snapshot resolution can short-circuit on (today: the negative read
@@ -951,14 +1078,12 @@ final class EditContextTracker {
         // Re-arm the per-focus-session browser-AX rewake (a stale pid from a prior focus must not
         // block re-priming when the user lands on a fresh Gmail tab in the same browser process).
         rewakedPidThisFocus = nil
-        // This also fires on kAXValueChanged, i.e. the field's content changed — the second reason a
-        // focus recorded as unreadable can become readable (the first being a different element, which
-        // the focus generation already covers). Retry it rather than latch the old verdict.
+        // A real focus change must discard any negative text-read verdict from the prior element.
+        // kAXValueChanged takes the lightweight invalidation path in handleObserverNotification().
         invalidateFocusSnapshot()
 
-        var value: CFTypeRef?
-        let err = AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &value)
-        guard err == .success, let v = value, CFGetTypeID(v) == AXUIElementGetTypeID() else {
+        let (err, element) = focusReader(system)
+        guard err == .success, let element else {
             // kAXErrorAPIDisabled or no focus: keep last known but drop the stale element defensively.
             if err == .apiDisabled {
                 if focused != nil { focusChangeSequence &+= 1 }
@@ -966,7 +1091,6 @@ final class EditContextTracker {
             }
             return
         }
-        let element = v as! AXUIElement
         if focused == nil || !cfEqual(focused!, element) { focusChangeSequence &+= 1 }
         focused = element
         attachObserver(to: element)
@@ -985,11 +1109,9 @@ final class EditContextTracker {
 
     // Re-read the focused element on demand so currentPrefix/caretRect always reflect live state,
     // even if a notification was missed. Cheap (one AX round-trip).
-    private func currentFocusedElement() -> AXUIElement? {
-        var value: CFTypeRef?
-        let err = AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &value)
-        if err == .success, let v = value, CFGetTypeID(v) == AXUIElementGetTypeID() {
-            let element = v as! AXUIElement
+    private func currentFocusedElement(allowCachedFallback: Bool = true) -> AXUIElement? {
+        let (err, element) = focusReader(system)
+        if err == .success, let element {
             // Keep the focus-session counter consistent with refreshFocus(): this per-keystroke read can
             // observe a focus change (a new same-app field) before the async AXObserver notification runs,
             // and the overlay/font/flicker gates key off this counter. Bump on a real element change so
@@ -999,6 +1121,7 @@ final class EditContextTracker {
             return element
         }
         if err == .apiDisabled { focused = nil }
+        guard allowCachedFallback else { return nil }
         // Transient error: we may fall back to the cached element, but ONLY if it still belongs to the
         // frontmost app. Otherwise focus has moved and returning it would read/inject into a field in
         // a previously-focused app.
@@ -1007,9 +1130,7 @@ final class EditContextTracker {
     }
 
     private func belongsToFrontmostApp(_ element: AXUIElement) -> Bool {
-        guard let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return false }
-        var pid: pid_t = 0
-        guard AXUIElementGetPid(element, &pid) == .success else { return false }
+        guard let frontPid = frontmostPID(), let pid = elementPID(element) else { return false }
         return pid == frontPid
     }
 
@@ -1032,11 +1153,10 @@ final class EditContextTracker {
         teardownObserver()
 
         var obs: AXObserver?
-        let callback: AXObserverCallback = { _, _, _, refcon in
+        let callback: AXObserverCallback = { _, _, notification, refcon in
             guard let refcon else { return }
             let me = Unmanaged<EditContextTracker>.fromOpaque(refcon).takeUnretainedValue()
-            // Focus or value changed: refresh on the main run loop (we're already on it).
-            me.refreshFocus()
+            me.handleObserverNotification(notification as String)
         }
         guard AXObserverCreate(pid, callback, &obs) == .success, let observer = obs else { return }
         self.observer = observer
@@ -1053,6 +1173,14 @@ final class EditContextTracker {
         CFRunLoopAddSource(CFRunLoopGetMain(),
                            AXObserverGetRunLoopSource(observer),
                            .defaultMode)
+    }
+
+    func handleObserverNotification(_ notification: String) {
+        if notification == (kAXValueChangedNotification as String) {
+            invalidateFocusSnapshot()
+            return
+        }
+        refreshFocus()
     }
 
     private func teardownObserver() {
@@ -1092,19 +1220,24 @@ final class EditContextTracker {
         guard !snapshot.isSecure else { return nil }
         return caretFont(element: snapshot.element,
                          descended: .some(snapshot.descendedEditable),
-                         descendedIsSecure: snapshot.descendedIsSecure)
+                         descendedIsSecure: snapshot.descendedIsSecure,
+                         markerSession: snapshot.markerSession,
+                         descendedMarkerSession: snapshot.descendedMarkerSession)
     }
 
     private func caretFont(element: AXUIElement,
                            descended preDescended: AXUIElement??,
-                           descendedIsSecure preDescendedIsSecure: Bool?) -> NSFont? {
+                           descendedIsSecure preDescendedIsSecure: Bool?,
+                           markerSession: AXTextProbe.MarkerSession? = nil,
+                           descendedMarkerSession: AXTextProbe.MarkerSession? = nil) -> NSFont? {
         if let f = fontAtCaret(element) { return f }
         // Web/Chromium (Gmail etc.) don't answer the range-based attributed-string query fontAtCaret
         // uses; read the font via the text-marker attributed string instead so browser ghosts match.
-        if let f = AXTextProbe.webFont(of: element) { return f }
+        if let f = AXTextProbe.webFont(of: element, session: markerSession) { return f }
         if let editable = preDescended ?? AXTextProbe.descendToEditable(element),
            !(preDescendedIsSecure ?? isSecure(editable)) {
-            return fontAtCaret(editable) ?? AXTextProbe.webFont(of: editable)
+            return fontAtCaret(editable)
+                ?? AXTextProbe.webFont(of: editable, session: descendedMarkerSession)
         }
         return nil
     }

@@ -85,6 +85,14 @@ final class TypoGuardTests: XCTestCase {
         }
     }
 
+    func testNonLatinScriptTokensNeverUseEnglishHeuristics() {
+        // These are all 4+ alphabetic tokens that would look vowel-less or consonant-heavy to the
+        // English-only rules. They must remain outside this heuristic rather than suppressing a ghost.
+        for w in ["مرحبا", "שלום", "привет"] {
+            XCTAssertFalse(guard_.looksLikeTypo(lastWord: w), "non-Latin token flagged: \(w)")
+        }
+    }
+
     func testEmptyAndWhitespace() {
         XCTAssertFalse(guard_.looksLikeTypo(lastWord: ""))
         XCTAssertFalse(guard_.looksLikeTypo(lastWord: "   "))

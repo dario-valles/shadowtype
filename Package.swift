@@ -1,37 +1,42 @@
 // swift-tools-version: 6.0
 import PackageDescription
+import Foundation
+
+let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+let llamaPrefix = packageRoot.appendingPathComponent("vendor/llama")
+let llamaIncludePath = llamaPrefix.appendingPathComponent("include").path
+let llamaLibraryPath = llamaPrefix.appendingPathComponent("lib").path
 
 let package = Package(
     name: "Shadowtype",
     platforms: [.macOS(.v14)],
     targets: [
         .systemLibrary(
-            name: "CLlama",
-            pkgConfig: "llama",
-            providers: [.brew(["llama.cpp"])]
+            name: "CLlama"
         ),
         .executableTarget(
             name: "Shadowtype",
             dependencies: ["CLlama"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
-                // INTEGRATOR: llama.h does `#include "ggml.h"`, but ggml.h ships in the SEPARATE
-                // `ggml` Homebrew formula at /opt/homebrew/include (pkg-config "llama" only emits
-                // its own includedir). Feed clang the ggml include path so the CLlama module builds.
-                .unsafeFlags(["-Xcc", "-I/opt/homebrew/include"]),
+                .unsafeFlags(["-Xcc", "-I\(llamaIncludePath)"]),
             ],
             linkerSettings: [
-                .unsafeFlags([
-                    "-L/opt/homebrew/opt/llama.cpp/lib",
-                    "-L/opt/homebrew/lib",
-                    "-Xlinker", "-rpath",
-                    "-Xlinker", "/opt/homebrew/opt/llama.cpp/lib",
-                    "-Xlinker", "-rpath",
-                    "-Xlinker", "/opt/homebrew/lib",
-                ]),
+                // Static dependency order: llama -> ggml -> compiled-in CPU/BLAS/Metal
+                // backends -> ggml-base. libc++ and the Apple frameworks are their only
+                // dynamic closure; no rpath or runtime backend plugins are required.
+                .unsafeFlags(["-L\(llamaLibraryPath)"]),
                 .linkedLibrary("llama"),
                 .linkedLibrary("ggml"),
+                .linkedLibrary("ggml-cpu"),
+                .linkedLibrary("ggml-blas"),
+                .linkedLibrary("ggml-metal"),
                 .linkedLibrary("ggml-base"),
+                .linkedLibrary("c++"),
+                .linkedFramework("Accelerate"),
+                .linkedFramework("Foundation"),
+                .linkedFramework("Metal"),
+                .linkedFramework("MetalKit"),
             ]
         ),
         // M2: stdio JSON-RPC ↔ HTTP bridge that exposes the running Shadowtype Local API as MCP
@@ -51,7 +56,7 @@ let package = Package(
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // @testable import Shadowtype transitively rebuilds the CLlama clang module here.
-                .unsafeFlags(["-Xcc", "-I/opt/homebrew/include"]),
+                .unsafeFlags(["-Xcc", "-I\(llamaIncludePath)"]),
             ]
         ),
     ]

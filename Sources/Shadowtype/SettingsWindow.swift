@@ -13,7 +13,6 @@
 // the deadline). Advertising a decided-against feature as "Soon" is a promise we would never keep.
 import Cocoa
 import SwiftUI
-import ApplicationServices
 
 // Model-selection notification posted by the Models pane with userInfo["entry"] = ModelCatalogEntry.
 // AppDelegate observes it and downloads (if needed) + swaps the active model live on the inference queue.
@@ -63,8 +62,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         }
         // Promote to .regular first so the accessory app actually becomes active and the window
         // can take key/first-responder focus (otherwise text fields won't accept input).
-        AppActivation.shared.promoteAndActivate()
-        window?.makeKeyAndOrderFront(nil)
+        guard let window else { return }
+        AppActivation.shared.promoteAndActivate(for: window)
+        window.makeKeyAndOrderFront(nil)
         // The .accessory→.regular promotion activates ASYNCHRONOUSLY: the window above comes up
         // "main" (active titlebar, mouse clicks → toggles work) but NOT "key", so SwiftUI TextFields
         // get no keyboard and can't be typed into. Re-assert key once activation has settled so the
@@ -76,7 +76,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        AppActivation.shared.windowClosed()
+        guard let closedWindow = notification.object as? NSWindow else { return }
+        AppActivation.shared.windowClosed(closedWindow)
     }
 }
 
@@ -316,6 +317,7 @@ private struct GeneralPane: View {
     // Mirror the coordinator's enabled state; the menu-bar toggle posts .shadowtypeToggleEnabled.
     @State private var isEnabled = true
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
+    @State private var launchAtLoginError: String?
 
     // Suggestion trigger delay (real: AppDelegate.syncToggles mirrors this into coordinator.debounce).
     @AppStorage("shadowtype.triggerDelayMs") private var triggerDelayMs = 50.0
@@ -411,8 +413,24 @@ private struct GeneralPane: View {
             }
 
             Section("Startup & menu bar") {
-                Toggle("Launch at login", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { LaunchAtLogin.setEnabled(launchAtLogin) }
+                Toggle("Launch at login", isOn: Binding(
+                    get: { launchAtLogin },
+                    set: { requested in
+                        switch LaunchAtLogin.setEnabled(requested) {
+                        case .success:
+                            launchAtLogin = LaunchAtLogin.isEnabled
+                            launchAtLoginError = nil
+                        case .failure(let error):
+                            launchAtLogin = LaunchAtLogin.isEnabled
+                            launchAtLoginError = "\(error.localizedDescription) Check System Settings → General → Login Items."
+                        }
+                    }
+                ))
+                if let launchAtLoginError {
+                    Text(launchAtLoginError)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
                 Toggle("Show today’s word count in menu bar", isOn: $showWordCount)
                 caption("Display your accepted-word count beside the menu-bar icon.")
                 Picker("Menu-bar icon style", selection: $iconStyle) {
@@ -468,57 +486,26 @@ private struct ModelsPane: View {
     @AppStorage("shadowtype.unloadIdleMinutes") private var unloadIdle = 10
 
     @State private var unlocked = Entitlement.isUnlocked
-    @State private var installed: Set<String> = []
-    @State private var downloading: String?
-    // Live download progress for `downloading` (0...1), nil while the total size is unknown.
-    // Fed by .shadowtypeModelDownloadProgress (posted by AppDelegate).
-    @State private var downloadFraction: Double?
-    // Last failed download/swap reason, from .shadowtypeModelDidChange userInfo["error"].
-    // Cleared on the next apply()/successful swap.
-    @State private var downloadError: String?
-    // Whether the inference engine actually has the active model resident (from
-    // .shadowtypeEngineLoadStateChanged). Distinct from activeModelFileExists: a model can be on disk
-    // yet fail to load (Metal init failure on new GPU/OS) — the pill must not claim "Loaded" then.
-    @State private var engineLoaded = true
-    @State private var engineLoadError: String?
-    // Imported entry pending the "Remove" confirmation dialog.
-    @State private var removeCandidate: ImportedModelEntry?
-    @State private var freeDisk = ""           // recomputed by rescan(), not per-render
-
-    private let manager = ModelManager()
-    private var physicalBytes: UInt64 { ProcessInfo.processInfo.physicalMemory }
-
-    private static var modelsDir: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("Shadowtype/models", isDirectory: true)
-    }
-
-    @State private var importedEntries: [ImportedModelEntry] = []
-    @State private var importError: String? = nil
-    @State private var hfSheetVisible: Bool = false
+    @StateObject private var model = ModelsSettingsModel()
 
     private var selectedEntry: ModelCatalogEntry {
-        if selectedID.hasPrefix("byom-"),
-           let imp = importedEntries.first(where: { $0.id == selectedID }) {
-            return imp.asCatalogEntry
-        }
-        return ModelCatalog.entries.first { $0.id == selectedID } ?? ModelCatalog.entries[0]
+        model.selectedEntry(for: selectedID)
     }
 
     // Whether the selected model's file is actually on disk — drives the Active-model pill and
     // gates "Reveal in Finder" (revealing a non-existent file just opens an unrelated folder).
     private var activeModelFileExists: Bool {
-        FileManager.default.fileExists(atPath: manager.modelURL(for: selectedEntry).path)
+        model.modelFileExists(selectedEntry)
     }
 
     // Derived Active-model state: a download in flight beats everything (apply() only ever starts a
     // download for the model it just selected), then installed vs missing-on-disk.
     @ViewBuilder private var activeModelPill: some View {
-        if downloading != nil {
+        if model.downloading != nil {
             Pill(text: "Downloading…", kind: .warn)
         } else if !activeModelFileExists {
             Pill(text: "Not downloaded", kind: .warn)
-        } else if !engineLoaded {
+        } else if !model.engineLoaded {
             Pill(text: "Failed to load", kind: .warn)
         } else {
             Pill(text: "Loaded", kind: .good)
@@ -533,12 +520,12 @@ private struct ModelsPane: View {
                     // object's digest — and it can legitimately fall back to the GGUF-magic check.
                     text: "**All inference runs on this Mac** via llama.cpp + Metal. Models download once over HTTPS, are checked against the publisher's SHA-256 whenever one is available, and never phone home during completion.")
 
-            if let err = downloadError {
+            if let err = model.downloadError {
                 Callout(systemImage: "exclamationmark.triangle.fill",
                         text: LocalizedStringKey(err), tint: .orange)
             }
 
-            if let err = engineLoadError {
+            if let err = model.engineLoadError {
                 Callout(systemImage: "exclamationmark.triangle.fill",
                         text: LocalizedStringKey("This model is on disk but failed to load, so no suggestions will appear: \(err) Full details are in diag.log."),
                         tint: .orange)
@@ -556,7 +543,9 @@ private struct ModelsPane: View {
                     }
                     Spacer()
                     Button("Reveal in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([manager.modelURL(for: selectedEntry)])
+                        NSWorkspace.shared.activateFileViewerSelecting([
+                            model.modelURL(for: selectedEntry)
+                        ])
                     }
                     .controlSize(.small)
                     .disabled(!activeModelFileExists)
@@ -577,8 +566,8 @@ private struct ModelsPane: View {
             // too slow to make the coordinator's first-token deadline (a 32 GB Mac clears the 30B MoE).
             // ModelCatalog.recommended() is the single recommendation, and it caps well below the RAM
             // ceiling — labelling this whole list "Recommended" was telling the user to pick the biggest.
-            let fits = ModelCatalog.entries.filter { ModelCatalog.ramOK(for: $0, physicalBytes: physicalBytes) }
-            let other = ModelCatalog.entries.filter { !ModelCatalog.ramOK(for: $0, physicalBytes: physicalBytes) }
+            let fits = ModelCatalog.entries.filter(model.fitsPhysicalMemory)
+            let other = ModelCatalog.entries.filter { !model.fitsPhysicalMemory($0) }
 
             if !fits.isEmpty {
                 Section {
@@ -587,7 +576,7 @@ private struct ModelsPane: View {
                     HStack {
                         Text("Fits this Mac")
                         Spacer()
-                        Text(freeDisk).font(.caption).foregroundStyle(.secondary)
+                        Text(model.freeDisk).font(.caption).foregroundStyle(.secondary)
                             .textCase(nil)
                     }
                 } footer: {
@@ -609,22 +598,22 @@ private struct ModelsPane: View {
             // "Import .gguf…" button. Symlinked into models/imported/ — the user's original file
             // is never copied or modified.
             Section {
-                if importedEntries.isEmpty {
+                if model.importedEntries.isEmpty {
                     Text("No imported models yet.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                ForEach(importedEntries) { entry in
+                ForEach(model.importedEntries) { entry in
                     importedRow(entry)
                 }
                 HStack {
-                    Button("Import .gguf…") { importLocalGGUF() }
+                    Button("Import .gguf…") { model.importLocalGGUF() }
                         .disabled(!unlocked)
-                    Button("Import from HuggingFace…") { hfSheetVisible = true }
+                    Button("Import from HuggingFace…") { model.hfSheetVisible = true }
                         .disabled(!unlocked)
                     if !unlocked { ProBadgeInline2() }
                     Spacer()
-                    if let err = importError {
+                    if let err = model.importError {
                         Text(err).font(.caption).foregroundStyle(.red)
                             .lineLimit(2).truncationMode(.tail)
                     }
@@ -637,48 +626,40 @@ private struct ModelsPane: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Models")
-        .onAppear { rescan(); importedEntries = ImportedModelStore.shared.entries() }
-        .sheet(isPresented: $hfSheetVisible) {
+        .onAppear {
+            model.rescan()
+            model.reloadImportedEntries()
+        }
+        .sheet(isPresented: $model.hfSheetVisible) {
             HFImportSheet { newEntry in
-                importedEntries = ImportedModelStore.shared.entries()
                 // Switch to the just-imported model so the user sees it become Active without
                 // having to find it in the list and click "Switch to".
-                apply(to: newEntry.id)
+                model.importedFromHuggingFace(newEntry, selectedID: $selectedID)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .shadowtypeModelDidChange)) { note in
-            downloading = nil
-            downloadFraction = nil
-            rescan()
-            if let id = note.userInfo?["id"] as? String,
-               note.userInfo?["ok"] as? Bool == false {
-                downloadError = (note.userInfo?["error"] as? String)
-                    ?? "Download failed — check disk space and network."
-                if selectedID == id { selectedID = ModelCatalog.entries[0].id }
-            } else {
-                downloadError = nil
-            }
+            model.handleModelDidChange(note, selectedID: $selectedID)
         }
         .onReceive(NotificationCenter.default.publisher(for: .shadowtypeModelDownloadProgress)) { note in
-            guard let id = note.userInfo?["id"] as? String, id == downloading else { return }
-            downloadFraction = note.userInfo?["fraction"] as? Double
+            model.handleModelDownloadProgress(note)
         }
         .onReceive(NotificationCenter.default.publisher(for: .shadowtypeEngineLoadStateChanged)) { note in
-            engineLoaded = note.userInfo?["loaded"] as? Bool ?? true
-            engineLoadError = engineLoaded ? nil : (note.userInfo?["error"] as? String)
+            model.handleEngineLoadStateChanged(note)
         }
         .confirmationDialog(
-            "Remove \u{201C}\(removeCandidate?.name ?? "model")\u{201D}?",
-            isPresented: Binding(get: { removeCandidate != nil },
-                                 set: { if !$0 { removeCandidate = nil } }),
+            "Remove \u{201C}\(model.removeCandidate?.name ?? "model")\u{201D}?",
+            isPresented: Binding(get: { model.removeCandidate != nil },
+                                 set: { if !$0 { model.removeCandidate = nil } }),
             titleVisibility: .visible,
-            presenting: removeCandidate
+            presenting: model.removeCandidate
         ) { entry in
-            Button("Remove", role: .destructive) { confirmRemove(entry) }
+            Button("Remove", role: .destructive) {
+                model.confirmRemove(entry, selectedID: $selectedID)
+            }
             Button("Cancel", role: .cancel) {}
         } message: { entry in
             if entry.id == selectedID {
-                Text("This model is currently active — suggestions will stop until another model is selected. Shadowtype will switch to \u{201C}\(removalFallbackEntry.name)\u{201D} after removal. Your original .gguf file on disk is not deleted.")
+                Text("This model is currently active — suggestions will stop until another model is selected. Shadowtype will switch to \u{201C}\(model.removalFallbackEntry.name)\u{201D} after removal. Your original .gguf file on disk is not deleted.")
             } else {
                 Text("This removes the import from Shadowtype. Your original .gguf file on disk is not deleted.")
             }
@@ -690,29 +671,15 @@ private struct ModelsPane: View {
     // fits — so removing a BYOM model silently landed the user on the 1B while the rest of the pane
     // badged something else as recommended. Same call as the badge, so the dialog's named model and
     // the recommendation cannot disagree.
-    private var removalFallbackEntry: ModelCatalogEntry {
-        ModelCatalog.recommended(physicalBytes: physicalBytes)
-    }
-
     // The single entry ModelCatalog.recommended() would pre-select for this Mac, used to badge one row.
     private var recommendedEntry: ModelCatalogEntry {
-        ModelCatalog.recommended(physicalBytes: physicalBytes)
-    }
-
-    private func confirmRemove(_ entry: ImportedModelEntry) {
-        let wasActive = entry.id == selectedID
-        ImportedModelStore.shared.remove(id: entry.id)
-        importedEntries = ImportedModelStore.shared.entries()
-        if wasActive {
-            // Re-point the engine at a real model so suggestions come back without a manual pick.
-            apply(to: removalFallbackEntry.id)
-        }
+        model.recommendedEntry
     }
 
     @ViewBuilder private func libraryRow(_ entry: ModelCatalogEntry) -> some View {
         let isActive = entry.id == selectedID
-        let isInstalled = installed.contains(entry.id)
-        let ramOK = ModelCatalog.ramOK(for: entry, physicalBytes: physicalBytes)
+        let isInstalled = model.installed.contains(entry.id)
+        let ramOK = model.fitsPhysicalMemory(entry)
         HStack(spacing: 10) {
             Image(systemName: "cube.box.fill")
                 .foregroundStyle(.secondary)
@@ -730,8 +697,8 @@ private struct ModelsPane: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            if downloading == entry.id {
-                if let fraction = downloadFraction {
+            if model.downloading == entry.id {
+                if let fraction = model.downloadFraction {
                     ProgressView(value: fraction).frame(width: 90)
                     Text("\(Int(fraction * 100))%")
                         .font(.caption.monospaced()).foregroundStyle(.secondary)
@@ -742,13 +709,14 @@ private struct ModelsPane: View {
                 Button("In use") {}.disabled(true).controlSize(.small)
             } else if isInstalled {
                 Pill(text: "Downloaded", kind: .good)
-                Button("Switch to") { apply(to: entry.id) }.controlSize(.small)
-                    .disabled(downloading != nil)   // no mid-download switch race
+                Button("Switch to") { model.apply(to: entry.id, selectedID: $selectedID) }
+                    .controlSize(.small)
+                    .disabled(model.downloading != nil)   // no mid-download switch race
             } else {
                 Text(gb(entry.downloadGB)).font(.caption.monospaced()).foregroundStyle(.secondary)
-                Button("Download") { apply(to: entry.id) }
+                Button("Download") { model.apply(to: entry.id, selectedID: $selectedID) }
                     .controlSize(.small).buttonStyle(.borderedProminent)
-                    .disabled(downloading != nil)   // one download at a time
+                    .disabled(model.downloading != nil)   // one download at a time
             }
         }
         .padding(.vertical, 2)
@@ -768,49 +736,6 @@ private struct ModelsPane: View {
     }
 
     private func gb(_ v: Double) -> String { String(format: "%.1f GB", v) }
-
-    // Volume free-space query (an APFS syscall) — call once on appear, not from a body expression.
-    private static func computeFreeDisk() -> String {
-        let url = modelsDir.deletingLastPathComponent()
-        if let vals = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
-           let bytes = vals.volumeAvailableCapacityForImportantUsage {
-            return String(format: "%.1f GB free on disk", Double(bytes) / 1e9)
-        }
-        return ""
-    }
-
-    private func rescan() {
-        var present: Set<String> = []
-        for entry in ModelCatalog.entries
-        where FileManager.default.fileExists(atPath: manager.modelURL(for: entry).path) {
-            present.insert(entry.id)
-        }
-        installed = present
-        // Free space changes with every download/removal, so refresh it alongside the install scan.
-        freeDisk = Self.computeFreeDisk()
-    }
-
-    // Posts the live-swap request (AppDelegate downloads-if-needed + swaps on the inference queue,
-    // then posts .shadowtypeModelDidChange).
-    private func apply(to newID: String) {
-        downloadError = nil
-        downloadFraction = nil
-        // M3 BYOM: imported IDs route through ImportedModelStore so the swap notification carries
-        // a synthesized ModelCatalogEntry pointing at the symlink. No download path; AppDelegate
-        // calls swapModel which calls ensureModel which (for byom-) short-circuits to the path.
-        if newID.hasPrefix("byom-") {
-            guard let imp = importedEntries.first(where: { $0.id == newID }) else { return }
-            selectedID = newID
-            NotificationCenter.default.post(name: .shadowtypeSelectModel, object: nil,
-                                            userInfo: ["entry": imp.asCatalogEntry])
-            return
-        }
-        guard newID != selectedID,
-              let entry = ModelCatalog.entries.first(where: { $0.id == newID }) else { return }
-        if !installed.contains(entry.id) { downloading = entry.id }
-        selectedID = newID
-        NotificationCenter.default.post(name: .shadowtypeSelectModel, object: nil, userInfo: ["entry": entry])
-    }
 
     // --- M3 BYOM: import UI + plumbing -------------------------------------------------------
 
@@ -832,11 +757,11 @@ private struct ModelsPane: View {
             if isActive {
                 Button("In use") {}.disabled(true).controlSize(.small)
             } else {
-                Button("Switch to") { apply(to: entry.id) }
+                Button("Switch to") { model.apply(to: entry.id, selectedID: $selectedID) }
                     .controlSize(.small)
-                    .disabled(downloading != nil)   // no mid-download switch race
+                    .disabled(model.downloading != nil)   // no mid-download switch race
             }
-            Button("Remove") { removeCandidate = entry }
+            Button("Remove") { model.removeCandidate = entry }
                 .controlSize(.small)
         }
         .padding(.vertical, 2)
@@ -848,47 +773,6 @@ private struct ModelsPane: View {
         return s
     }
 
-    // NSOpenPanel → validate GGUF magic → symlink into models/imported → ImportedModelStore.insert.
-    // We deliberately don't try to load the model here (Metal warmup is slow + would block this
-    // queue); the magic-byte check is enough to reject obviously-wrong files. A truly broken GGUF
-    // will fail when the user actually switches to it, with the normal engine.load error path.
-    private func importLocalGGUF() {
-        importError = nil
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "gguf")].compactMap { $0 }
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.title = "Import GGUF model"
-        panel.prompt = "Import"
-        if panel.runModal() != .OK, panel.url == nil { return }
-        guard let src = panel.url else { return }
-
-        if !ModelManager.isValidGGUF(src) {
-            importError = "Not a valid GGUF file: \(src.lastPathComponent)"
-            return
-        }
-        do {
-            let linkedPath = try ImportedModelStore.shared.createSymlink(from: src)
-            // Best-effort RAM estimate from file size — quantized model file size ≈ resident RAM
-            // for Q4 family; close enough for the "tight on this Mac" hint.
-            let bytes = (try? FileManager.default.attributesOfItem(atPath: src.path)[.size] as? NSNumber)?.int64Value ?? 0
-            let approxGB = Double(bytes) / (1024 * 1024 * 1024) * 1.1
-            let entry = ImportedModelEntry(
-                id: ImportedModelStore.shared.generateID(),
-                name: src.deletingPathExtension().lastPathComponent,
-                fileName: (linkedPath as NSString).lastPathComponent,
-                linkedPath: linkedPath,
-                originalPath: src.path,
-                approxRAMGB: approxGB,
-                source: .localFile,
-                createdAt: Date()
-            )
-            ImportedModelStore.shared.insert(entry)
-            importedEntries = ImportedModelStore.shared.entries()
-        } catch {
-            importError = "Import failed: \(error.localizedDescription)"
-        }
-    }
 }
 
 // Empty stub — Shadowtype is free, so there is no Pro badge. Kept so dead `if !unlocked` call sites
@@ -902,10 +786,20 @@ private struct ProBadgeInline2: View {
 private struct ContextPane: View {
     @State private var unlocked = Entitlement.isUnlocked
     @AppStorage("shadowtype.useScreenOCR") private var useScreenOCR = false
+    @State private var screenRecordingGranted =
+        PermissionsManager.isGranted(.screenRecording)
     @AppStorage("clipboardContextEnabled") private var clipboardContext = false
     // Live: AppDelegate.syncToggles caps engine.maxContextTokens from this key AND derives the
     // coordinator's prompt byte budget from it, so this picker sizes the context blocks too.
     @AppStorage("shadowtype.contextWindowTokens") private var contextTokens = 1024
+    private let permissionTick = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
+
+    private var effectiveScreenOCR: Binding<Bool> {
+        Binding(
+            get: { useScreenOCR && screenRecordingGranted },
+            set: { useScreenOCR = $0 }
+        )
+    }
 
     var body: some View {
         Form {
@@ -916,8 +810,21 @@ private struct ContextPane: View {
                 LabeledContent("Text before the caret") { Pill(text: "Always on", kind: .good) }
                 caption("The window of text you’re currently typing. Always used — it’s how completion works.")
 
-                Toggle("Use screen text for context", isOn: $useScreenOCR)
+                Toggle("Use screen text for context", isOn: effectiveScreenOCR)
+                    .disabled(!screenRecordingGranted)
                 caption("Reads what's on screen so suggestions fit the surrounding text — e.g. the email thread you're replying to. In web apps (Gmail, etc.) it reads the page directly via Accessibility (exact, instant, no extra permission); elsewhere it falls back to on-device OCR (needs Screen Recording — see Permissions). Everything stays on your Mac, never stored or sent. Off by default; nothing is captured while off.")
+                if useScreenOCR && !screenRecordingGranted {
+                    HStack {
+                        Label("Screen Recording required", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Spacer()
+                        Button("Open Permissions") {
+                            NSWorkspace.shared.open(Permission.screenRecording.settingsURL)
+                        }
+                        .controlSize(.small)
+                    }
+                }
 
                 Toggle(isOn: $clipboardContext) {
                     HStack(spacing: 6) { Text("Clipboard awareness"); if !unlocked { ProBadge() } }
@@ -940,29 +847,30 @@ private struct ContextPane: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Context")
+        .onAppear { refreshScreenRecordingPermission() }
+        .onReceive(permissionTick) { _ in refreshScreenRecordingPermission() }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in
+                refreshScreenRecordingPermission()
+            }
+    }
+
+    private func refreshScreenRecordingPermission() {
+        screenRecordingGranted = PermissionsManager.isGranted(.screenRecording)
     }
 }
 
 // MARK: Apps & Domains — per-app + per-domain rules (AppRules-backed where the bundle/domain is known).
 
 private struct AppsDomainsPane: View {
+    private let metadataProvider = ApplicationMetadataProvider.shared
+    @StateObject private var model = AppScopeSettingsModel()
+
     // AppRules is the source of truth; these @State mirrors drive native redraw on toggle (no .id()
     // rebuild). `defaultOn` is the per-new-app default; the disabled/enabled sets are the explicit
     // overrides that buck it. All are reloaded from AppRules via refreshRules().
-    @State private var defaultOn = true
-    @State private var disabledApps: Set<String> = []
-    @State private var disabledDomains: Set<String> = []
-    @State private var enabledApps: Set<String> = []
-    @State private var enabledDomains: Set<String> = []
-    // Master-detail selection + session-only "just added" keys (they persist once a setting is changed).
-    @State private var selection: TargetRef? = nil
-    @State private var addedApps: Set<String> = []
-    @State private var addedDomains: Set<String> = []
-    @State private var addText = ""
-    @State private var detailTick = 0   // bump to force the detail's tri-state pickers to re-read
-
-    enum Kind: Hashable { case app, domain }
-    struct TargetRef: Hashable { let kind: Kind; let key: String }
+    private typealias Kind = AppScopeSettingsModel.Kind
+    private typealias TargetRef = AppScopeSettingsModel.TargetRef
 
     private struct Target {
         let name: String; let key: String; let glyph: String
@@ -989,23 +897,26 @@ private struct AppsDomainsPane: View {
     private var allAppKeys: [String] {
         // Keys the user has explicitly configured — always visible regardless of install state.
         var configured = Set(apps.map(\.key))
-        configured.formUnion(disabledApps); configured.formUnion(enabledApps)
+        configured.formUnion(model.disabledApps); configured.formUnion(model.enabledApps)
         configured.formUnion(InstructionStore.shared.allPerApp().keys)
         configured.formUnion(AppSettingsStore.shared.configuredBundleIds())
-        configured.formUnion(addedApps)
+        configured.formUnion(model.addedApps)
         // Built-in-override apps only join the list when installed.
-        let builtInInstalled = BuiltInAppOverrides.table.keys.filter { AppMeta.isInstalled($0) }
+        let builtInInstalled = BuiltInAppOverrides.table.keys.filter { metadataProvider.isInstalled($0) }
         let s = configured.union(builtInInstalled)
         return s.sorted { a, b in
             let aOff = !AppRules.shared.isEnabled(bundleId: a, domain: nil)
             let bOff = !AppRules.shared.isEnabled(bundleId: b, domain: nil)
             if aOff != bOff { return !aOff }   // allowed before blocked
-            return AppMeta.displayName(a).localizedCaseInsensitiveCompare(AppMeta.displayName(b)) == .orderedAscending
+            return metadataProvider.displayName(a)
+                .localizedCaseInsensitiveCompare(metadataProvider.displayName(b)) == .orderedAscending
         }
     }
     private var allDomainKeys: [String] {
         var s = Set(domains.map(\.key))
-        s.formUnion(disabledDomains); s.formUnion(enabledDomains); s.formUnion(addedDomains)
+        s.formUnion(model.disabledDomains)
+        s.formUnion(model.enabledDomains)
+        s.formUnion(model.addedDomains)
         return s.sorted()
     }
 
@@ -1016,9 +927,9 @@ private struct AppsDomainsPane: View {
             detail.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle("Apps & Domains")
-        .onAppear(perform: refreshRules)
+        .onAppear(perform: model.refreshRules)
         .onReceive(NotificationCenter.default.publisher(for: .shadowtypeAppRulesDidChange)) { _ in
-            refreshRules()   // reflect a menu-bar "Pause for current app" toggle while this pane is open
+            model.refreshRules()   // reflect a menu-bar "Pause for current app" toggle while this pane is open
         }
     }
 
@@ -1026,7 +937,7 @@ private struct AppsDomainsPane: View {
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            List(selection: $selection) {
+            List(selection: $model.selection) {
                 Section("Apps") {
                     ForEach(allAppKeys, id: \.self) { key in
                         sidebarRow(key: key, kind: .app).tag(TargetRef(kind: .app, key: key))
@@ -1050,7 +961,7 @@ private struct AppsDomainsPane: View {
         let builtIn = kind == .app ? BuiltInAppOverrides.override(forBundleId: key) : nil
         HStack(spacing: 8) {
             AppIconView(bundleId: kind == .app ? key : nil, isDomain: kind == .domain, size: 18)
-            Text(kind == .app ? AppMeta.displayName(key) : key)
+            Text(kind == .app ? metadataProvider.displayName(key) : key)
                 .strikethrough(off)
                 .foregroundStyle(off ? Color.secondary : Color.primary)
                 .lineLimit(1).truncationMode(.middle)
@@ -1064,14 +975,14 @@ private struct AppsDomainsPane: View {
     private var addBar: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                TextField("Add bundle id or domain…", text: $addText)
+                TextField("Add bundle id or domain…", text: $model.addText)
                     .textFieldStyle(.roundedBorder).font(.caption)
                 Menu {
-                    Button("Add as app") { addTarget(isApp: true) }
-                    Button("Add as domain") { addTarget(isApp: false) }
+                    Button("Add as app") { model.addTarget(isApp: true) }
+                    Button("Add as domain") { model.addTarget(isApp: false) }
                 } label: { Image(systemName: "plus") }
                     .menuStyle(.borderlessButton).fixedSize()
-                    .disabled(addText.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(model.addText.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             Text("Domain rules match subdomains too — “google.com” also matches “mail.google.com”.")
                 .font(.caption2).foregroundStyle(.secondary)
@@ -1080,21 +991,10 @@ private struct AppsDomainsPane: View {
         .padding(8)
     }
 
-    private func addTarget(isApp: Bool) {
-        let v = addText.trimmingCharacters(in: .whitespaces)
-        guard !v.isEmpty else { return }
-        if isApp {
-            addedApps.insert(v); selection = TargetRef(kind: .app, key: v)
-        } else {
-            let d = v.lowercased(); addedDomains.insert(d); selection = TargetRef(kind: .domain, key: d)
-        }
-        addText = ""
-    }
-
     // MARK: Detail (overview when nothing is selected; per-app / per-domain otherwise)
 
     @ViewBuilder private var detail: some View {
-        if let sel = selection {
+        if let sel = model.selection {
             switch sel.kind {
             case .app:    appDetail(sel.key)
             case .domain: domainDetail(sel.key)
@@ -1107,11 +1007,18 @@ private struct AppsDomainsPane: View {
     @ViewBuilder private func appDetail(_ key: String) -> some View {
         let builtIn = BuiltInAppOverrides.override(forBundleId: key)
         Form {
+            if let appSettingsError = model.appSettingsError {
+                Callout(
+                    systemImage: "exclamationmark.triangle.fill",
+                    text: LocalizedStringKey(appSettingsError),
+                    tint: .orange
+                )
+            }
             Section {
                 HStack(spacing: 12) {
                     AppIconView(bundleId: key, isDomain: false, size: 40)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(AppMeta.displayName(key)).font(.title3.weight(.semibold))
+                        Text(metadataProvider.displayName(key)).font(.title3.weight(.semibold))
                         Text(builtIn != nil ? "Has built-in overrides" : key)
                             .font(.caption).foregroundStyle(.secondary)
                     }
@@ -1126,34 +1033,34 @@ private struct AppsDomainsPane: View {
                 triRow("Enable completions",
                        "Turn suggestions on or off in this app.",
                        defaultOn: AppRules.shared.defaultEnabled(forBundleId: key),
-                       state: appCompletionsBinding(key))
+                       state: model.appCompletionsBinding(key))
                 triRow("Mid-line completions",
                        "Suggest even when there's text after the cursor on the same line.",
                        defaultOn: false,
-                       state: cfg(\.midLine, key))
+                       state: model.configBinding(\.midLine, bundleId: key))
                 if ActivationPolicy.isTerminal(bundleId: key) {
                     triRow("Shell commands",
                            "Suggest the next shell command at the prompt, drawn from your recent commands. Off by default — shells already have their own completion; ⌃` forces a suggestion either way. Destructive commands (rm -rf /, etc.) are never suggested.",
                            defaultOn: false,
-                           state: cfg(\.shellCommands, key))
+                           state: model.configBinding(\.shellCommands, bundleId: key))
                 }
                 triRow("Autocorrect",
                        "Offer a fix when the word you're typing looks like a typo.",
                        defaultOn: UserDefaults.standard.bool(forKey: "GW.autocorrectEnabled"),
-                       state: cfg(\.autocorrect, key))
+                       state: model.configBinding(\.autocorrect, bundleId: key))
                 triRow("Disable Tab key",
                        "Stop Tab from accepting completions, for apps where Tab has native use.",
                        defaultOn: false,
-                       state: cfg(\.disableTab, key))
+                       state: model.configBinding(\.disableTab, bundleId: key))
                 triRow("Accept with Right Arrow",
                        "Accept the next word with Right Arrow at end-of-line, in addition to Tab.",
                        defaultOn: (UserDefaults.standard.object(forKey: "shadowtype.acceptOnRightArrow") as? Bool) ?? true,
-                       state: cfg(\.rightArrowAccept, key))
+                       state: model.configBinding(\.rightArrowAccept, bundleId: key))
             }
 
             Section("Custom instructions") {
                 TextField("Additional instructions for the AI in this app…",
-                          text: instrBinding(key), axis: .vertical)
+                          text: model.instructionBinding(key), axis: .vertical)
                     .lineLimit(3...8)
                 caption("Overrides the global instructions from Personalization for this app.")
             }
@@ -1162,8 +1069,11 @@ private struct AppsDomainsPane: View {
                 triRow("Collect inputs for personalization",
                        "Learn your writing style from accepted text in this app. Stays on this Mac.",
                        defaultOn: collectInputsGlobalDefault,
-                       state: cfg(\.collectInputs, key))
-                let count = { () -> Int in _ = detailTick; return StyleProfile.shared.inputCount(forBundleId: key) }()
+                       state: model.configBinding(\.collectInputs, bundleId: key))
+                let count = { () -> Int in
+                    _ = model.detailTick
+                    return StyleProfile.shared.inputCount(forBundleId: key)
+                }()
                 HStack {
                     Text("Collected inputs")
                     Spacer()
@@ -1171,7 +1081,7 @@ private struct AppsDomainsPane: View {
                         .foregroundStyle(.secondary)
                     Button("Delete…") {
                         StyleProfile.shared.deleteApp(bundleId: key)
-                        detailTick += 1
+                        model.refreshDetail()
                     }
                     .controlSize(.small)
                     .disabled(count == 0)
@@ -1198,7 +1108,7 @@ private struct AppsDomainsPane: View {
                 triRow("Enable completions",
                        "Turn suggestions on or off on this website.",
                        defaultOn: AppRules.shared.defaultEnabled(),
-                       state: domainCompletionsBinding(key))
+                       state: model.domainCompletionsBinding(key))
             }
         }
         .formStyle(.grouped)
@@ -1208,16 +1118,15 @@ private struct AppsDomainsPane: View {
     @ViewBuilder private var overviewDetail: some View {
         Form {
             Section {
-                Picker(selection: $defaultOn) {
+                Picker(selection: $model.defaultOn) {
                     Text("On").tag(true)
                     Text("Off").tag(false)
                 } label: {
                     Text("Default behavior in new apps")
                 }
                 .pickerStyle(.segmented)
-                .onChange(of: defaultOn) {
-                    AppRules.shared.setDefaultEnabled(defaultOn)
-                    refreshRules()   // flipping the default prunes now-redundant overrides
+                .onChange(of: model.defaultOn) {
+                    model.setDefaultEnabled(model.defaultOn)
                 }
                 caption("Whether Shadowtype is on by default in apps you haven’t configured.")
 
@@ -1295,65 +1204,6 @@ private struct AppsDomainsPane: View {
         .padding(.vertical, 1)
     }
 
-    // "Enable completions" maps the AppRules explicit-enable/disable lists onto a tri-state: an entry in
-    // the disabled list → Off, the enabled list → On, neither → Default. Setting Default writes the
-    // app's *effective* default (built-in-aware), which clears the override.
-    private func appCompletionsBinding(_ key: String) -> Binding<TriState> {
-        Binding(
-            get: {
-                if disabledApps.contains(key) { return .off }
-                if enabledApps.contains(key) { return .on }
-                return .auto
-            },
-            set: { st in
-                switch st {
-                case .on:   AppRules.shared.setEnabled(true, bundleId: key)
-                case .off:  AppRules.shared.setEnabled(false, bundleId: key)
-                case .auto: AppRules.shared.setEnabled(AppRules.shared.defaultEnabled(forBundleId: key), bundleId: key)
-                }
-                refreshRules()
-            })
-    }
-
-    private func domainCompletionsBinding(_ key: String) -> Binding<TriState> {
-        Binding(
-            get: {
-                if disabledDomains.contains(key) { return .off }
-                if enabledDomains.contains(key) { return .on }
-                return .auto
-            },
-            set: { st in
-                switch st {
-                case .on:   AppRules.shared.setEnabled(true, domain: key)
-                case .off:  AppRules.shared.setEnabled(false, domain: key)
-                case .auto: AppRules.shared.setEnabled(AppRules.shared.defaultEnabled(), domain: key)
-                }
-                refreshRules()
-            })
-    }
-
-    private func cfg(_ field: WritableKeyPath<AppConfig, TriState>, _ key: String) -> Binding<TriState> {
-        Binding(
-            get: { _ = detailTick; return AppSettingsStore.shared.config(forBundleId: key)[keyPath: field] },
-            set: { AppSettingsStore.shared.set($0, field, forBundleId: key); detailTick += 1 })
-    }
-
-    private func instrBinding(_ key: String) -> Binding<String> {
-        Binding(
-            get: { InstructionStore.shared.instruction(forBundleId: key) ?? "" },
-            set: { InstructionStore.shared.setInstruction($0.isEmpty ? nil : $0, forBundleId: key) })
-    }
-
-    // Re-read the AppRules state into the @State mirrors so SwiftUI re-evaluates the toggles' bindings
-    // (which read AppRules directly). Called on appear and after every mutation.
-    private func refreshRules() {
-        defaultOn = AppRules.shared.defaultEnabled()
-        disabledApps = Set(AppRules.shared.disabledBundleIds())
-        disabledDomains = Set(AppRules.shared.disabledDomains())
-        enabledApps = Set(AppRules.shared.enabledBundleIds())
-        enabledDomains = Set(AppRules.shared.enabledDomains())
-    }
-
     // Compatibility map (Cotypist parity). Curated, illustrative — not exhaustive.
     private let supportedApps = ["Mail", "Notes", "Slack", "Notion", "Safari & Chrome", "TextEdit", "Messages"]
     private let unsupportedApps: [(name: String, reason: String)] = [
@@ -1402,52 +1252,14 @@ private struct AppsDomainsPane: View {
 
 // MARK: App metadata + reusable per-app controls
 
-// Localized app name + icon for a bundle id, cached. Settings isn't latency-critical, but the sidebar
-// redraws on every toggle, so we avoid hitting NSWorkspace each pass. Falls back to the last bundle-id
-// component / a glyph when the app isn't installed. Main-thread only (SwiftUI).
-private enum AppMeta {
-    private static var nameCache: [String: String] = [:]
-    private static var iconCache: [String: NSImage?] = [:]
-
-    static func displayName(_ bundleId: String) -> String {
-        if let c = nameCache[bundleId] { return c }
-        let name: String
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
-            name = FileManager.default.displayName(atPath: url.path)
-        } else if let last = bundleId.split(separator: ".").last {
-            name = String(last)
-        } else {
-            name = bundleId
-        }
-        nameCache[bundleId] = name
-        return name
-    }
-
-    static func icon(_ bundleId: String) -> NSImage? {
-        if let c = iconCache[bundleId] { return c }
-        let img = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId)
-            .map { NSWorkspace.shared.icon(forFile: $0.path) }
-        iconCache[bundleId] = img
-        return img
-    }
-
-    // Whether a bundle id resolves to an app actually present on this machine (cached).
-    static func isInstalled(_ bundleId: String) -> Bool {
-        if let c = installedCache[bundleId] { return c }
-        let present = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) != nil
-        installedCache[bundleId] = present
-        return present
-    }
-    private static var installedCache: [String: Bool] = [:]
-}
-
 // Real app icon (or a globe / dashed-app fallback), sized for both the sidebar and the detail header.
 private struct AppIconView: View {
+    private let metadataProvider = ApplicationMetadataProvider.shared
     let bundleId: String?
     var isDomain: Bool = false
     var size: CGFloat = 20
     var body: some View {
-        if let id = bundleId, let img = AppMeta.icon(id) {
+        if let id = bundleId, let img = metadataProvider.icon(id) {
             Image(nsImage: img).resizable().frame(width: size, height: size)
         } else {
             Image(systemName: isDomain ? "globe" : "app.dashed")
@@ -1928,120 +1740,6 @@ private struct AboutPane: View {
 
 // MARK: - Permissions (PRD §8.1 guided onboarding / FR-KC-1)
 
-// The app can't grant TCC to itself (macOS forbids it). It CAN: read live status, trigger the
-// system prompt, deep-link to the right pane, re-check, and relaunch (the event tap is created
-// once at launch, so a fresh grant only takes effect after relaunch).
-// Shared with OnboardingWindow.swift (first-run permissions step), so internal rather than private.
-enum Permission: String, CaseIterable, Identifiable {
-    case accessibility, inputMonitoring, screenRecording
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .accessibility:   return "Accessibility"
-        case .inputMonitoring: return "Input Monitoring"
-        case .screenRecording: return "Screen Recording"
-        }
-    }
-    var why: String {
-        switch self {
-        case .accessibility:   return "Read the focused field's text + caret, and inject accepted words."
-        case .inputMonitoring: return "Observe keystrokes to trigger completion and swallow the accept key."
-        case .screenRecording: return "Optional — only for screen-aware (OCR) context. Not needed otherwise."
-        }
-    }
-    var required: Bool { self != .screenRecording }
-
-    // System Settings deep link for this pane.
-    var settingsURL: URL {
-        let anchor: String
-        switch self {
-        case .accessibility:   anchor = "Privacy_Accessibility"
-        case .inputMonitoring: anchor = "Privacy_ListenEvent"
-        case .screenRecording: anchor = "Privacy_ScreenCapture"
-        }
-        return URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")!
-    }
-}
-
-final class PermissionsManager: ObservableObject {
-    @Published var granted: [Permission: Bool] = [:]
-
-    init() { refresh() }
-
-    static func isGranted(_ p: Permission) -> Bool {
-        switch p {
-        case .accessibility:   return AXIsProcessTrusted()
-        case .inputMonitoring: return CGPreflightListenEventAccess()
-        case .screenRecording: return CGPreflightScreenCaptureAccess()
-        }
-    }
-
-    static func allRequiredGranted() -> Bool {
-        Permission.allCases.filter { $0.required }.allSatisfy { isGranted($0) }
-    }
-
-    func refresh() {
-        var next: [Permission: Bool] = [:]
-        for p in Permission.allCases { next[p] = Self.isGranted(p) }
-        granted = next
-        autoEnableOCRIfScreenRecordingGranted(next[.screenRecording] ?? false)
-    }
-
-    // Screen Recording is the only thing the OCR context feature needs. The first time we observe it
-    // granted, OFFER to enable on-screen OCR (FR-CTX-1) — never flip it silently: the user may have
-    // granted Screen Recording for an unrelated reason, and "app starts reading my screen" must be an
-    // explicit choice. Gated by a one-time persisted flag so the offer doesn't repeat on every poll.
-    // Revoking Screen Recording clears the flag, so a future re-grant offers again.
-    private func autoEnableOCRIfScreenRecordingGranted(_ granted: Bool) {
-        let defaults = UserDefaults.standard
-        let flagKey = "shadowtype.ocrAutoEnabledForScreenRecording"
-        if granted {
-            guard !defaults.bool(forKey: flagKey) else { return }
-            defaults.set(true, forKey: flagKey)
-            guard !defaults.bool(forKey: "shadowtype.useScreenOCR") else { return }
-            let alert = NSAlert()
-            alert.messageText = "Use screen text for context?"
-            alert.informativeText = "Screen Recording is now granted. Shadowtype can read on-screen text near where you type to improve suggestions — entirely on-device, nothing leaves your Mac. You can change this anytime in Settings → Context."
-            alert.addButton(withTitle: "Enable")
-            alert.addButton(withTitle: "Not Now")
-            if alert.runModal() == .alertFirstButtonReturn {
-                defaults.set(true, forKey: "shadowtype.useScreenOCR")
-            }
-        } else {
-            defaults.set(false, forKey: flagKey)
-        }
-    }
-
-    // Fire the system prompt (also adds the app to the relevant list). macOS only shows each
-    // prompt once; after a prior denial these no-op, which is why we also offer "Open Settings".
-    func request(_ p: Permission) {
-        switch p {
-        case .accessibility:
-            let opt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-            _ = AXIsProcessTrustedWithOptions([opt: true] as CFDictionary)
-        case .inputMonitoring:
-            _ = CGRequestListenEventAccess()
-        case .screenRecording:
-            _ = CGRequestScreenCaptureAccess()
-        }
-        // Re-poll shortly after; the grant may land asynchronously.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.refresh() }
-    }
-
-    func openSettings(_ p: Permission) { NSWorkspace.shared.open(p.settingsURL) }
-
-    // Relaunch so the listen-only + active taps (created at launch) pick up a fresh grant.
-    func relaunch() {
-        let path = Bundle.main.bundlePath
-        let task = Process()
-        task.launchPath = "/bin/sh"
-        task.arguments = ["-c", "sleep 1; /usr/bin/open -n \"\(path)\""]
-        try? task.run()
-        NSApp.terminate(nil)
-    }
-}
-
 private struct PermissionsPane: View {
     @StateObject private var mgr = PermissionsManager()
     // Re-poll while the pane is visible so flipping a switch in System Settings reflects here.
@@ -2050,7 +1748,7 @@ private struct PermissionsPane: View {
     var body: some View {
         Form {
             Section {
-                Text("Shadowtype needs system permissions to read the focused field and observe the accept key. It can’t enable these for you — flip the switch in System Settings, then click Relaunch.")
+                Text("Shadowtype needs system permissions to read the focused field and observe the accept key. It can’t enable these for you — flip the switch in System Settings, then return here. Shadowtype detects the change automatically.")
                     .foregroundStyle(.secondary)
             }
 
@@ -2066,12 +1764,15 @@ private struct PermissionsPane: View {
                     Button("Re-check") { mgr.refresh() }
                     Spacer()
                     Button("Quit & Relaunch") { mgr.relaunch() }
-                        .help("Capture is wired at launch; relaunch after granting so it takes effect.")
+                        .help("Restart Shadowtype if a granted permission still is not taking effect.")
+                }
+                if let relaunchError = mgr.relaunchError {
+                    Text(relaunchError).font(.caption).foregroundStyle(.orange)
                 }
             } footer: {
                 Text(mgr.granted.filter { $0.key.required && !$0.value }.isEmpty
-                     ? "All required permissions granted. If completion still doesn’t appear, click Relaunch."
-                     : "After enabling a permission, click Quit & Relaunch.")
+                     ? "All required permissions granted."
+                     : "Grant both required permissions; Shadowtype will start automatically.")
             }
         }
         .formStyle(.grouped)

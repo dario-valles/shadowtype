@@ -226,13 +226,16 @@ struct HFImportSheet: View {
         let usedToken = token ?? (!tokenText.isEmpty ? tokenText : tokenLoaded) ?? ""
         let downloadURL: URL
         let filename: String
+        let expectedSize: Int64?
 
         if case .directFile(_, _, _, let f, let url)? = direct {
             downloadURL = url
             filename = f
+            expectedSize = nil
         } else if let s = selectedSibling {
             downloadURL = s.downloadURL
             filename = s.filename
+            expectedSize = s.sizeBytes
         } else {
             isError = true; status = "no file selected"
             return
@@ -247,17 +250,13 @@ struct HFImportSheet: View {
             manager.onDownloadProgress = { p in
                 DispatchQueue.main.async { progress = p }
             }
-            // Download into the imports dir directly so we don't need a second copy/move. Hoisted out
-            // of the `do` so the cancel path below can find the resume blob it needs to clean up.
-            let importsDir = (try? FileManager.default.url(
-                for: .applicationSupportDirectory, in: .userDomainMask,
-                appropriateFor: nil, create: true))!
-                .appendingPathComponent("Shadowtype/models/imported", isDirectory: true)
-            let target = importsDir.appendingPathComponent(filename)
+            // HF filenames are only unique inside their repository. Namespace the on-disk target by
+            // source so importing the same basename from another repo cannot overwrite this model.
+            let target = ImportedModelStore.shared.huggingFaceDownloadDestination(
+                filename: filename, sourceURL: downloadURL)
             do {
-                try FileManager.default.createDirectory(at: importsDir, withIntermediateDirectories: true)
                 let final = try await manager.downloadAuthenticated(
-                    from: downloadURL, to: target, token: usedToken)
+                    from: downloadURL, to: target, token: usedToken, expectedSize: expectedSize)
 
                 // Cancelled while (or right after) downloading: do NOT register the import — the
                 // user dismissed the sheet. Clean up the file so a half-meant import doesn't linger.
@@ -272,8 +271,8 @@ struct HFImportSheet: View {
 
                 let entry = ImportedModelEntry(
                     id: ImportedModelStore.shared.generateID(),
-                    name: (filename as NSString).deletingPathExtension,
-                    fileName: filename,
+                    name: final.deletingPathExtension().lastPathComponent,
+                    fileName: final.lastPathComponent,
                     linkedPath: final.path,
                     originalPath: nil,                    // HF source: no on-disk original
                     approxRAMGB: approxGB,
@@ -286,15 +285,8 @@ struct HFImportSheet: View {
                     dismiss()
                 }
             } catch is CancellationError {
-                // User hit Cancel — the sheet is already dismissing; nothing to report. But cancelling
-                // now produces resume data by design, and URLSession keeps its multi-GB temp file alive
-                // for as long as that blob exists. The sheet treats Cancel as full abandonment (the
-                // import is never registered), so keeping the blob would silently cost the user
-                // gigabytes with nothing in the UI to explain or reclaim it. Dropping it unpins the
-                // temp file for the system's tmp purge.
-                let resumeURL = ModelManager.resumeDataURL(for: target, source: downloadURL)
-                try? FileManager.default.removeItem(at: resumeURL)
-                try? FileManager.default.removeItem(at: ModelManager.linkedMetadataURL(for: resumeURL))
+                // Keep resumable transfer state. Re-importing the same repository object resolves to
+                // this stable target and continues rather than discarding a multi-gigabyte partial.
                 return
             } catch {
                 await MainActor.run {

@@ -4,6 +4,8 @@ import Cocoa
 import QuartzCore
 
 final class OverlayRenderer {
+    static let maxRenderedPayloadCharacters = 60
+
     private let panel: NSPanel
     private let textLayer = CATextLayer()
     // Accept-key cue: a keycap drawn to the RIGHT of the ghost the first few times (discoverability),
@@ -14,7 +16,6 @@ final class OverlayRenderer {
     private var currentFont: NSFont = .systemFont(ofSize: 16)
     private let hPad: CGFloat = 2
     private let chipFallbackOrigin = CGPoint(x: 80, y: 80) // FR-OV-6: caret rect unavailable
-    private let maxGhostChars = 60 // truncate long suggestions so the panel never spans the screen
     private let hintText = "tab ⇥"                          // ⇥ = Tab glyph; lowercase reads as a soft cue
     private let hintGap: CGFloat = 8                        // space between ghost and keycap
     private let hintPadH: CGFloat = 7                       // keycap inner horizontal padding
@@ -129,9 +130,18 @@ final class OverlayRenderer {
     // word-cap fade curve. Default 1 leaves the M1 fixed-string path unchanged.
     func show(text: String, at caretRect: CGRect, font: NSFont?, opacity: CGFloat = 1, rtl: Bool = false,
               showHint: Bool = false) {
+        // NSPanel/CALayer are AppKit objects. Streaming callers normally already arrive on main, but
+        // preserve that contract if a future source calls the renderer directly from a worker queue.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.show(text: text, at: caretRect, font: font, opacity: opacity, rtl: rtl,
+                           showHint: showHint)
+            }
+            return
+        }
         applyFont(font ?? currentFont)
 
-        let display = Self.truncated(text, max: maxGhostChars)
+        let display = Self.normalizedPayload(text)
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -190,6 +200,10 @@ final class OverlayRenderer {
     }
 
     func hide() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.hide() }
+            return
+        }
         panel.orderOut(nil)
     }
 
@@ -198,10 +212,10 @@ final class OverlayRenderer {
         max(screenMinX, caretMinX - width)
     }
 
-    // Cap visible length so a runaway suggestion can't produce a 700px-wide panel; append an ellipsis.
-    static func truncated(_ text: String, max: Int) -> String {
-        guard text.count > max, max > 0 else { return text }
-        return String(text.prefix(max)) + "\u{2026}"
+    // Cap a suggestion once at the renderer boundary. The coordinator must store this exact value for
+    // Tab/line acceptance so the user can never accept text that was not visible in the ghost.
+    static func normalizedPayload(_ text: String) -> String {
+        String(text.prefix(maxRenderedPayloadCharacters))
     }
 
     // Map a caret rect (top-left origin, screen coords) to a bottom-left panel origin.

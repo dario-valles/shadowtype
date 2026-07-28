@@ -10,16 +10,73 @@ import CoreGraphics
 import Vision
 
 final class ScreenContextProvider {
-    // Throttle + cache: at most one real capture per second; otherwise serve the cached result.
+    // AppKit exposes this Accessibility attribute but does not import a Swift constant for it.
+    private static let axWindowNumberAttribute = "AXWindowNumber" as CFString
+
+    // At most one real capture per second. A successful OCR result is only reusable briefly: screen
+    // context is volatile and must never follow the user into another focused field.
     private let minInterval: TimeInterval = 1.0
-    private var lastCaptureAt: Date?
-    private var cachedText: String?
+    private let cacheTTL: TimeInterval = 1.0
+    private var cacheState = CacheState()
     // recentText() is invoked from a detached Task on every fire(), so calls can overlap; this guards
     // the throttle/cache state against torn cross-thread access (held only around quick accesses,
     // never across an await).
     private let stateLock = NSLock()
 
     init() {}
+
+    struct CaptureTicket: Equatable {
+        fileprivate let generation: UInt64
+    }
+
+    enum CacheDecision: Equatable {
+        case capture(CaptureTicket)
+        case cached(String)
+        case suppressed
+    }
+
+    struct CacheState {
+        private var lastCaptureAt: Date?
+        private var cachedText: String?
+        private var cachedAt: Date?
+        private var generation: UInt64 = 0
+
+        mutating func begin(at now: Date, cacheTTL: TimeInterval,
+                            minInterval: TimeInterval) -> CacheDecision {
+            if let cachedText, let cachedAt {
+                let age = now.timeIntervalSince(cachedAt)
+                if age >= 0, age < cacheTTL { return .cached(cachedText) }
+                self.cachedText = nil
+                self.cachedAt = nil
+            }
+            if let lastCaptureAt, now.timeIntervalSince(lastCaptureAt) < minInterval {
+                return .suppressed
+            }
+            lastCaptureAt = now
+            return .capture(CaptureTicket(generation: generation))
+        }
+
+        @discardableResult
+        mutating func store(_ text: String, for ticket: CaptureTicket, at now: Date) -> Bool {
+            guard ticket.generation == generation else { return false }
+            cachedText = text
+            cachedAt = now
+            return true
+        }
+
+        mutating func captureFailed(for ticket: CaptureTicket) {
+            guard ticket.generation == generation else { return }
+            cachedText = nil
+            cachedAt = nil
+        }
+
+        mutating func focusDidChange() {
+            generation &+= 1
+            lastCaptureAt = nil
+            cachedText = nil
+            cachedAt = nil
+        }
+    }
 
     // Returns recent on-screen text from the focused window (capped to maxChars), or nil if
     // unavailable. The modern async Vision text request landed in macOS 15; below that we no-op.
@@ -29,46 +86,67 @@ final class ScreenContextProvider {
         // Throttle + state access go through synchronous helpers so the lock is never held across an
         // await (which the locked-state accessors below guarantee).
         let gate = beginCaptureOrServeCached()
-        guard gate.proceed else { return Self.clamp(gate.cached, to: maxChars) }
-
-        guard #available(macOS 14.0, *) else { return nil }
-
-        guard let image = await captureFocusedWindow() else {
+        switch gate {
+        case .cached(let text):
+            return Self.clamp(text, to: maxChars)
+        case .suppressed:
             return nil
-        }
-        guard let text = await Self.recognizeText(in: image) else {
-            Diag.log("ocr: capture yielded no text")
-            return nil
-        }
+        case .capture(let ticket):
+            guard #available(macOS 14.0, *) else {
+                captureFailed(ticket)
+                return nil
+            }
 
-        // Drop obvious UI chrome (buttons, prices, chips) BEFORE clamp so the budget + tail go to real
-        // prose, not noise like "Send" / "$39" / "Become a Founder".
-        let cleaned = Self.denoise(text)
-        storeCachedText(cleaned)
-        return Self.clamp(cleaned, to: maxChars)
+            guard let image = await captureFocusedWindow() else {
+                captureFailed(ticket)
+                return nil
+            }
+            guard let text = await Self.recognizeText(in: image) else {
+                Diag.log("ocr: capture yielded no text")
+                captureFailed(ticket)
+                return nil
+            }
+
+            // Drop obvious UI chrome (buttons, prices, chips) BEFORE clamp so the budget + tail go to
+            // real prose, not noise like "Send" / "$39" / "Become a Founder".
+            let cleaned = Self.denoise(text)
+            guard !cleaned.isEmpty else {
+                captureFailed(ticket)
+                return nil
+            }
+            storeCachedText(cleaned, for: ticket)
+            return Self.clamp(cleaned, to: maxChars)
+        }
     }
 
-    // Throttle decision + state accessors, each holding `stateLock` only for a synchronous critical
-    // section (never across an await). `beginCaptureOrServeCached` atomically decides whether to run a
-    // fresh capture (marking the throttle window) or to serve the cached text.
-    private func beginCaptureOrServeCached() -> (proceed: Bool, cached: String?) {
+    // Called by the focus owner as soon as it observes a new focused field/window. In-flight captures
+    // are generation-tagged, so a capture that finishes after this reset cannot repopulate this cache.
+    func focusDidChange() {
         stateLock.lock(); defer { stateLock.unlock() }
-        if let last = lastCaptureAt, Date().timeIntervalSince(last) < minInterval {
-            return (false, cachedText)
-        }
-        lastCaptureAt = Date()
-        return (true, nil)
+        cacheState.focusDidChange()
     }
 
-    private func storeCachedText(_ text: String) {
+    // State accessors hold `stateLock` only for their short synchronous critical sections, never across
+    // an await. `CacheState` is deliberately pure so its expiry/failure/focus behavior stays unit-testable.
+    private func beginCaptureOrServeCached() -> CacheDecision {
         stateLock.lock(); defer { stateLock.unlock() }
-        cachedText = text
+        return cacheState.begin(at: Date(), cacheTTL: cacheTTL, minInterval: minInterval)
+    }
+
+    private func storeCachedText(_ text: String, for ticket: CaptureTicket) {
+        stateLock.lock(); defer { stateLock.unlock() }
+        _ = cacheState.store(text, for: ticket, at: Date())
+    }
+
+    private func captureFailed(_ ticket: CaptureTicket) {
+        stateLock.lock(); defer { stateLock.unlock() }
+        cacheState.captureFailed(for: ticket)
     }
 
     // MARK: Capture
 
-    // Picks the frontmost app's largest normal-level on-screen window and captures its bounds.
-    // Tight crop matters: OCR latency is dominated by region size (per FR-CTX-1).
+    // Captures the exact AX-focused on-screen window. Tight crop matters: OCR latency is dominated
+    // by region size (per FR-CTX-1).
     private func captureFocusedWindow() async -> CGImage? {
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(
@@ -99,24 +177,59 @@ final class ScreenContextProvider {
         }
     }
 
-    // Best-effort focused document window: the frontmost regular app's largest layer-0 window.
-    // Falls back to its largest on-screen window when no normal-level window exists.
+    // Resolve the AX-focused element's enclosing AXWindow to its CG window number, then require the
+    // exact ScreenCaptureKit window owned by the frontmost process. Do not guess by size/layer: a wrong
+    // window can leak unrelated text into a completion, so unresolved AX data fails closed.
     private func focusedWindow(in windows: [SCWindow]) -> SCWindow? {
-        let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        let candidates = windows.filter { win in
-            guard win.isOnScreen, win.frame.width > 1, win.frame.height > 1 else { return false }
-            if let pid = frontPid, let owner = win.owningApplication {
-                return owner.processID == pid
-            }
-            return false
+        guard let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              let focusedWindowID = Self.focusedAXWindowID(for: frontmostPID) else { return nil }
+        let candidates = windows.map {
+            WindowCandidate(windowID: $0.windowID, owningPID: $0.owningApplication?.processID,
+                            isOnScreen: $0.isOnScreen)
         }
-        // Layer 0 holds the document window; higher layers can be floating chrome strips or HUDs.
-        // Prefer the largest normal window, falling back to the largest candidate only when needed.
-        let choices = candidates.map {
-            (layer: $0.windowLayer, area: Double($0.frame.width * $0.frame.height))
+        guard let selectedID = Self.resolvedFocusedWindowID(
+            focusedWindowID: focusedWindowID, frontmostPID: frontmostPID, candidates: candidates) else {
+            return nil
         }
-        guard let index = Self.preferredWindowIndex(in: choices) else { return nil }
-        return candidates[index]
+        return windows.first { $0.windowID == selectedID }
+    }
+
+    private static func focusedAXWindowID(for frontmostPID: pid_t,
+                                          system: AXUIElement = AXUIElementCreateSystemWide()) -> CGWindowID? {
+        var elementRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            system, kAXFocusedUIElementAttribute as CFString, &elementRef) == .success,
+              let elementRef, CFGetTypeID(elementRef) == AXUIElementGetTypeID() else { return nil }
+        let element = elementRef as! AXUIElement
+
+        var elementPID: pid_t = 0
+        guard AXUIElementGetPid(element, &elementPID) == .success,
+              elementPID == frontmostPID else { return nil }
+
+        var windowRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element, kAXWindowAttribute as CFString, &windowRef) == .success,
+              let windowRef, CFGetTypeID(windowRef) == AXUIElementGetTypeID() else { return nil }
+
+        var numberRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            windowRef as! AXUIElement, Self.axWindowNumberAttribute, &numberRef) == .success,
+              let number = numberRef as? NSNumber, number.int64Value > 0 else { return nil }
+        return CGWindowID(number.uint32Value)
+    }
+
+    struct WindowCandidate: Equatable {
+        let windowID: CGWindowID
+        let owningPID: pid_t?
+        let isOnScreen: Bool
+    }
+
+    static func resolvedFocusedWindowID(focusedWindowID: CGWindowID?, frontmostPID: pid_t?,
+                                        candidates: [WindowCandidate]) -> CGWindowID? {
+        guard let focusedWindowID, let frontmostPID else { return nil }
+        return candidates.first {
+            $0.windowID == focusedWindowID && $0.owningPID == frontmostPID && $0.isOnScreen
+        }?.windowID
     }
 
     static func preferredWindowIndex(in candidates: [(layer: Int, area: Double)]) -> Int? {

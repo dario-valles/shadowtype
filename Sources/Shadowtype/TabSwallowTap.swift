@@ -15,10 +15,27 @@ final class TabSwallowTap {
     var onAcceptLine: (() -> Void)?
 
     // Accept keycodes (configurable). Default: Tab (kVK_Tab == 48).
-    var acceptKeycodes: Set<Int64> = [48]
+    var acceptKeycodes: Set<Int64> {
+        get {
+            os_unfair_lock_lock(&_lock)
+            let keycodes = _acceptKeycodes
+            os_unfair_lock_unlock(&_lock)
+            return keycodes
+        }
+        set {
+            os_unfair_lock_lock(&_lock)
+            _acceptKeycodes = newValue
+            os_unfair_lock_unlock(&_lock)
+        }
+    }
 
-    // Lock-free flag read on the tap thread (FINDINGS Spike 4 pt 3) — never a plain property.
+    private enum Acceptance {
+        case word
+        case line
+    }
+
     private var _lock = os_unfair_lock_s()
+    private var _acceptKeycodes: Set<Int64> = [48]
     private var _suggestionVisible = false
     // Shortcuts → "Swallow Tab when a suggestion is showing" (default ON). When off, Tab is passed
     // through to the app even while a ghost is visible (so the user accepts only via other means). Read
@@ -36,23 +53,25 @@ final class TabSwallowTap {
     // suggestion render / accept-advance. Without this gate Right Arrow would swallow mid-line
     // cursor motion when the user had mid-line completions on. Pushed false on every clear.
     private var _caretAtLineEnd = false
+    // Set on the tap thread before the event is swallowed and cleared only after the main-queue
+    // acceptance finishes. A key-repeat arriving while main is busy is swallowed but cannot enqueue
+    // a second acceptance against the same visible suggestion.
+    private var _acceptancePending = false
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private let scheduleAcceptance: (@escaping () -> Void) -> Void
 
-    init() {}
+    init(scheduleAcceptance: @escaping (@escaping () -> Void) -> Void = { work in
+        DispatchQueue.main.async(execute: work)
+    }) {
+        self.scheduleAcceptance = scheduleAcceptance
+    }
 
     func setSuggestionVisible(_ v: Bool) {
         os_unfair_lock_lock(&_lock)
         _suggestionVisible = v
         os_unfair_lock_unlock(&_lock)
-    }
-
-    private func suggestionVisible() -> Bool {
-        os_unfair_lock_lock(&_lock)
-        let v = _suggestionVisible
-        os_unfair_lock_unlock(&_lock)
-        return v
     }
 
     func setEnabled(_ v: Bool) {
@@ -61,24 +80,10 @@ final class TabSwallowTap {
         os_unfair_lock_unlock(&_lock)
     }
 
-    private func swallowEnabled() -> Bool {
-        os_unfair_lock_lock(&_lock)
-        let v = _enabled
-        os_unfair_lock_unlock(&_lock)
-        return v
-    }
-
     func setDisabledForApp(_ v: Bool) {
         os_unfair_lock_lock(&_lock)
         _disabledForApp = v
         os_unfair_lock_unlock(&_lock)
-    }
-
-    private func disabledForApp() -> Bool {
-        os_unfair_lock_lock(&_lock)
-        let v = _disabledForApp
-        os_unfair_lock_unlock(&_lock)
-        return v
     }
 
     func setRightArrowEnabled(_ v: Bool) {
@@ -87,24 +92,10 @@ final class TabSwallowTap {
         os_unfair_lock_unlock(&_lock)
     }
 
-    private func rightArrowEnabled() -> Bool {
-        os_unfair_lock_lock(&_lock)
-        let v = _rightArrowEnabled
-        os_unfair_lock_unlock(&_lock)
-        return v
-    }
-
     func setCaretAtLineEnd(_ v: Bool) {
         os_unfair_lock_lock(&_lock)
         _caretAtLineEnd = v
         os_unfair_lock_unlock(&_lock)
-    }
-
-    private func caretAtLineEnd() -> Bool {
-        os_unfair_lock_lock(&_lock)
-        let v = _caretAtLineEnd
-        os_unfair_lock_unlock(&_lock)
-        return v
     }
 
     // Pure decision (testable). Swallow Right Arrow only when the ghost is visible AND the caret is
@@ -114,6 +105,66 @@ final class TabSwallowTap {
     static func shouldAcceptOnRightArrow(ghostVisible: Bool, caretAtLineEnd: Bool,
                                          enabled: Bool, hasModifier: Bool) -> Bool {
         ghostVisible && caretAtLineEnd && enabled && !hasModifier
+    }
+
+    // The active-tap callback does only this bounded decision + enqueue. The returned Bool tells the
+    // callback whether to swallow the physical key. All AX, overlay, metrics, and injection work stays
+    // inside onAccept/onAcceptLine and therefore begins only after the callback returns.
+    @discardableResult
+    func handleKeyDown(keycode: Int64, flags: CGEventFlags) -> Bool {
+        let acceptance: Acceptance?
+
+        os_unfair_lock_lock(&_lock)
+        let isTabAccept = _acceptKeycodes.contains(keycode)
+            && _enabled
+            && _suggestionVisible
+            && !_disabledForApp
+        let hasModifier = flags.contains(.maskShift)
+            || flags.contains(.maskAlternate)
+            || flags.contains(.maskCommand)
+            || flags.contains(.maskControl)
+        let isRightArrowAccept = keycode == Self.rightArrowKeycode
+            && _enabled
+            && !_disabledForApp
+            && Self.shouldAcceptOnRightArrow(
+                ghostVisible: _suggestionVisible,
+                caretAtLineEnd: _caretAtLineEnd,
+                enabled: _rightArrowEnabled,
+                hasModifier: hasModifier
+            )
+
+        if isTabAccept {
+            acceptance = flags.contains(.maskAlternate) ? .line : .word
+        } else if isRightArrowAccept {
+            acceptance = .word
+        } else {
+            acceptance = nil
+        }
+
+        let shouldSchedule = acceptance != nil && !_acceptancePending
+        if shouldSchedule {
+            _acceptancePending = true
+        }
+        os_unfair_lock_unlock(&_lock)
+
+        guard let acceptance else { return false }
+        guard shouldSchedule else { return true }
+
+        scheduleAcceptance { [weak self] in
+            guard let self else { return }
+            defer {
+                os_unfair_lock_lock(&self._lock)
+                self._acceptancePending = false
+                os_unfair_lock_unlock(&self._lock)
+            }
+            switch acceptance {
+            case .word:
+                self.onAccept?()
+            case .line:
+                self.onAcceptLine?()
+            }
+        }
+        return true
     }
 
     // Enable the active tap only during the visible window to bound freeze risk (Spike 4 pt 4).
@@ -141,32 +192,8 @@ final class TabSwallowTap {
                 let me = Unmanaged<TabSwallowTap>.fromOpaque(refcon!).takeUnretainedValue()
                 guard type == .keyDown else { return Unmanaged.passUnretained(event) }
                 let code = event.getIntegerValueField(.keyboardEventKeycode)
-                if me.acceptKeycodes.contains(code), me.swallowEnabled(), me.suggestionVisible(),
-                   !me.disabledForApp() {
-                    // ⌥Tab → accept the whole line; bare Tab → accept the next word (FR-IN-4/5).
-                    if event.flags.contains(.maskAlternate) {
-                        me.onAcceptLine?()
-                    } else {
-                        me.onAccept?()
-                    }
-                    return nil                              // DELETE: app never gets the Tab (FR-IN-4)
-                }
-                // Right Arrow accept (Smart Compose / Superhuman parity). Bare → accepts next word
-                // ONLY when the ghost is visible AND the caret is at end-of-line — otherwise cursor
-                // motion wins. Any modifier (⇧/⌥/⌘/⌃) is a cursor command and always passes through.
-                if code == TabSwallowTap.rightArrowKeycode, me.swallowEnabled(), !me.disabledForApp() {
-                    let hasMod = event.flags.contains(.maskShift)
-                        || event.flags.contains(.maskAlternate)
-                        || event.flags.contains(.maskCommand)
-                        || event.flags.contains(.maskControl)
-                    if TabSwallowTap.shouldAcceptOnRightArrow(
-                            ghostVisible: me.suggestionVisible(),
-                            caretAtLineEnd: me.caretAtLineEnd(),
-                            enabled: me.rightArrowEnabled(),
-                            hasModifier: hasMod) {
-                        me.onAccept?()
-                        return nil
-                    }
+                if me.handleKeyDown(keycode: code, flags: event.flags) {
+                    return nil                              // DELETE: app never gets the accept key
                 }
                 return Unmanaged.passUnretained(event)       // passthrough
             },

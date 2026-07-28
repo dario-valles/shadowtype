@@ -113,6 +113,58 @@ final class ImportedModelStoreTests: XCTestCase {
                       "expected '-2' style suffix on the collided file, got \(path2)")
     }
 
+    func testHuggingFaceSameFilenameFromDifferentRepositoriesGetsDistinctDestinations() throws {
+        let store = makeStore()
+        let filename = "model.Q4_K_M.gguf"
+        let repoA = try XCTUnwrap(
+            URL(string: "https://huggingface.co/owner-a/model/resolve/main/\(filename)"))
+        let repoB = try XCTUnwrap(
+            URL(string: "https://huggingface.co/owner-b/model/resolve/main/\(filename)"))
+
+        let destinationA = store.huggingFaceDownloadDestination(
+            filename: filename, sourceURL: repoA)
+        let destinationB = store.huggingFaceDownloadDestination(
+            filename: filename, sourceURL: repoB)
+
+        XCTAssertNotEqual(destinationA, destinationB)
+        XCTAssertNotEqual(destinationA.deletingLastPathComponent(),
+                          destinationB.deletingLastPathComponent())
+        XCTAssertEqual(destinationA.lastPathComponent, filename)
+        XCTAssertEqual(destinationB.lastPathComponent, filename)
+
+        try FileManager.default.createDirectory(
+            at: destinationA.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: destinationB.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("repo-a".utf8).write(to: destinationA)
+        try Data("repo-b".utf8).write(to: destinationB)
+
+        XCTAssertEqual(try Data(contentsOf: destinationA), Data("repo-a".utf8))
+        XCTAssertEqual(try Data(contentsOf: destinationB), Data("repo-b".utf8))
+
+        store.insert(makeEntry(id: "byom-repo-a", linkedPath: destinationA.path))
+        store.insert(makeEntry(id: "byom-repo-b", linkedPath: destinationB.path))
+        XCTAssertEqual(store.entries().count, 2,
+                       "repository-qualified paths must not deduplicate same-named imports")
+    }
+
+    func testHuggingFaceDestinationIsStableAndDoesNotExposeQueryToken() throws {
+        let store = makeStore()
+        let base = try XCTUnwrap(
+            URL(string: "https://huggingface.co/owner/repo/resolve/main/model.gguf?token=secret-a"))
+        let refreshed = try XCTUnwrap(
+            URL(string: "https://huggingface.co/owner/repo/resolve/main/model.gguf?token=secret-b"))
+
+        let first = store.huggingFaceDownloadDestination(
+            filename: "model.gguf", sourceURL: base)
+        let second = store.huggingFaceDownloadDestination(
+            filename: "model.gguf", sourceURL: refreshed)
+
+        XCTAssertEqual(first, second)
+        XCTAssertFalse(first.path.contains("secret-a"))
+        XCTAssertFalse(first.path.contains("secret-b"))
+    }
+
     func testCatalogEntryAdapterRoundTrip() {
         let entry = makeEntry(linkedPath: "/tmp/cat.gguf")
         let catalog = entry.asCatalogEntry

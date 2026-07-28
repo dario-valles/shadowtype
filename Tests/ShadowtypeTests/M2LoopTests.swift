@@ -224,29 +224,6 @@ final class M2LoopTests: XCTestCase {
         XCTAssertEqual(partial, "")
     }
 
-    // MARK: - No word cap (free + unlimited)
-
-    func testWordCapAlwaysFullOpacity() {
-        // Shadowtype is free and unlimited: suggestions never fade or suppress for a word cap.
-        XCTAssertEqual(WordCap.opacity(), 1)
-    }
-
-    @MainActor
-    func testCoordinatorHasNoCap() {
-        let url = tempMeterURL(); defer { try? FileManager.default.removeItem(at: url) }
-        seed(url, date: localDateString(Date()), count: 99_999)   // huge count: still no cap
-        let meter = WordMeter(storeURL: url, secret: Self.testSecret)
-        let c = CompletionCoordinator(engine: InferenceEngine(),
-                                      overlay: OverlayRenderer(),
-                                      context: EditContextTracker())
-        c.wordMeter = meter
-
-        // Never suppressed, no daily cap, always licensed.
-        XCTAssertFalse(c.isSuppressedByCap)
-        XCTAssertNil(c.dailyCap)
-        XCTAssertTrue(c.isLicensed)
-    }
-
     // MARK: - Base-model output sanitizer (strip web-corpus markup the PT model leaks)
 
     func testSanitizerStripsHTMLTags() {

@@ -37,6 +37,35 @@ final class ModelCatalogTests: XCTestCase {
         XCTAssertEqual(dflt.sha256, ModelManager.defaultModelSHA256)
     }
 
+    func testCatalogIntegrityExplicitlyDistinguishesReleasePinsFromUnverifiedEntries() {
+        let pinned = ModelCatalog.entries.filter {
+            $0.catalogIntegrity == .releasePinnedSHA256
+        }
+        XCTAssertEqual(pinned.map(\.id), ["gemma-3-1b-pt-q4_k_m"])
+        XCTAssertEqual(pinned.first?.sha256, ModelManager.defaultModelSHA256)
+        XCTAssertEqual(pinned.first?.catalogIntegrityLabel, "Release-pinned SHA-256")
+
+        let unverified = ModelCatalog.entries.filter {
+            $0.catalogIntegrity == .unverified
+        }
+        XCTAssertEqual(unverified.count, ModelCatalog.entries.count - 1)
+        for entry in unverified {
+            XCTAssertNil(entry.sha256, "\(entry.id) cannot be unverified while carrying a release pin")
+            XCTAssertTrue(entry.catalogIntegrityLabel.contains("UNVERIFIED"),
+                          "\(entry.id) must surface its unpinned state to UI/API consumers")
+        }
+    }
+
+    func testEveryReleasePinnedDigestIsCanonicalSHA256() throws {
+        for entry in ModelCatalog.entries where entry.catalogIntegrity == .releasePinnedSHA256 {
+            let digest = try XCTUnwrap(entry.sha256)
+            XCTAssertNotNil(
+                digest.range(of: "^[0-9a-f]{64}$", options: .regularExpression),
+                "\(entry.id) release pin must be a lowercase 64-character SHA-256"
+            )
+        }
+    }
+
     func testAllEntriesAreFree() {
         // The catalog is entirely free — no Pro gating on any model (product decision).
         for entry in ModelCatalog.entries {

@@ -1,7 +1,7 @@
 import XCTest
 @testable import Shadowtype
 
-// Tier 2a pure foundations: mid-word split/strip and byte-level required-prefix admissibility.
+// Tier 2a pure foundations: mid-word splitting and byte-level required-prefix admissibility.
 final class MidWordHealingTests: XCTestCase {
 
     // MARK: split
@@ -58,18 +58,6 @@ final class MidWordHealingTests: XCTestCase {
         // The spaceless cap must not leak into Latin: a 25-char Latin run is still a complete word,
         // and healing it burns the constraint for no gain.
         XCTAssertNil(MidWordHealing.split(prefix: "the " + String(repeating: "a", count: 25)))
-    }
-
-    // MARK: strip
-
-    func testStripsRegeneratedStem() {
-        XCTAssertEqual(MidWordHealing.strip(stem: "gre", from: "great"), "at")
-        XCTAssertEqual(MidWordHealing.strip(stem: "develo", from: "developer"), "per")
-        XCTAssertEqual(MidWordHealing.strip(stem: "great", from: "great"), "")  // complete word
-    }
-
-    func testStripFailsSafeOnMismatch() {
-        XCTAssertNil(MidWordHealing.strip(stem: "gre", from: "asy"))  // constraint miss → don't glue
     }
 
     // MARK: required-prefix admissibility (byte level)

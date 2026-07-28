@@ -5,12 +5,41 @@
 import ApplicationServices
 import Cocoa
 
+protocol InjectorAXAccess {
+    func copyAttributeValue(_ attribute: CFString, from element: AXUIElement) -> (AXError, CFTypeRef?)
+    func setAttributeValue(_ value: CFTypeRef, for attribute: CFString, on element: AXUIElement) -> AXError
+}
+
+struct SystemInjectorAXAccess: InjectorAXAccess {
+    func copyAttributeValue(_ attribute: CFString, from element: AXUIElement) -> (AXError, CFTypeRef?) {
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, attribute, &value)
+        return (error, value)
+    }
+
+    func setAttributeValue(_ value: CFTypeRef, for attribute: CFString, on element: AXUIElement) -> AXError {
+        AXUIElementSetAttributeValue(element, attribute, value)
+    }
+}
+
 final class Injector {
     // #10: opt-in (default OFF, so the common case is unchanged and the clipboard is never touched).
     // When on, the synthetic-input fallback pastes long/multi-line chunks via Cmd-V instead of posting
     // one large Unicode string — steadier in hosts that mishandle long synthetic strings or drop a
     // synthesized `\n`. The atomic AX path (preferred for native fields) is unaffected.
     var pasteEnabled = false
+
+    private let axAccess: any InjectorAXAccess
+    private let unicodeTyper: ((String) -> Bool)?
+    private let backspacePoster: ((Int) -> Void)?
+
+    init(axAccess: any InjectorAXAccess = SystemInjectorAXAccess(),
+         unicodeTyper: ((String) -> Bool)? = nil,
+         backspacePoster: ((Int) -> Void)? = nil) {
+        self.axAccess = axAccess
+        self.unicodeTyper = unicodeTyper
+        self.backspacePoster = backspacePoster
+    }
 
     // Returns true if the text was placed. `element` is the live focused AXUIElement (from
     // EditContextTracker.focusedElement()); the direct-AX path is tried first and we fall back to
@@ -27,7 +56,7 @@ final class Injector {
             // kAXSelectedText, yet AXUIElementSetAttributeValue still returns .success. That makes
             // axInsert falsely report success and Tab inserts nothing. Detect a web node via the
             // WebKit-only text-marker attribute and type the text as Unicode events instead.
-            if Self.isWebTextNode(element) { Diag.log("inject: web -> synthetic"); return synthesize(text) }
+            if isWebTextNode(element) { Diag.log("inject: web -> synthetic"); return synthesize(text) }
             if axInsert(text, into: element) { Diag.log("inject: ax ok"); return true }
             Diag.log("inject: ax failed -> synthetic")
         } else {
@@ -58,10 +87,17 @@ final class Injector {
     // differ only for multi-scalar graphemes; equal for the ASCII shortcodes/words in practice).
     func replaceBeforeCaret(utf16Length: Int, keystrokeCount: Int,
                             with text: String, in element: AXUIElement?) -> Bool {
-        if let element, !Self.isWebTextNode(element),
-           axReplaceBeforeCaret(utf16Length: utf16Length, with: text, in: element) {
-            Diag.log("replace: ax atomic ok")
-            return true
+        if let element, !isWebTextNode(element) {
+            switch axReplaceBeforeCaret(utf16Length: utf16Length, with: text, in: element) {
+            case .replaced:
+                Diag.log("replace: ax atomic ok")
+                return true
+            case .unsafeToFallback:
+                Diag.log("replace: ax failed with unrestorable selection")
+                return false
+            case .safeToFallback:
+                break
+            }
         }
         // Ordered fallback: backspaces THEN typed text, both async CGEvents on the session tap (FIFO).
         Diag.log("replace: ordered CGEvent fallback")
@@ -69,32 +105,68 @@ final class Injector {
         return unicodeType(text)
     }
 
-    // Atomic AX delete-and-insert before the caret. Returns false (caller falls back) if the caret can't
-    // be read, something is selected, the run would underflow the field, or the write is a no-op.
-    private func axReplaceBeforeCaret(utf16Length: Int, with text: String, in element: AXUIElement) -> Bool {
-        guard utf16Length > 0 else { return false }
-        var rangeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-              let r = rangeRef, CFGetTypeID(r) == AXValueGetTypeID() else { return false }
+    private enum AXReplacementResult {
+        case replaced
+        case safeToFallback
+        case unsafeToFallback
+    }
+
+    // Atomic AX delete-and-insert before the caret. Synthetic Deletes are allowed only when this method
+    // can verify that the original zero-length caret is restored after an AX failure.
+    private func axReplaceBeforeCaret(utf16Length: Int, with text: String,
+                                      in element: AXUIElement) -> AXReplacementResult {
+        guard utf16Length > 0 else { return .unsafeToFallback }
+        let (rangeError, rangeRef) = axAccess.copyAttributeValue(
+            kAXSelectedTextRangeAttribute as CFString, from: element)
+        guard rangeError == .success,
+              let r = rangeRef, CFGetTypeID(r) == AXValueGetTypeID() else {
+            return .unsafeToFallback
+        }
         var caret = CFRange()
-        guard AXValueGetValue(r as! AXValue, .cfRange, &caret), caret.length == 0 else { return false }
+        guard AXValueGetValue(r as! AXValue, .cfRange, &caret),
+              caret.length == 0 else { return .unsafeToFallback }
         let start = caret.location - utf16Length
-        guard start >= 0 else { return false }
+        guard start >= 0 else { return .unsafeToFallback }
         let before = readValue(element)
         var sel = CFRange(location: start, length: utf16Length)
         guard let selVal = AXValueCreate(.cfRange, &sel),
-              AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, selVal) == .success,
-              AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString) == .success
-        else { return false }
+              axAccess.setAttributeValue(selVal, for: kAXSelectedTextRangeAttribute as CFString,
+                                         on: element) == .success else {
+            return restoreSelection(caret, on: element) ? .safeToFallback : .unsafeToFallback
+        }
+
+        guard axAccess.setAttributeValue(text as CFString, for: kAXSelectedTextAttribute as CFString,
+                                         on: element) == .success else {
+            return restoreSelection(caret, on: element) ? .safeToFallback : .unsafeToFallback
+        }
         // Verify the write took (some hosts accept-but-ignore): trust it only if unreadable or changed.
-        if before == nil { return true }
-        if let after = readValue(element), after != before { return true }
-        return false
+        guard let before else { return .replaced }
+        guard let after = readValue(element) else { return .replaced }
+        if after != before { return .replaced }
+        if let selectionAfter = selectedRange(of: element),
+           selectionAfter.length == 0,
+           selectionAfter.location == start + text.utf16.count {
+            return .replaced
+        }
+        return restoreSelection(caret, on: element) ? .safeToFallback : .unsafeToFallback
+    }
+
+    private func restoreSelection(_ selection: CFRange, on element: AXUIElement) -> Bool {
+        var selection = selection
+        guard let value = AXValueCreate(.cfRange, &selection) else { return false }
+        guard axAccess.setAttributeValue(value, for: kAXSelectedTextRangeAttribute as CFString,
+                                         on: element) == .success,
+              let restored = selectedRange(of: element) else { return false }
+        return restored.location == selection.location && restored.length == selection.length
     }
 
     // Post `count` bare Delete (keycode 51, no modifiers — Tahoe synthetic-event-filter safe) key events.
     // Used only by the ORDERED fallback above (web/Electron/AX-refused fields).
     private func postBackspaces(_ count: Int) {
+        if let backspacePoster {
+            backspacePoster(count)
+            return
+        }
         guard count > 0, let source = CGEventSource(stateID: .hidSystemState) else { return }
         for _ in 0..<count {
             if let d = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: true) {
@@ -116,6 +188,10 @@ final class Injector {
         return AXUIElementCopyAttributeValue(element, "AXSelectedTextMarkerRange" as CFString, &value) == .success
     }
 
+    private func isWebTextNode(_ element: AXUIElement) -> Bool {
+        axAccess.copyAttributeValue("AXSelectedTextMarkerRange" as CFString, from: element).0 == .success
+    }
+
     // MARK: - Primary: AX set-value at the caret/selection (FR-IN-2)
     private func axInsert(_ text: String, into element: AXUIElement) -> Bool {
         // Collapse selection to the caret so we replace selected text (if any) or insert at the caret.
@@ -132,7 +208,8 @@ final class Injector {
         let selBefore = selectedRange(of: element)
 
         // Try the direct, model-level insert first: replace the current selection with our text.
-        if AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, cf) == .success {
+        if axAccess.setAttributeValue(cf, for: kAXSelectedTextAttribute as CFString,
+                                      on: element) == .success {
             // Trust it only if we can't read the value (nothing to verify) or the value changed.
             if before == nil { return true }
             if let after = readValue(element), after != before { return true }
@@ -155,21 +232,22 @@ final class Injector {
 
         // Some elements expose only kAXValueAttribute and a settable selected range. Read the value
         // and current caret, splice the text in, and write the whole value back.
-        var rangeRef: CFTypeRef?
-        var valueRef: CFTypeRef?
-        let haveValue = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success
+        let (valueError, valueRef) = axAccess.copyAttributeValue(
+            kAXValueAttribute as CFString, from: element)
+        let haveValue = valueError == .success
         guard haveValue, let current = valueRef as? String else { return false }
 
-        var insertAt = current.utf16.count   // default: append
-        var selLen = 0
-        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-           let r = rangeRef, CFGetTypeID(r) == AXValueGetTypeID() {
-            var cfRange = CFRange()
-            if AXValueGetValue(r as! AXValue, .cfRange, &cfRange) {
-                insertAt = max(0, min(cfRange.location, current.utf16.count))
-                selLen = max(0, min(cfRange.length, current.utf16.count - insertAt))
-            }
-        }
+        let (rangeError, rangeRef) = axAccess.copyAttributeValue(
+            kAXSelectedTextRangeAttribute as CFString, from: element)
+        guard rangeError == .success,
+              let r = rangeRef, CFGetTypeID(r) == AXValueGetTypeID() else { return false }
+        var selected = CFRange()
+        guard AXValueGetValue(r as! AXValue, .cfRange, &selected),
+              selected.location >= 0, selected.length >= 0,
+              selected.location <= current.utf16.count,
+              selected.length <= current.utf16.count - selected.location else { return false }
+        let insertAt = selected.location
+        let selLen = selected.length
 
         let u = Array(current.utf16)
         let prefix = String(utf16CodeUnits: u, count: insertAt)
@@ -177,14 +255,15 @@ final class Injector {
         let suffix = String(utf16CodeUnits: Array(u[suffixStart...]), count: u.count - suffixStart)
         let newValue = prefix + text + suffix
 
-        guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString,
-                                           newValue as CFString) == .success else { return false }
+        guard axAccess.setAttributeValue(newValue as CFString, for: kAXValueAttribute as CFString,
+                                         on: element) == .success else { return false }
 
         // Verify the write actually took: some hosts return .success but ignore the write (the model
         // re-renders from their own state). If the value didn't change, report failure so the caller
         // falls back to Unicode typing rather than silently dropping the text.
-        var checkRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &checkRef) == .success,
+        let (checkError, checkRef) = axAccess.copyAttributeValue(kAXValueAttribute as CFString,
+                                                                from: element)
+        if checkError == .success,
            let after = checkRef as? String, after != newValue {
             return false
         }
@@ -192,7 +271,8 @@ final class Injector {
         // Move the caret to just after the inserted text (best-effort).
         var caret = CFRange(location: insertAt + text.utf16.count, length: 0)
         if let newRange = AXValueCreate(.cfRange, &caret) {
-            AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, newRange)
+            axAccess.setAttributeValue(newRange, for: kAXSelectedTextRangeAttribute as CFString,
+                                       on: element)
         }
         return true
     }
@@ -201,8 +281,9 @@ final class Injector {
     // kAXSelectedTextRange. Used to distinguish a real selection-replace (collapses to a caret) from a
     // host that accepts-but-ignores the write (selection stays put).
     private func selectedRange(of element: AXUIElement) -> CFRange? {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &ref) == .success,
+        let (error, ref) = axAccess.copyAttributeValue(
+            kAXSelectedTextRangeAttribute as CFString, from: element)
+        guard error == .success,
               let r = ref, CFGetTypeID(r) == AXValueGetTypeID() else { return nil }
         var cf = CFRange()
         guard AXValueGetValue(r as! AXValue, .cfRange, &cf) else { return nil }
@@ -211,9 +292,8 @@ final class Injector {
 
     // Current kAXValue string, or nil if the element doesn't expose a readable string value.
     private func readValue(_ element: AXUIElement) -> String? {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &ref) == .success
-        else { return nil }
+        let (error, ref) = axAccess.copyAttributeValue(kAXValueAttribute as CFString, from: element)
+        guard error == .success else { return nil }
         return ref as? String
     }
 
@@ -221,6 +301,9 @@ final class Injector {
     // No keycode synthesis, no modifiers. Down+up events carrying the Unicode string land in the
     // focused field; Developer-ID-signed + notarized builds pass the Tahoe synthetic-event filter.
     private func unicodeType(_ text: String) -> Bool {
+        if let unicodeTyper {
+            return unicodeTyper(text)
+        }
         guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
         let utf16 = Array(text.utf16)
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),

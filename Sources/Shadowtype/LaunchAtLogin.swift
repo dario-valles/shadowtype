@@ -2,6 +2,20 @@
 import ServiceManagement
 
 enum LaunchAtLogin {
+    private enum StateError: LocalizedError {
+        case approvalRequired
+        case didNotChange
+
+        var errorDescription: String? {
+            switch self {
+            case .approvalRequired:
+                return "Login-item approval is required."
+            case .didNotChange:
+                return "macOS did not change the login-item state."
+            }
+        }
+    }
+
     static var isEnabled: Bool { SMAppService.mainApp.status == .enabled }
 
     /// Human-readable description of the last setEnabled failure; nil after a success.
@@ -17,6 +31,10 @@ enum LaunchAtLogin {
             } else {
                 try SMAppService.mainApp.unregister()
             }
+            if on, SMAppService.mainApp.status == .requiresApproval {
+                throw StateError.approvalRequired
+            }
+            guard isEnabled == on else { throw StateError.didNotChange }
             lastError = nil
             return .success(())
         } catch {

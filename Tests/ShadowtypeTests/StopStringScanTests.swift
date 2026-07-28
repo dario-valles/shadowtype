@@ -57,13 +57,14 @@ final class StopStringScanTests: XCTestCase {
     // across pieces, so a naive emit-on-arrival leaks "<end_of_turn" before the closing ">" matches).
     private func runFilter(_ pieces: [String], stops: [String]) -> String {
         var f = InferenceEngine.StreamStopFilter(stops: stops)
-        var out = ""
+        var out: [UInt8] = []
         for p in pieces {
-            let (chunk, stopped) = f.push(p)
+            let (chunk, stopped) = f.push(Array(p.utf8))
             out += chunk
-            if stopped { return out }   // finish() not called after a stop — the tail IS the stop
+            if stopped { return String(decoding: out, as: UTF8.self) }
         }
-        return out + f.finish()
+        out += f.finish()
+        return String(decoding: out, as: UTF8.self)
     }
 
     func testStreamFilterDropsMultiTokenStopSplitAcrossPieces() {
@@ -85,5 +86,47 @@ final class StopStringScanTests: XCTestCase {
     func testStreamFilterNoStopsPassesEverythingThrough() {
         let out = runFilter(["a", "b", "c"], stops: [])
         XCTAssertEqual(out, "abc")
+    }
+
+    func testStreamFilterKeepsOnlyBoundedLookbackAndStillMatchesBoundary() {
+        var filter = InferenceEngine.StreamStopFilter(stops: ["<STOP>"])
+        var out: [UInt8] = []
+        for _ in 0..<10_000 {
+            let result = filter.push([UInt8(ascii: "a")])
+            out += result.chunk
+            XCTAssertLessThanOrEqual(filter.bufferedByteCount, 5)
+        }
+        for piece in ["<ST", "OP>"] {
+            let result = filter.push(Array(piece.utf8))
+            out += result.chunk
+            if result.stopped { break }
+        }
+        XCTAssertEqual(String(decoding: out, as: UTF8.self), String(repeating: "a", count: 10_000))
+    }
+
+    func testStreamFilterMatchesCombiningStopAcrossChunkBoundary() {
+        let out = runFilter(["before", "e", "\u{301}", "after"], stops: ["e\u{301}"])
+        XCTAssertEqual(out, "before")
+    }
+
+    func testUTF8DecoderAccumulatesSplitScalarWithoutReplacement() {
+        var decoder = InferenceEngine.UTF8StreamDecoder()
+        XCTAssertEqual(decoder.push([0xE8]), "")
+        XCTAssertEqual(decoder.push([0xB3]), "")
+        XCTAssertEqual(decoder.push([0x87]), "資")
+        XCTAssertEqual(decoder.finish(), "")
+    }
+
+    func testUTF8DecoderEmitsASCIIBeforeIncompleteScalar() {
+        var decoder = InferenceEngine.UTF8StreamDecoder()
+        XCTAssertEqual(decoder.push([0x41, 0xF0, 0x9F]), "A")
+        XCTAssertEqual(decoder.bufferedByteCount, 2)
+        XCTAssertEqual(decoder.push([0x98, 0x80]), "😀")
+    }
+
+    func testUTF8DecoderRecoversAfterMalformedByte() {
+        var decoder = InferenceEngine.UTF8StreamDecoder()
+        XCTAssertEqual(decoder.push([0xFF]), "\u{FFFD}")
+        XCTAssertEqual(decoder.push(Array("ok".utf8)), "ok")
     }
 }

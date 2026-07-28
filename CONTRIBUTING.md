@@ -7,14 +7,18 @@ welcome. This is a free, open-source, fully-local macOS app; the goal is a clean
 
 - macOS 14+ on Apple Silicon
 - Swift 6 toolchain (Xcode 16+ or the standalone toolchain)
-- `llama.cpp` + `ggml` via Homebrew: `brew install llama.cpp`
+- Git and CMake 3.14+ to build the pinned llama.cpp source
 
 ## Build & test
 
 ```sh
+./scripts/build-llama.sh
 swift build           # build the app
 swift test            # run the unit test suite
 ```
+
+`build-llama.sh` installs an arm64, macOS 14-compatible static build under the gitignored
+`vendor/llama/` prefix. Re-run it with `--force` to rebuild from the pinned upstream revision.
 
 Model-gated tests auto-skip when no GGUF is cached, so the suite is green on a clean checkout. To
 exercise the model-backed paths, fetch a model first via the app's onboarding or Settings → Models. For a runnable

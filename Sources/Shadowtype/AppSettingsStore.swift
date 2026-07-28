@@ -65,18 +65,46 @@ struct AppConfig: Codable, Equatable {
 }
 
 final class AppSettingsStore {
+    private static let formatVersion = 1
+
+    private struct Envelope: Encodable {
+        let version: Int
+        let apps: [String: AppConfig]
+    }
+
+    private struct LoadResult {
+        let apps: [String: AppConfig]
+        let canPersist: Bool
+    }
+
     private let lock = NSLock()
     private let storeURL: URL
+    private let createDirectory: (URL) throws -> Void
+    private let atomicWrite: (Data, URL) throws -> Void
+    private let canPersist: Bool
     private var byBundle: [String: AppConfig]
 
     static let shared = AppSettingsStore()
 
     convenience init() { self.init(storeURL: AppSettingsStore.defaultStoreURL()) }
 
-    // Designated init / test seam.
-    init(storeURL: URL) {
+    // Designated init / test seams. The persistence closures let tests exercise failures without
+    // relying on process privileges or a particular filesystem.
+    init(
+        storeURL: URL,
+        createDirectory: @escaping (URL) throws -> Void = {
+            try FileManager.default.createDirectory(at: $0, withIntermediateDirectories: true)
+        },
+        atomicWrite: @escaping (Data, URL) throws -> Void = {
+            try $0.write(to: $1, options: .atomic)
+        }
+    ) {
         self.storeURL = storeURL
-        self.byBundle = AppSettingsStore.load(from: storeURL) ?? [:]
+        self.createDirectory = createDirectory
+        self.atomicWrite = atomicWrite
+        let loaded = AppSettingsStore.load(from: storeURL)
+        self.byBundle = loaded.apps
+        self.canPersist = loaded.canPersist
     }
 
     // MARK: - Query
@@ -101,25 +129,55 @@ final class AppSettingsStore {
 
     // MARK: - Mutation
 
-    func set(_ value: TriState, _ field: WritableKeyPath<AppConfig, TriState>, forBundleId bundleId: String) {
-        guard !bundleId.isEmpty else { return }
+    @discardableResult
+    func set(
+        _ value: TriState,
+        _ field: WritableKeyPath<AppConfig, TriState>,
+        forBundleId bundleId: String
+    ) -> Bool {
+        guard !bundleId.isEmpty else { return false }
         lock.lock()
+        let previous = byBundle
         var cfg = byBundle[bundleId] ?? AppConfig()
         cfg[keyPath: field] = value
         if cfg.isDefault { byBundle[bundleId] = nil }   // drop no-op entries
         else { byBundle[bundleId] = cfg }
-        save()
+        guard byBundle != previous else {
+            lock.unlock()
+            return true
+        }
+        do {
+            try save()
+        } catch {
+            byBundle = previous
+            lock.unlock()
+            NSLog("Shadowtype: AppSettingsStore failed to persist setting: \(error)")
+            return false
+        }
         lock.unlock()
         AppSettingsStore.notifyChanged()
+        return true
     }
 
     /// Drop every override for an app (used by the per-app "reset" affordance).
-    func clear(bundleId: String) {
+    @discardableResult
+    func clear(bundleId: String) -> Bool {
         lock.lock()
-        let had = byBundle[bundleId] != nil
-        if had { byBundle[bundleId] = nil; save() }
+        guard let previousConfig = byBundle.removeValue(forKey: bundleId) else {
+            lock.unlock()
+            return true
+        }
+        do {
+            try save()
+        } catch {
+            byBundle[bundleId] = previousConfig
+            lock.unlock()
+            NSLog("Shadowtype: AppSettingsStore failed to clear setting: \(error)")
+            return false
+        }
         lock.unlock()
-        if had { AppSettingsStore.notifyChanged() }
+        AppSettingsStore.notifyChanged()
+        return true
     }
 
     // Posted on the main queue so observers (e.g. the Tab tap refresh) don't touch UI off-thread. The
@@ -132,17 +190,111 @@ final class AppSettingsStore {
 
     // MARK: - Persistence (mirrors AppRules)
 
-    private func save() {
-        guard let data = try? JSONEncoder().encode(byBundle) else { return }
-        try? FileManager.default.createDirectory(
-            at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: storeURL, options: .atomic)
+    private func save() throws {
+        guard canPersist else {
+            throw CocoaError(.fileWriteNoPermission, userInfo: [
+                NSURLErrorKey: storeURL,
+                NSLocalizedDescriptionKey: "The existing settings file could not be quarantined."
+            ])
+        }
+        let envelope = Envelope(version: Self.formatVersion, apps: byBundle)
+        let data = try JSONEncoder().encode(envelope)
+        try createDirectory(storeURL.deletingLastPathComponent())
+        try atomicWrite(data, storeURL)
     }
 
-    private static func load(from url: URL) -> [String: AppConfig]? {
-        guard let data = try? Data(contentsOf: url),
-              let m = try? JSONDecoder().decode([String: AppConfig].self, from: data) else { return nil }
-        return m
+    private static func load(from url: URL) -> LoadResult {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return LoadResult(apps: [:], canPersist: true)
+        }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            return quarantine(url, reason: "could not read settings: \(error)", recovered: [:])
+        }
+
+        let root: [String: Any]
+        do {
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return quarantine(url, reason: "top-level JSON is not an object", recovered: [:])
+            }
+            root = object
+        } catch {
+            return quarantine(url, reason: "malformed JSON: \(error)", recovered: [:])
+        }
+
+        let rawApps: [String: Any]
+        var recoveryReasons: [String] = []
+        if root["version"] != nil || root["apps"] != nil {
+            guard let apps = root["apps"] as? [String: Any] else {
+                return quarantine(url, reason: "versioned envelope has no apps object", recovered: [:])
+            }
+            rawApps = apps
+            if (root["version"] as? NSNumber)?.intValue != formatVersion {
+                recoveryReasons.append("unsupported settings version \(String(describing: root["version"]))")
+            }
+        } else {
+            // Pre-versioning files were a bare bundle-id → AppConfig dictionary.
+            rawApps = root
+        }
+
+        var recovered: [String: AppConfig] = [:]
+        let decoder = JSONDecoder()
+        for (bundleId, rawConfig) in rawApps {
+            do {
+                guard JSONSerialization.isValidJSONObject(rawConfig) else {
+                    throw CocoaError(.propertyListReadCorrupt)
+                }
+                let entryData = try JSONSerialization.data(withJSONObject: rawConfig)
+                let config = try decoder.decode(AppConfig.self, from: entryData)
+                if !config.isDefault {
+                    recovered[bundleId] = config
+                }
+            } catch {
+                recoveryReasons.append("\(bundleId): \(error)")
+            }
+        }
+
+        guard !recoveryReasons.isEmpty else {
+            return LoadResult(apps: recovered, canPersist: true)
+        }
+        return quarantine(
+            url,
+            reason: "recovered valid entries; " + recoveryReasons.joined(separator: "; "),
+            recovered: recovered
+        )
+    }
+
+    private static func quarantine(
+        _ url: URL,
+        reason: String,
+        recovered: [String: AppConfig]
+    ) -> LoadResult {
+        let quarantineURL = url.deletingLastPathComponent()
+            .appendingPathComponent("\(url.lastPathComponent).corrupt-\(UUID().uuidString)")
+        do {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+            guard values.isRegularFile == true else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            try FileManager.default.moveItem(at: url, to: quarantineURL)
+            NSLog(
+                "Shadowtype: AppSettingsStore quarantined invalid settings at %@ (%@)",
+                quarantineURL.path,
+                reason
+            )
+            return LoadResult(apps: recovered, canPersist: true)
+        } catch {
+            NSLog(
+                "Shadowtype: AppSettingsStore could not quarantine invalid settings at %@ (%@; %@); refusing to overwrite it",
+                url.path,
+                reason,
+                String(describing: error)
+            )
+            return LoadResult(apps: recovered, canPersist: false)
+        }
     }
 
     private static func defaultStoreURL() -> URL {

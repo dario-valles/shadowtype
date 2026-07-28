@@ -63,7 +63,7 @@ enum ChatTemplate {
     // assistant turn-start tokens so the model continues as the assistant — this is what /v1/chat/
     // completions wants. False is for the unusual case of rendering a partial transcript verbatim.
     //
-    // Grows the output buffer on overflow once; chat prompts are typically small but a long system
+    // Grows the output buffer on overflow; chat prompts are typically small but a long system
     // message + history can exceed the initial 4 KiB.
     static func apply(template: String, messages: [Message], addAssistantPrefix: Bool,
                       architecture: String? = nil) throws -> String {
@@ -109,7 +109,7 @@ enum ChatTemplate {
         }
 
         var written = invoke()
-        if written > bufSize {
+        while written >= bufSize {
             bufSize = written + 1
             buf = [CChar](repeating: 0, count: Int(bufSize))
             written = invoke()
@@ -124,8 +124,14 @@ enum ChatTemplate {
             throw Failure.applyFailed(written)
         }
 
-        // The returned length includes the rendered prompt; the buffer is null-terminated.
-        return String(cString: buf)
+        // The returned length is the rendered byte count. Decode exactly those bytes instead of
+        // trusting a trailing NUL: an exact-capacity render is allowed to fill the whole buffer.
+        return buf.withUnsafeBufferPointer { bytes in
+            let count = Int(written)
+            return bytes.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: count) {
+                String(decoding: UnsafeBufferPointer(start: $0, count: count), as: UTF8.self)
+            }
+        }
     }
 
     // Built-in renderers for arches whose shipped chat_template is full Jinja that llama.cpp's

@@ -39,6 +39,24 @@ final class ChatTemplateTests: XCTestCase {
             "empty message list should short-circuit to an empty prompt, not a chat-template skeleton")
     }
 
+    func testApplyExactly4096BytesDoesNotReadPastBuffer() throws {
+        let empty = try ChatTemplate.apply(
+            template: "chatml",
+            messages: [.init(role: "user", content: "")],
+            addAssistantPrefix: true
+        )
+        let content = String(repeating: "x", count: 4096 - empty.utf8.count)
+        let out = try ChatTemplate.apply(
+            template: "chatml",
+            messages: [.init(role: "user", content: content)],
+            addAssistantPrefix: true
+        )
+
+        XCTAssertEqual(out.utf8.count, 4096)
+        XCTAssertTrue(out.contains(content))
+        XCTAssertTrue(out.hasSuffix("<|im_start|>assistant\n"))
+    }
+
     func testApplyUnknownTemplateFails() {
         // An unrecognized template name returns a negative status; with no architecture there's no
         // fallback, so we surface it as Failure.applyFailed.

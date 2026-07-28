@@ -135,4 +135,19 @@ final class SmartComposeNudgeTests: XCTestCase {
         store.dismiss()
         XCTAssertFalse(store.mayStillPrompt())
     }
+
+    func testStreamFramesCountAsOneSuggestionGeneration() {
+        var lastProbed: Int?
+        var probes = 0
+        for _ in 0..<8 {
+            if CompletionCoordinator.shouldProbeSmartCompose(
+                lastProbedGeneration: lastProbed, generation: 42) {
+                probes += 1
+                lastProbed = 42
+            }
+        }
+        XCTAssertEqual(probes, 1)
+        XCTAssertTrue(CompletionCoordinator.shouldProbeSmartCompose(
+            lastProbedGeneration: lastProbed, generation: 43))
+    }
 }

@@ -4,83 +4,59 @@ import Cocoa
 import ApplicationServices
 import Carbon.HIToolbox
 
-// What a badge-menu disable item acts on, and for how long. Wrapped in an NSObject payload because
-// NSMenuItem.representedObject is `Any?` and Swift enums with associated values don't bridge to ObjC.
-private enum DisableScope {
-    case app(bundleId: String, name: String)
-    case domain(String)
-    case global
+extension Notification.Name {
+    static let shadowtypeRequiredPermissionsMayHaveChanged =
+        Notification.Name("shadowtypeRequiredPermissionsMayHaveChanged")
 }
-private enum DisableDuration { case minutes(Int), hours(Int), restOfDay, permanent }
-private final class DisableActionPayload: NSObject {
-    let scope: DisableScope
-    let duration: DisableDuration
-    init(scope: DisableScope, duration: DisableDuration) { self.scope = scope; self.duration = duration }
-}
-// A badge-menu rewrite item's payload: the chosen action + the selection captured when the menu was
-// built (NSMenuItem.representedObject is `Any?`; box it so the AXUIElement-bearing struct can ride along).
-private final class RewriteActionPayload: NSObject {
-    let action: RewriteAction
-    let selection: EditContextTracker.CurrentSelection
-    init(action: RewriteAction, selection: EditContextTracker.CurrentSelection) {
-        self.action = action; self.selection = selection
+
+struct RequiredPermissionSnapshot: Equatable {
+    let accessibility: Bool
+    let inputMonitoring: Bool
+
+    var allGranted: Bool { accessibility && inputMonitoring }
+
+    static var current: RequiredPermissionSnapshot {
+        RequiredPermissionSnapshot(
+            accessibility: AXIsProcessTrusted(),
+            inputMonitoring: CGPreflightListenEventAccess())
     }
 }
 
-// Adaptive back-off for an always-on background app. Nothing used to consult thermalState or Low
-// Power Mode, so Shadowtype ran the identical GPU inference on every typing pause whether the Mac was
-// cool on wall power or already thermally throttled on battery — the difference between "invisible"
-// and "my fan is on and my battery is gone". This maps the two free ProcessInfo signals onto the
-// three knobs AppDelegate already pushes (coordinator.debounce / coordinator.maxTokens /
-// engine.maxContextTokens): fire less often, generate less, prefill less.
-//
-// Pure + static so the mapping is unit-testable without a hot Mac.
-struct PowerPolicy {
-    /// The knobs the policy adapts, in the units AppDelegate pushes them.
-    struct Settings: Equatable {
-        var debounce: TimeInterval
-        var maxTokens: Int
-        var maxContextTokens: Int
+final class PermissionLifecycleCoordinator {
+    enum Transition: Equatable {
+        case none
+        case started
+        case stopped
     }
 
-    // `nominal` (not `none`) so a `.none` at a call site can never be read as `Optional.none`.
-    enum Tier { case nominal, moderate, heavy }
+    private(set) var isRunning = false
+    private let start: () -> Void
+    private let stop: () -> Void
 
-    /// `.fair` is the steady state of any laptop doing real work, so treating it as pressure would
-    /// mean throttling almost always; back off from `.serious` up. Low Power Mode is an explicit
-    /// user request to spend less energy, so it earns the same treatment as `.serious` — and it
-    /// never softens `.critical`.
-    static func tier(thermalState: ProcessInfo.ThermalState, lowPower: Bool) -> Tier {
-        switch thermalState {
-        case .critical: return .heavy
-        case .serious:  return .moderate
-        default:        return lowPower ? .moderate : .nominal
+    init(start: @escaping () -> Void, stop: @escaping () -> Void) {
+        self.start = start
+        self.stop = stop
+    }
+
+    @discardableResult
+    func update(_ permissions: RequiredPermissionSnapshot) -> Transition {
+        if permissions.allGranted {
+            guard !isRunning else { return .none }
+            isRunning = true
+            start()
+            return .started
         }
+
+        guard isRunning else { return .none }
+        isRunning = false
+        stop()
+        return .stopped
     }
 
-    /// Adaptation may only make things LIGHTER: the debounce can only grow, tokens/context can only
-    /// shrink, so the user's own settings stay the ceiling. Suggestions are never switched off — a
-    /// silently dead product is worse than a slower one.
-    static func adjust(_ base: Settings,
-                       thermalState: ProcessInfo.ThermalState,
-                       lowPower: Bool) -> Settings {
-        switch tier(thermalState: thermalState, lowPower: lowPower) {
-        case .nominal:
-            return base
-        case .moderate:
-            return lighter(base, debounceScale: 2, debounceCap: 0.6, maxTokens: 12, contextTokens: 1024)
-        case .heavy:
-            return lighter(base, debounceScale: 3, debounceCap: 1.0, maxTokens: 8, contextTokens: 512)
-        }
-    }
-
-    // The caps are absolute, the debounce stretch is relative — but a user who already asked for a
-    // long delay must not be sped up by the cap, hence the max() against the configured value.
-    private static func lighter(_ base: Settings, debounceScale: Double, debounceCap: TimeInterval,
-                                maxTokens: Int, contextTokens: Int) -> Settings {
-        Settings(debounce: max(base.debounce, min(debounceCap, base.debounce * debounceScale)),
-                 maxTokens: min(base.maxTokens, maxTokens),
-                 maxContextTokens: min(base.maxContextTokens, contextTokens))
+    func shutdown() {
+        guard isRunning else { return }
+        isRunning = false
+        stop()
     }
 }
 
@@ -129,6 +105,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // knobs; the stored settings they are derived from are untouched.
     private var thermalObserver: NSObjectProtocol?
     private var powerModeObserver: NSObjectProtocol?
+    private var permissionObserver: NSObjectProtocol?
+    private var permissionTimer: Timer?
+    private var permissionLifecycle: PermissionLifecycleCoordinator?
     // Per-app "we can't read this app" banner (Google Docs et al). Coordinator posts the trigger; this
     // owns the floating panel + persisted "don't show again" state (AXNudgeStore).
     private let axNudge = AccessibilityNudgeController()
@@ -146,14 +125,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lengthObserver: NSObjectProtocol?
     private var selectModelObserver: NSObjectProtocol?
     private var rewriteHotkeyObserver: NSObjectProtocol?
-    // FR-LM-1: the currently-loaded model, tracked so a failed live swap can fall back to it.
-    private var currentModelURL: URL?
-
     // M1: local OpenAI-compatible HTTP + MCP API server. Pre-instantiated so the settings panel +
     // status menu can read its state; started lazily when the user enables it. Coordinator +
     // ModelManager are wired in `wireCoordinator()` (where their lifetimes are already established).
     // Auto-restarts on sleep/wake; observes .shadowtypeToggleLocalAPI for menu-driven on/off.
     let localAPI = LocalAPIServer()
+    private lazy var localAPIRuntimeController =
+        LocalAPIRuntimeController(localAPI: localAPI, statusItem: statusItem)
     private var localAPIToggleObserver: NSObjectProtocol?
 
     // M2: the CompletionCoordinator owns the overlay end-to-end (keystroke -> inference -> ghost).
@@ -163,40 +141,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var showBadge = true
     private var focusObserver: NSObjectProtocol?
 
-    // Cotypist-parity timed disables (badge menu "for 5 min / 1 hour / rest of day"). App/domain rules
-    // store their own expiry in AppRules and prune lazily; the master "Disable Globally" reuses `enabled`
-    // and re-enables at `globalSnoozeUntil`. A single re-arming timer drives UI refresh + global restore.
-    private var reEnableTimer: Timer?
-    private var globalSnoozeUntil: Date?
-
-    // Models → "Unload model when idle". `idleUnloadMinutes` (0 == Never) is mirrored by syncToggles; a
-    // periodic timer unloads the resident model after that much keyboard/focus inactivity, and the next
-    // input lazily reloads it (currentModelURL). The flags are only touched on the main thread.
-    private var idleUnloadMinutes = 0
-    private var lastInputAt = Date()
-    private var idleTimer: Timer?
-    private var modelIdleUnloaded = false
-
     // Focus generation whose field we have already warmed (FR-CE-8). Both warm triggers — app activation
     // and the tracker's own focus-change callback — go through warmFocusIfFocusChanged(), so an app
     // switch warms exactly once and the per-keystroke kAXValueChanged republishes warm not at all.
     private var lastWarmedFocusSeq: UInt64?
 
-    // Auto-update (UpdateManager): a once-a-day check timer, rescheduled by syncToggles when the
-    // "Automatically check for updates" toggle flips. nil when auto-checks are off.
-    private var updateTimer: Timer?
-    private var modelReloadInFlight = false
+    private lazy var appUpdateCoordinator = AppUpdateCoordinator(settings: settings)
+    private lazy var inferenceRuntimeController = InferenceRuntimeController(
+        engine: engine,
+        coordinator: coordinator,
+        modelManager: modelManager,
+        statusItem: statusItem)
+    private lazy var badgeAvailabilityController = BadgeAvailabilityController(
+        contextTracker: contextTracker,
+        rewriteController: rewriteController,
+        appRules: appRules,
+        coordinator: coordinator,
+        statusItem: statusItem,
+        settings: settings,
+        isEnabled: { [weak self] in self?.enabled ?? false },
+        updateEnabled: { [weak self] enabled in self?.enabled = enabled },
+        refreshBadge: { [weak self] in self?.refreshBadge() },
+        syncToggles: { [weak self] in self?.syncToggles() })
+    private lazy var inferenceDiagnostics =
+        InferenceDiagnostics(modelManager: modelManager, engine: engine)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Retention policy applies to every process start, including smoke/bench harnesses that exit
+        // before normal UI wiring: stale diagnostics must not survive an opt-out or a new run.
+        Diag.reset()
         // M0 debug/smoke entry point: SHADOWTYPE_SMOKE=1 loads a model, generates >=20 tokens
         // from a hardcoded prompt, prints tokens + timing, confirms Metal, then exits.
         if ProcessInfo.processInfo.environment["SHADOWTYPE_SMOKE"] == "1" {
-            runSmoke()
+            inferenceDiagnostics.runSmoke()
             return
         }
         // KV-reuse perf harness: SHADOWTYPE_BENCH=1 measures warm typing-loop TTFT (FR-CE-5/7).
         if ProcessInfo.processInfo.environment["SHADOWTYPE_BENCH"] == "1" {
-            runBench()
+            inferenceDiagnostics.runBench()
             return
         }
 
@@ -204,15 +186,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.install()
         wireStatusItemMenu()
 
-        Diag.reset()
         Diag.log("launch: AXIsProcessTrusted=\(AXIsProcessTrusted()) preflightListenEvent=\(CGPreflightListenEventAccess())")
 
         // FR-KC-1 / PRD §9 onboarding step 1: gate the capture+overlay pipeline behind the
         // Accessibility TCC grant. AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt)
         // shows the system prompt on first launch; until granted, AX caret/text reads are inert
         // (EditContextTracker also re-validates live state to dodge the stale-cache bug).
-        if !ensureAccessibilityTrust() {
-            NSLog("Shadowtype: Accessibility not yet granted — grant in System Settings ▸ Privacy & Security ▸ Accessibility, then relaunch. Capture/overlay inert until then.")
+        let accessibilityGranted = ensureAccessibilityTrust()
+        let inputMonitoringGranted = ensureInputMonitoringTrust()
+        if !accessibilityGranted || !inputMonitoringGranted {
+            NSLog("Shadowtype: required permissions not yet granted — capture/overlay will start automatically after Accessibility and Input Monitoring are enabled.")
         }
 
         // Load model (P0). Errors are non-fatal at scaffold stage.
@@ -224,7 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let url = try await modelManager.ensureStartupModel()
                 try engine.load(modelPath: url.path)
                 await MainActor.run {
-                    self.currentModelURL = url   // FR-LM-1: baseline for live-swap fallback
+                    self.inferenceRuntimeController.setCurrentModelURL(url)
                     self.statusItem.setModelName(url.deletingPathExtension().lastPathComponent)
                     NotificationCenter.default.post(
                         name: .shadowtypeEngineLoadStateChanged, object: nil, userInfo: ["loaded": true])
@@ -253,9 +236,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A pending MANDATORY update bypasses the toggle: the previous session saw a min_build force
         // and the user deferred ("Later") or quit before staging — re-check immediately so the
         // install prompt rides the start of this session, not minutes in.
-        if autoCheckUpdatesEnabled || UpdateManager.hasPendingMandatoryUpdate {
+        if appUpdateCoordinator.autoCheckUpdatesEnabled || UpdateManager.hasPendingMandatoryUpdate {
             Task { @MainActor in
-                await UpdateManager.shared.checkThenStage(channel: self.currentUpdateChannel(), manual: false)
+                await UpdateManager.shared.checkThenStage(
+                    channel: self.appUpdateCoordinator.currentUpdateChannel(),
+                    manual: false)
             }
         }
 
@@ -266,30 +251,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         inputMonitor.onEvent = { [weak self] event in
             guard let self, event.isKeyDown else { return }
             Diag.log("keyDown code=\(event.keycode)")
-            Diag.logContent("keyDown chars=\"\(event.chars)\"")
-            self.noteActivityAndReloadIfNeeded()
+            // Check the focused field before touching `event.chars`: password/secure-input keystrokes
+            // must never be copied into diagnostics, even under the explicit content-debug opt-in.
+            // A failed strict focus read is privacy-unknown, so fail closed instead of consulting the
+            // cached read target that may belong to the field active before this key event.
+            let privacyUnknown = self.contextTracker.focusedElement() == nil
+            if let content = Diag.keyContentMessage(
+                secureField: privacyUnknown || self.contextTracker.isSecureField(),
+                characters: event.chars) {
+                Diag.logContent(content)
+            }
+            self.inferenceRuntimeController.noteActivityAndReloadIfNeeded()
             self.coordinator.onKeystroke(at: event.uptime)
         }
 
         // Models → idle-unload: poll once a minute for inactivity past the configured window. Added on
         // .common modes so the check still fires while a menu/drag/modal tracking loop is open.
-        let idle = Timer(timeInterval: 60, repeats: true) { [weak self] _ in self?.unloadModelIfIdle() }
-        RunLoop.main.add(idle, forMode: .common)
-        idleTimer = idle
+        inferenceRuntimeController.startIdleTimer()
 
         // Focus-in / app-switch: warm the KV cache for the freshly focused field (FR-CE-8) so
         // the first real keystroke's suggestion lands faster.
         focusObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            guard let self, self.enabled else { return }
-            self.noteActivityAndReloadIfNeeded()
+            guard let self, self.enabled, self.permissionLifecycle?.isRunning == true else { return }
+            self.inferenceRuntimeController.noteActivityAndReloadIfNeeded()
             self.updateTabDisableForFrontmost()   // per-app "Disable Tab key"
             self.updateRightArrowAcceptForFrontmost()   // per-app "Accept with Right Arrow"
             // App switch: dismiss any ghost still anchored to the previous app's caret (and supersede
             // any in-flight run) BEFORE warming the new focus, so a lingering suggestion can't be
             // Tab-accepted into the newly-focused app.
-            self.coordinator.cancel()
+            self.coordinator.focusDidChange()
             // Let AX focus settle after the activation before reading the caret.
             DispatchQueue.main.async {
                 self.warmFocusIfFocusChanged()
@@ -313,22 +305,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // A left-click on the badge opens the scoped disable/settings menu (Cotypist parity), rebuilt
         // each click so it reflects the current frontmost app + domain.
-        badge.menuProvider = { [weak self] in self?.makeBadgeMenu() ?? NSMenu() }
+        badge.menuProvider = { [weak self] in
+            self?.badgeAvailabilityController.makeBadgeMenu() ?? NSMenu()
+        }
         // Re-anchor / hide the active-field badge on every focus change (set before start()), and warm
         // the KV cache for the newly focused field. The warm used to hang off
         // NSWorkspace.didActivateApplicationNotification ALONE, so moving between fields WITHIN an app
         // (compose box → subject → another compose box) never warmed anything and the first keystroke
-        // there always paid a cold prefill. This callback also fires on kAXValueChanged (i.e. every
-        // keystroke), which is exactly why warmFocusIfFocusChanged() gates on the focus SEQUENCE.
+        // there always paid a cold prefill. Value changes invalidate read caches without entering this
+        // callback; this closure therefore represents an actual focus/app transition.
         contextTracker.onFocusChange = { [weak self] in
             guard let self else { return }
+            self.coordinator.focusDidChange()
             self.refreshBadge()
             self.warmFocusIfFocusChanged()
         }
-        contextTracker.start()
-        inputMonitor.start()
         // Global force-activate hotkey (⌃`): same effect as the menu's "Force suggestions here".
-        forceHotKey.onPress = { [weak self] in self?.coordinator.forceActivate() }
+        forceHotKey.onPress = { [weak self] in
+            guard let self, self.permissionLifecycle?.isRunning == true else { return }
+            self.coordinator.forceActivate()
+        }
         forceHotKey.start()
 
         // Selection-rewrite hotkey (⌥⌘K). Gated by the same global + per-app/domain enable rules as the
@@ -336,6 +332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // with force-activate.
         rewriteController.isAllowedForFrontmost = { [weak self] in
             guard let self, self.coordinator.isEnabled,
+                  self.permissionLifecycle?.isRunning == true,
                   (UserDefaults.standard.object(forKey: "shadowtype.rewriteEnabled") as? Bool) ?? true
             else { return false }
             return self.appRules.isEnabled(bundleId: self.contextTracker.frontmostBundleId,
@@ -350,7 +347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in self?.registerRewriteHotkey() }
         // TabSwallowTap.start() registers the active tap but it only swallows while a suggestion
         // is visible (gated on setSuggestionVisible, driven by onSuggestionVisibleChanged below).
-        tabSwallow.start()
+        installPermissionLifecycle()
 
         // PRD §9 / FR-KC-1: first-run onboarding. Shown once (flag persisted on finish), after the
         // pipeline is wired so the Permissions step reflects (and the Try-it/model steps drive) the
@@ -432,6 +429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: .shadowtypeAppSettingsDidChange, object: nil, queue: .main
         ) { [weak self] _ in
             self?.updateTabDisableForFrontmost()
+            self?.updateRightArrowAcceptForFrontmost()
         }
 
         // Thermal pressure / Low Power Mode: re-apply the knobs so a hot or battery-saving Mac gets a
@@ -440,16 +438,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // touch is main-thread-owned (as with the settings observers above).
         thermalObserver = NotificationCenter.default.addObserver(
             forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.applyPowerPolicy() }
+        ) { [weak self] _ in self?.inferenceRuntimeController.applyPowerPolicy() }
         powerModeObserver = NotificationCenter.default.addObserver(
             forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
-        ) { [weak self] _ in self?.applyPowerPolicy() }
+        ) { [weak self] _ in self?.inferenceRuntimeController.applyPowerPolicy() }
 
         // FR-CE-3: the Context length picker writes CompletionLength.defaultsKey then posts this.
         lengthObserver = NotificationCenter.default.addObserver(
             forName: .shadowtypeCompletionLengthChanged, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.applyCompletionLength()
+            self?.inferenceRuntimeController.applyCompletionLength()
         }
 
         // FR-LM-1: live model swap. The Models pane posts .shadowtypeSelectModel with the chosen
@@ -460,17 +458,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: .shadowtypeSelectModel, object: nil, queue: .main
         ) { [weak self] note in
             guard let self, let entry = note.userInfo?["entry"] as? ModelCatalogEntry else { return }
-            self.swapModel(to: entry)
+            self.inferenceRuntimeController.swapModel(to: entry)
         }
 
         // FR-CE-3: own the engine's stop policy here (single owner, per the coordinator's
         // INTEGRATOR-NOTE). Default to the widened multi-word/clause continuation rather than the
         // legacy "first sentence only" fragment; the engine still stops early at maxWords/EOG/newline.
-        engine.stopAtFirstSentence = false
-        // FR-CE-3 (configurable length): drive engine.maxWords + coordinator.maxTokens from
-        // CompletionLength.current() instead of hardcoded literals. Re-applied live on the
-        // length-preference change (see observer above).
-        applyCompletionLength()
+        inferenceRuntimeController.configureCompletion()
         coordinator.onSuggestionVisibleChanged = { [weak self] visible in
             self?.tabSwallow.setSuggestionVisible(visible)
             // Re-anchor the active-field chip to the current caret line as the user types (otherwise it
@@ -483,22 +477,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         coordinator.onCaretAtLineEndChanged = { [weak self] atEnd in
             self?.tabSwallow.setCaretAtLineEnd(atEnd)
         }
-        // todayCount() applies the local-midnight rollover; there is no daily cap (dailyCap is nil).
+        // todayCount() applies the local-midnight rollover; the count is informational, never a cap.
         statusItem.setWordCount(wordMeter.todayCount())
 
         // An API/MCP request counts as activity, exactly like a keystroke: it pushes back the
         // idle-unload window and lazily reloads a model the idle timer already unloaded. Without this
         // the API could neither keep the model alive nor wake it — once unloaded, every request failed
         // at the engine.isLoaded guard until the user physically typed somewhere.
-        coordinator.onExternalActivity = { [weak self] in self?.noteActivityAndReloadIfNeeded() }
+        coordinator.onExternalActivity = { [weak self] in
+            self?.inferenceRuntimeController.noteActivityAndReloadIfNeeded()
+        }
 
         // M1: local API server. Started here if the user has flipped the toggle on.
-        localAPI.coordinator = coordinator
-        localAPI.modelManager = modelManager
-        if UserDefaults.standard.bool(forKey: "shadowtype.serverEnabled") {
-            startLocalAPIIfNeeded()
-        }
-        refreshLocalAPIMenu()
+        localAPIRuntimeController.configure(coordinator: coordinator, modelManager: modelManager)
         // Menu / settings toggle.
         localAPIToggleObserver = NotificationCenter.default.addObserver(
             forName: .shadowtypeToggleLocalAPI, object: nil, queue: .main
@@ -507,45 +498,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Reconcile the running server against the enabled-toggle. Used by the settings toggle + menu toggle.
     func applyLocalAPIToggle() {
-        let wantOn = UserDefaults.standard.bool(forKey: "shadowtype.serverEnabled")
-        if wantOn {
-            startLocalAPIIfNeeded()
-        } else if localAPI.isRunning {
-            localAPI.stop()
-            NotificationCenter.default.post(name: .shadowtypeLocalAPIDidChange, object: nil)
-        }
-        refreshLocalAPIMenu()
-    }
-
-    private func startLocalAPIIfNeeded() {
-        guard !localAPI.isRunning else { return }
-        _ = APIKeyStore.ensureAPIKey()   // create the bearer key on first enable so the UI can show it
-        if localAPI.start() != nil {
-            UserDefaults.standard.removeObject(forKey: "shadowtype.localAPI.lastError")
-            NotificationCenter.default.post(name: .shadowtypeLocalAPIDidChange, object: nil)
-            Diag.log("localAPI: started on port \(localAPI.boundPort ?? -1)")
-        } else {
-            // Surface the failure to the settings pane (toggle stays ON but nothing bound — without
-            // this the user flips the switch and the API silently never starts).
-            UserDefaults.standard.set(localAPI.lastError ?? "Could not start the local API server.",
-                                      forKey: "shadowtype.localAPI.lastError")
-            NotificationCenter.default.post(name: .shadowtypeLocalAPIDidChange, object: nil)
-            Diag.log("localAPI: start failed (\(localAPI.lastError ?? "unknown"))")
-        }
-        refreshLocalAPIMenu()
+        localAPIRuntimeController.applyLocalAPIToggle()
     }
 
     // Push current server state into the status menu. The Local API is always available (free).
     // Also stashes the live port in UserDefaults so the settings pane can read it (no direct
     // reference from a SwiftUI @State view to the AppDelegate-owned server).
     func refreshLocalAPIMenu() {
-        statusItem.setLocalAPI(on: localAPI.isRunning, port: localAPI.boundPort,
-                               available: true)
-        if localAPI.isRunning, let p = localAPI.boundPort {
-            UserDefaults.standard.set(p, forKey: "shadowtype.lastBoundPort")
-        } else {
-            UserDefaults.standard.removeObject(forKey: "shadowtype.lastBoundPort")
-        }
+        localAPIRuntimeController.refreshLocalAPIMenu()
     }
 
     // Shared post-accept bookkeeping for both word and line acceptance (FR-IN-5): bump the meter by
@@ -578,6 +538,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Mirror the Settings @AppStorage toggles into the coordinator. Called at launch and on every
     // UserDefaults change. All features are free; each is gated only by its own user toggle.
     private func syncToggles() {
+        // Diagnostics may be flipped through UserDefaults while the app is running. Enforce the
+        // ephemeral-retention policy immediately instead of leaving prior content on disk.
+        Diag.applyRetentionPolicy()
         coordinator.useScreenOCR = UserDefaults.standard.bool(forKey: "shadowtype.useScreenOCR")
         // #10 paste-insertion fallback: opt-in (default OFF), reachable via `defaults write … paste` —
         // the same hidden-flag pattern used for other experimental paths until it earns a Settings UI.
@@ -591,7 +554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : UserDefaults.standard.bool(forKey: "styleProfileEnabled")
         // General → "Suggestion trigger delay" + Context → "Context window size" + the completion-length
         // preset's token ceiling all land through the thermal/Low-Power policy (see applyPowerPolicy).
-        applyPowerPolicy()
+        inferenceRuntimeController.applyPowerPolicy()
         // General → "Aggressiveness": scales the confirmed-pause threshold on top of the delay floor.
         coordinator.pauseMultiplier = Aggressiveness.current().pauseMultiplier
         // General → "Show active-field indicator" (default ON when unset). Re-evaluate the badge live.
@@ -620,8 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (UserDefaults.standard.object(forKey: "shadowtype.personalizationStrength") as? Int) ?? 3
         // Models → "Unload model when idle" (minutes; 0 == Never; default 10 matches the picker). The
         // idle timer reads this.
-        idleUnloadMinutes =
-            (UserDefaults.standard.object(forKey: "shadowtype.unloadIdleMinutes") as? Int) ?? 10
+        inferenceRuntimeController.syncIdleUnloadSetting()
         // General → menu-bar presentation (count + icon style). Defaults match the General pane.
         statusItem.setShowWordCount(
             (UserDefaults.standard.object(forKey: "shadowtype.showWordCountInMenuBar") as? Bool) ?? true)
@@ -629,64 +591,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // About → "Automatically check for updates" / "Include beta builds": (re)schedule the daily
         // update timer to match. No immediate network call here (syncToggles runs on every defaults
         // change); the launch check + manual "Check for Updates…" cover on-demand checking.
-        scheduleUpdateTimer()
-    }
-
-    // MARK: - Auto-update scheduling (UpdateManager)
-
-    private var autoCheckUpdatesEnabled: Bool {
-        (UserDefaults.standard.object(forKey: "shadowtype.autoCheckUpdates") as? Bool) ?? true
-    }
-
-    /// Beta channel unless the "Include beta builds" toggle is explicitly off.
-    private func currentUpdateChannel() -> UpdateChannel {
-        ((UserDefaults.standard.object(forKey: "shadowtype.includeBetaBuilds") as? Bool) ?? true)
-            ? .beta : .stable
-    }
-
-    /// (Re)create the once-a-day check timer to match the toggle. syncToggles() runs on EVERY defaults
-    /// change, so this must be IDEMPOTENT: if the enabled-state hasn't changed, leave the running timer
-    /// alone — otherwise an unrelated write (slider drag, icon toggle) would reset the 24h countdown each
-    /// time and the daily check would effectively never fire. The channel is read fresh at fire time, so
-    /// flipping the beta toggle needs no reschedule. .common so it still fires inside menu/modal loops.
-    private func scheduleUpdateTimer() {
-        let enabled = autoCheckUpdatesEnabled
-        if enabled == (updateTimer != nil) { return }   // already in the desired state — no churn.
-        updateTimer?.invalidate(); updateTimer = nil
-        guard enabled else { return }
-        let t = Timer(timeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                await UpdateManager.shared.checkThenStage(channel: self.currentUpdateChannel(), manual: false)
-            }
-        }
-        RunLoop.main.add(t, forMode: .common)
-        updateTimer = t
-    }
-
-    /// A required update (running build below the manifest's min_build) is staged — prompt to install now.
-    /// This is what gives the mandatory flag teeth; optional updates only reveal the menu/About affordance.
-    @MainActor
-    private func presentMandatoryUpdateAlert(_ manifest: UpdateManifest) {
-        let alert = NSAlert()
-        alert.messageText = "Update required"
-        alert.informativeText = "Shadowtype \(manifest.version) is a required update.\n\n\(manifest.notes)"
-        alert.addButton(withTitle: "Install & Relaunch")
-        alert.addButton(withTitle: "Later")
-        let install: (NSApplication.ModalResponse) -> Void = { response in
-            if response == .alertFirstButtonReturn { UpdateManager.shared.installAndRelaunch() }
-        }
-        // The Settings window (where the manual "Check for Updates…" lives) is normal-level and key, so an
-        // app-modal alert can come up behind it and read as nothing happening. When it's on screen, attach
-        // the alert as a sheet so it always rides on top of the window the user is looking at.
-        if let host = settings.visibleWindow {
-            alert.beginSheetModal(for: host, completionHandler: install)
-        } else {
-            // No Settings window: make sure the accessory app is frontmost so the app-modal alert isn't
-            // buried under another app, then run it modally.
-            NSApp.activate(ignoringOtherApps: true)
-            install(alert.runModal())
-        }
+        appUpdateCoordinator.scheduleUpdateTimer()
     }
 
     // Evaluate whether the active-field badge should be visible and where. Same gates as completions:
@@ -705,147 +610,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         badge.show(at: rect, caret: contextTracker.caretRectOnScreen())
     }
 
-    // FR-CE-3: apply the effective completion length to engine.maxWords + coordinator.maxTokens.
-    // Single owner of this tunable wiring (the coordinator never reads CompletionLength).
-    private func applyCompletionLength() {
-        let length = CompletionLength.current()
-        engine.maxWords = length.maxWords
-        // The preset's token ceiling reaches coordinator.maxTokens through applyPowerPolicy, which may
-        // cap it further under thermal pressure / Low Power Mode.
-        applyPowerPolicy()
-        // Longer presets end on a sentence boundary after their grace word-count instead of truncating
-        // at the hard maxWords cap (short/medium pass 0 = legacy word-cap-only behaviour).
-        engine.stopAtSentenceAfterWords = length.sentenceStopAfterWords
-    }
-
-    /// The user's own settings, read fresh from the store. This is the ceiling PowerPolicy adapts DOWN
-    /// from — deliberately re-derived on every apply instead of snapshotted before a throttle, so a
-    /// setting the user changes WHILE throttled is not clobbered when the Mac cools down again.
-    private func configuredSettings() -> PowerPolicy.Settings {
-        // General → "Suggestion trigger delay". Default 50 ms when unset; clamp to the slider range.
-        // This is the adaptive-pause FLOOR (see CompletionCoordinator.adaptiveDelay).
-        let delayMs = UserDefaults.standard.object(forKey: "shadowtype.triggerDelayMs") as? Double ?? 50
-        // Context → "Context window size" (tokens; default 1024 when unset).
-        let contextTokens =
-            (UserDefaults.standard.object(forKey: "shadowtype.contextWindowTokens") as? Int) ?? 1024
-        return PowerPolicy.Settings(debounce: max(0.04, min(0.4, delayMs / 1000)),
-                                    maxTokens: CompletionLength.current().maxTokens,
-                                    maxContextTokens: contextTokens)
-    }
-
-    /// Push the configured settings through the thermal / Low Power Mode policy into the live knobs.
-    /// Called from syncToggles, applyCompletionLength, and the two power notifications.
-    private func applyPowerPolicy() {
-        let info = ProcessInfo.processInfo
-        let applied = PowerPolicy.adjust(configuredSettings(),
-                                         thermalState: info.thermalState,
-                                         lowPower: info.isLowPowerModeEnabled)
-        coordinator.debounce = applied.debounce
-        coordinator.maxTokens = applied.maxTokens
-        // The context window drives the engine prefix cap AND the coordinator's prompt byte budget —
-        // THE TWO MUST STAY IN SYNC, which is why they are set together here (this is the only place
-        // that knows the effective value). InferenceEngine.generate() front-trims the tokenized prompt
-        // to this cap, and the front of the prompt is the `Context:` header plus every context block,
-        // so a budget bigger than the cap silently throws away the context we just paid to build. See
-        // CompletionCoordinator.promptBudgetBytes.
-        engine.maxContextTokens = applied.maxContextTokens
-        coordinator.promptCharBudget =
-            CompletionCoordinator.promptBudgetBytes(forContextTokens: applied.maxContextTokens)
-    }
-
-    // FR-LM-1: download+verify the chosen catalog entry, then swap the active model live on the
-    // inference queue and update the menu-bar status. RAM gating is enforced in the Models pane
-    // before this is posted.
-    private func swapModel(to entry: ModelCatalogEntry) {
-        // Mark the engine busy for the WHOLE swap (download + reload) so the idle-unload timer can't tear
-        // the model down mid-swap (and a pending idle-reload won't clobber it). Reset on every exit path.
-        modelReloadInFlight = true
-        // Stream download progress to the Models pane (its row renders a determinate bar when the
-        // fraction is known). DownloadDelegate calls this off-main; observers render UI, so hop.
-        modelManager.onDownloadProgress = { fraction in
-            DispatchQueue.main.async {
-                var info: [String: Any] = ["id": entry.id]
-                if let fraction { info["fraction"] = fraction }
-                NotificationCenter.default.post(
-                    name: Notification.Name("shadowtypeModelDownloadProgress"), object: nil, userInfo: info)
-            }
-        }
-        Task {
-            defer { self.modelManager.onDownloadProgress = nil }
-            do {
-                let url = try await modelManager.ensureModel(entry)
-                // Hand the actual unload/load to the coordinator, which serializes it on the inference
-                // queue (the engine is NOT thread-safe — swapping off-queue races an in-flight decode →
-                // use-after-free). Fall back to the current model if the new one fails to load.
-                let fallback = self.currentModelURL?.path
-                // reloadModel() starts with a synchronous cancel() that hides the ghost (NSWindow.orderOut)
-                // and MUST run on main — this Task body is on a cooperative thread, so hop to main first or
-                // we touch AppKit off-main (SIGTRAP: "Must only be used from the main thread").
-                await MainActor.run {
-                self.coordinator.reloadModel(at: url.path, fallbackPath: fallback) { [weak self] ok, loadError in
-                    guard let self else { return }
-                    self.modelReloadInFlight = false
-                    if ok {
-                        self.modelIdleUnloaded = false   // a fresh load supersedes any prior idle state
-                        self.currentModelURL = url
-                        self.statusItem.setModelName(url.deletingPathExtension().lastPathComponent)
-                        // FR-LM-1: persist the choice so the next launch reloads it, not the default.
-                        UserDefaults.standard.set(entry.id, forKey: ModelManager.selectedModelDefaultsKey)
-                    } else {
-                        NSLog("Shadowtype: model swap to \(entry.id) did not load; keeping previous model")
-                    }
-                    // The download succeeded (ensureModel returned) — a non-ok here is an ENGINE LOAD
-                    // failure, not a download problem. Pass the real reason so the Models pane stops
-                    // showing the generic "check disk space and network" fallback for a Metal/GGUF fault.
-                    var info: [String: Any] = ["id": entry.id, "ok": ok]
-                    if let loadError { info["error"] = loadError }
-                    NotificationCenter.default.post(
-                        name: .shadowtypeModelDidChange, object: nil, userInfo: info)
-                    NotificationCenter.default.post(
-                        name: .shadowtypeEngineLoadStateChanged, object: nil,
-                        userInfo: ["loaded": self.coordinator.isModelLoaded])
-                }
-                }
-            } catch {
-                NSLog("Shadowtype: model swap to \(entry.id) failed: \(error)")
-                // Reset the busy flag AND post on main, matching the success path above — the catch
-                // body runs on a cooperative thread, so the off-main post would deliver to observers
-                // off-main (AppKit-touching ones would SIGTRAP).
-                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                await MainActor.run {
-                    self.modelReloadInFlight = false
-                    NotificationCenter.default.post(
-                        name: .shadowtypeModelDidChange, object: nil,
-                        userInfo: ["id": entry.id, "ok": false, "error": message])
-                }
-            }
-        }
-    }
-
-    // MARK: - Idle model unload (Models → "Unload model when idle")
-
-    // Record keyboard/focus activity and, if a prior idle window unloaded the model, lazily reload it on
-    // the inference queue so suggestions resume. The triggering input itself won't get a suggestion (the
-    // load is async); subsequent keystrokes do. Main-thread only.
-    private func noteActivityAndReloadIfNeeded() {
-        lastInputAt = Date()
-        guard modelIdleUnloaded, !modelReloadInFlight, let url = currentModelURL else { return }
-        // Consume the idle intent up FRONT (not in the completion): a failed reload then can't re-fire on
-        // every keystroke (no storm), and recovery doesn't wait for the async unload to flip isLoaded
-        // (which lags a tick behind this main-thread call).
-        modelIdleUnloaded = false
-        modelReloadInFlight = true
-        coordinator.reloadModel(at: url.path, fallbackPath: nil) { [weak self] ok, _ in
-            guard let self else { return }
-            self.modelReloadInFlight = false
-            if ok {
-                self.statusItem.setModelName(url.deletingPathExtension().lastPathComponent)
-            } else {
-                NSLog("Shadowtype: idle reload of \(url.lastPathComponent) failed; model stays unloaded until the next model swap or relaunch")
-            }
-        }
-    }
-
     // Warm the KV cache for the focused field, but only once per focus session (FR-CE-8). Called from the
     // app-activation observer AND from contextTracker.onFocusChange — the latter is the only signal for a
     // focus move WITHIN an app, and it also fires on kAXValueChanged (every keystroke), so the sequence
@@ -861,22 +625,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         coordinator.warmFocus()
     }
 
-    // Unload the resident model after `idleUnloadMinutes` of inactivity (0 == Never). No-op while already
-    // unloaded, mid-reload, mid-swap (modelReloadInFlight covers both), or while an API/MCP request is
-    // decoding — the idle window is measured from keyboard/focus activity plus API requests, but a single
-    // long stream can outlive the window, and unloading under it frees the llama context out from under
-    // the client's own decode. Main-thread only (the timer fires on main).
-    private func unloadModelIfIdle() {
-        guard idleUnloadMinutes > 0, !modelIdleUnloaded, !modelReloadInFlight,
-              !coordinator.hasInFlightAPIRequests,
-              coordinator.isModelLoaded else { return }
-        guard Date().timeIntervalSince(lastInputAt) >= Double(idleUnloadMinutes) * 60 else { return }
-        coordinator.unloadModel()
-        modelIdleUnloaded = true
-        statusItem.setModelName("idle — wakes on your next keystroke")
-        Diag.log("idle: unloaded model after \(idleUnloadMinutes) min")
-    }
-
     func applicationWillTerminate(_ notification: Notification) {
         // Persist any coalesced stat counters (shown/accepted) before exit so they aren't lost.
         wordMeter.flush()
@@ -887,13 +635,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NotificationCenter.default.removeObserver(ocrSettingObserver)
         }
         for obs in [lengthObserver, selectModelObserver, appSettingsObserver, rewriteHotkeyObserver,
-                    thermalObserver, powerModeObserver].compactMap({ $0 }) {
+                    thermalObserver, powerModeObserver, permissionObserver].compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(obs)
         }
-        idleTimer?.invalidate()
-        idleTimer = nil
-        updateTimer?.invalidate()
-        updateTimer = nil
+        permissionTimer?.invalidate()
+        permissionTimer = nil
+        permissionLifecycle?.shutdown()
+        inferenceRuntimeController.shutdown()
+        appUpdateCoordinator.shutdown()
         badge.hide()
         tabSwallow.stop()
         inputMonitor.stop()
@@ -915,6 +664,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return AXIsProcessTrustedWithOptions([opt: true] as CFDictionary)
     }
 
+    @discardableResult
+    private func ensureInputMonitoringTrust() -> Bool {
+        if CGPreflightListenEventAccess() { return true }
+        return CGRequestListenEventAccess()
+    }
+
+    private func installPermissionLifecycle() {
+        let lifecycle = PermissionLifecycleCoordinator(
+            start: { [weak self] in self?.startPermissionPipeline() },
+            stop: { [weak self] in self?.stopPermissionPipeline() })
+        permissionLifecycle = lifecycle
+
+        permissionObserver = NotificationCenter.default.addObserver(
+            forName: .shadowtypeRequiredPermissionsMayHaveChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshPermissionLifecycle()
+        }
+
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            self?.refreshPermissionLifecycle()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        permissionTimer = timer
+        refreshPermissionLifecycle()
+    }
+
+    private func refreshPermissionLifecycle() {
+        let transition = permissionLifecycle?.update(.current) ?? .none
+        switch transition {
+        case .started:
+            Diag.log("permissions: required grants available — pipeline started")
+        case .stopped:
+            Diag.log("permissions: required grant revoked — pipeline stopped")
+        case .none:
+            break
+        }
+    }
+
+    private func startPermissionPipeline() {
+        contextTracker.start()
+        inputMonitor.start()
+        tabSwallow.start()
+        updateTabDisableForFrontmost()
+        updateRightArrowAcceptForFrontmost()
+    }
+
+    private func stopPermissionPipeline() {
+        coordinator.cancel()
+        tabSwallow.setSuggestionVisible(false)
+        badge.hide()
+        tabSwallow.stop()
+        inputMonitor.stop()
+        contextTracker.stop()
+    }
+
     // MARK: - Status-item menu wiring (FR-MB-1)
 
     private func wireStatusItemMenu() {
@@ -934,8 +740,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Mirror into the coordinator so the whole loop is gated by one switch (FR-MB-1).
             self.coordinator.isEnabled = self.enabled
             if !self.enabled { self.coordinator.cancel() }   // hide ghost + drop in-flight run
-            self.globalSnoozeUntil = nil                      // a manual flip cancels any timed global snooze
-            self.rescheduleReEnableTimer()
+            self.badgeAvailabilityController.manualMasterToggleDidOccur()
             self.refreshBadge()                               // hide/show the badge with the master switch
         }
         // Menu-bar "Disable for app ▸" list: permanently toggle the chosen (possibly non-frontmost) app.
@@ -982,7 +787,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.settings.show()
             Task { @MainActor in
-                await UpdateManager.shared.checkThenStage(channel: self.currentUpdateChannel(), manual: true)
+                await UpdateManager.shared.checkThenStage(
+                    channel: self.appUpdateCoordinator.currentUpdateChannel(),
+                    manual: true)
             }
         }
         // Auto-update: "Install Update…" — swap the staged bundle and relaunch.
@@ -997,146 +804,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.statusItem.setUpdateAvailable(version: manifest?.version)
             guard let manifest else { return }
             Task { @MainActor in
-                if UpdateManager.shared.isMandatory(manifest) { self.presentMandatoryUpdateAlert(manifest) }
+                if UpdateManager.shared.isMandatory(manifest) {
+                    self.appUpdateCoordinator.presentMandatoryUpdateAlert(manifest)
+                }
             }
         }
-    }
-
-    // MARK: - Badge context menu (Cotypist parity)
-
-    // Build the menu shown when the active-field chip is clicked. Scoped to the current frontmost app and
-    // (in a browser) the focused field's domain; each disable item carries a duration submenu.
-    private func makeBadgeMenu() -> NSMenu {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-
-        // Rewrite actions lead the menu when there's a non-empty selection. The selection is captured
-        // HERE (menu-build time, while the host still has it highlighted) and carried in the payload, so
-        // the menu's modal loop can't invalidate a later re-read.
-        if let sel = contextTracker.currentSelection(),
-           !sel.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            for action in RewriteAction.allCases {
-                let item = NSMenuItem(title: action.title, action: #selector(rewritePick(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = RewriteActionPayload(action: action, selection: sel)
-                menu.addItem(item)
-            }
-            menu.addItem(.separator())
-        }
-
-        let app = NSWorkspace.shared.frontmostApplication
-        let appName = app?.localizedName ?? "this app"
-        let host = contextTracker.frontmostDomainHost()
-
-        if let host {
-            if appRules.isEnabled(bundleId: nil, domain: host) {
-                menu.addItem(disableItem(title: "Disable Completions on \(host)", scope: .domain(host)))
-            } else {
-                menu.addItem(resumeItem(title: "Resume Completions on \(host)", scope: .domain(host)))
-            }
-        }
-        if let bundle = app?.bundleIdentifier {
-            let scope = DisableScope.app(bundleId: bundle, name: appName)
-            if appRules.isEnabled(bundleId: bundle, domain: nil) {
-                menu.addItem(disableItem(title: "Disable Completions in \(appName)", scope: scope))
-            } else {
-                menu.addItem(resumeItem(title: "Resume Completions in \(appName)", scope: scope))
-            }
-        }
-        if enabled {
-            menu.addItem(disableItem(title: "Disable Completions Globally", scope: .global))
-        } else {
-            menu.addItem(resumeItem(title: "Enable Completions Globally", scope: .global))
-        }
-
-        menu.addItem(.separator())
-        let hide = NSMenuItem(title: "Hide this Button (restore in Settings → General)",
-                              action: #selector(hideBadgeButton), keyEquivalent: "")
-        hide.target = self
-        menu.addItem(hide)
-
-        menu.addItem(.separator())
-        let settingsItem = NSMenuItem(title: "Shadowtype Settings…", action: #selector(openSettingsFromBadge),
-                                      keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-        let quitItem = NSMenuItem(title: "Quit Shadowtype", action: #selector(quitFromBadge), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-        return menu
-    }
-
-    // Run the chosen rewrite action on the selection captured when the badge menu was built.
-    @objc private func rewritePick(_ sender: NSMenuItem) {
-        guard let p = sender.representedObject as? RewriteActionPayload else { return }
-        rewriteController.rewrite(action: p.action, selection: p.selection)
-    }
-
-    // A "Disable…" row with a duration submenu (5 min / 1 hour / rest of day / permanently).
-    private func disableItem(title: String, scope: DisableScope) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-        let durations: [(String, DisableDuration)] = [
-            ("For 5 minutes", .minutes(5)),
-            ("For 1 hour", .hours(1)),
-            ("For the rest of the day", .restOfDay),
-            ("Permanently", .permanent),
-        ]
-        for (label, dur) in durations {
-            let di = NSMenuItem(title: label, action: #selector(applyDisable(_:)), keyEquivalent: "")
-            di.target = self
-            di.representedObject = DisableActionPayload(scope: scope, duration: dur)
-            sub.addItem(di)
-        }
-        item.submenu = sub
-        return item
-    }
-
-    // A single "Resume/Enable…" row that clears the scope's rule.
-    private func resumeItem(title: String, scope: DisableScope) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: #selector(applyResume(_:)), keyEquivalent: "")
-        item.target = self
-        item.representedObject = DisableActionPayload(scope: scope, duration: .permanent)
-        return item
-    }
-
-    @objc private func applyDisable(_ sender: NSMenuItem) {
-        guard let payload = sender.representedObject as? DisableActionPayload else { return }
-        let until = expiryDate(for: payload.duration)
-        switch payload.scope {
-        case .app(let bundle, let name):
-            appRules.disable(bundleId: bundle, until: until)
-            coordinator.cancel()
-            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundle {
-                statusItem.setPausedApp(name)
-            }
-        case .domain(let host):
-            appRules.disable(domain: host, until: until)
-            coordinator.cancel()
-        case .global:
-            setMasterEnabled(false)
-            globalSnoozeUntil = until   // nil == permanent (no auto re-enable)
-        }
-        NotificationCenter.default.post(name: .shadowtypeAppRulesDidChange, object: nil)
-        refreshBadge()
-        rescheduleReEnableTimer()
-    }
-
-    @objc private func applyResume(_ sender: NSMenuItem) {
-        guard let payload = sender.representedObject as? DisableActionPayload else { return }
-        switch payload.scope {
-        case .app(let bundle, _):
-            appRules.setEnabled(true, bundleId: bundle)
-            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundle { statusItem.setPausedApp(nil) }
-        case .domain(let host):
-            appRules.setEnabled(true, domain: host)
-        case .global:
-            setMasterEnabled(true)
-            globalSnoozeUntil = nil
-        }
-        NotificationCenter.default.post(name: .shadowtypeAppRulesDidChange, object: nil)
-        refreshBadge()
-        rescheduleReEnableTimer()
     }
 
     // Map the persisted chord choice (General pane picker) onto Carbon keycode+modifiers and
@@ -1161,198 +833,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func hideBadgeButton() {
-        UserDefaults.standard.set(false, forKey: "shadowtype.showActiveBadge")
-        syncToggles()   // re-reads the key (-> showBadge=false) and calls refreshBadge()
-    }
-
-    @objc private func openSettingsFromBadge() { settings.show() }
-    @objc private func quitFromBadge() { NSApp.terminate(nil) }
-
-    // Apply the master enable/disable switch consistently (mirrors the .shadowtypeToggleEnabled path but
-    // also reflects the menu-bar checkmark, since the badge — not the menu — initiated the change).
-    private func setMasterEnabled(_ on: Bool) {
-        enabled = on
-        coordinator.isEnabled = on
-        statusItem.setEnabled(on)
-        if !on { coordinator.cancel() }
-        refreshBadge()
-    }
-
-    private func expiryDate(for duration: DisableDuration) -> Date? {
-        switch duration {
-        case .minutes(let m): return Date().addingTimeInterval(Double(m) * 60)
-        case .hours(let h):   return Date().addingTimeInterval(Double(h) * 3600)
-        case .restOfDay:
-            let cal = Calendar.current
-            return cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: Date()))
-        case .permanent:      return nil
-        }
-    }
-
-    // Arm a single-shot timer at the soonest pending expiry (app/domain temp rule or the global snooze).
-    private func rescheduleReEnableTimer() {
-        reEnableTimer?.invalidate(); reEnableTimer = nil
-        let candidates = [appRules.nextExpiry(), globalSnoozeUntil].compactMap { $0 }
-        guard let soonest = candidates.min() else { return }
-        let interval = max(0.5, soonest.timeIntervalSinceNow)
-        let t = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
-            self?.handleReEnableTick()
-        }
-        // `.common` so the tick still fires while a menu/tracking loop is open (matches idleTimer).
-        RunLoop.main.add(t, forMode: .common)
-        reEnableTimer = t
-    }
-
-    private func handleReEnableTick() {
-        if let g = globalSnoozeUntil, Date() >= g {
-            setMasterEnabled(true)
-            globalSnoozeUntil = nil
-        }
-        // App/domain temp rules prune themselves on the next isEnabled() read; refresh UI + pause title.
-        if let bundle = contextTracker.frontmostBundleId, appRules.isEnabled(bundleId: bundle, domain: nil) {
-            statusItem.setPausedApp(nil)
-        }
-        NotificationCenter.default.post(name: .shadowtypeAppRulesDidChange, object: nil)
-        refreshBadge()
-        rescheduleReEnableTimer()   // arm for the next pending expiry, if any
-    }
-
-    // MARK: - M0 smoke (SHADOWTYPE_SMOKE=1)
-
-    // Resolve a usable GGUF without forcing a multi-hundred-MB download: prefer the
-    // Application Support copy, fall back to the matching Hugging Face hub cache, else
-    // download via ModelManager. Keeps M0 offline-runnable when a model is already present.
-    private func resolveModelForSmoke() async throws -> URL {
-        let primary = modelManager.defaultModelURL()
-        if FileManager.default.fileExists(atPath: primary.path) { return primary }
-
-        // HF hub cache: ~/.cache/huggingface/hub/models--mradermacher--gemma-3-1b-pt-GGUF/snapshots/*/...
-        let hubRoot = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/huggingface/hub/models--mradermacher--gemma-3-1b-pt-GGUF/snapshots",
-                                    isDirectory: true)
-        if let snaps = try? FileManager.default.contentsOfDirectory(at: hubRoot,
-                                                                    includingPropertiesForKeys: nil) {
-            for snap in snaps {
-                let candidate = snap.appendingPathComponent(ModelManager.defaultModelFileName)
-                if FileManager.default.fileExists(atPath: candidate.path) {
-                    NSLog("Shadowtype[smoke]: using HF-cached model at \(candidate.path)")
-                    return candidate
-                }
-            }
-        }
-
-        NSLog("Shadowtype[smoke]: no cached model — downloading default model")
-        return try await modelManager.ensureDefaultModel()
-    }
-
-    private func runSmoke() {
-        Task {
-            // Mid-sentence prompt: generate() stops at a sentence boundary (FR-CE-3), so we want
-            // a continuation that runs well past 20 tokens before hitting any '.'/'!'/'?'/newline.
-            let prompt = "Here is a long list of reasons why people enjoy reading books, written as one continuous run-on clause separated only by commas: people read because"
-            let maxTokens = 64
-            var exitCode: Int32 = 0
-            do {
-                let url = try await resolveModelForSmoke()
-                NSLog("Shadowtype[smoke]: loading model \(url.lastPathComponent)")
-                let loadStart = Date()
-                try engine.load(modelPath: url.path)
-                NSLog("Shadowtype[smoke]: model loaded in \(Int(Date().timeIntervalSince(loadStart) * 1000)) ms")
-
-                // generate() stops at a sentence boundary (FR-CE-3), so a single call yields a
-                // short clause. To exercise >=20 tokens we chain calls forward-from-caret: append
-                // each completion to the prompt and continue (the production prefix-growth path).
-                var count = 0
-                var output = ""
-                let genStart = Date()
-                var firstTokenMs: Double = -1
-                var context = prompt
-                while count < 20 {
-                    var runEmitted = 0
-                    try engine.generate(prompt: context, maxTokens: maxTokens) { piece in
-                        if firstTokenMs < 0 {
-                            firstTokenMs = Date().timeIntervalSince(genStart) * 1000
-                        }
-                        count += 1
-                        runEmitted += 1
-                        output += piece
-                        context += piece
-                        return true
-                    }
-                    if runEmitted == 0 { break }   // model produced nothing (EOG) — avoid infinite loop
-                }
-                let totalMs = Date().timeIntervalSince(genStart) * 1000
-                let tps = count > 0 ? Double(count) / (totalMs / 1000) : 0
-
-                NSLog("Shadowtype[smoke]: prompt=\"\(prompt)\"")
-                NSLog("Shadowtype[smoke]: completion=\"\(output)\"")
-                NSLog("Shadowtype[smoke]: tokens=\(count) firstTokenLatency=\(String(format: "%.1f", firstTokenMs))ms total=\(String(format: "%.1f", totalMs))ms (\(String(format: "%.1f", tps)) tok/s)")
-                print("SMOKE_RESULT tokens=\(count) firstTokenMs=\(String(format: "%.1f", firstTokenMs)) totalMs=\(String(format: "%.1f", totalMs)) tps=\(String(format: "%.1f", tps))")
-                print("SMOKE_COMPLETION \(output)")
-
-                if count < 20 {
-                    NSLog("Shadowtype[smoke]: FAIL — generated \(count) tokens (<20)")
-                    exitCode = 2
-                } else {
-                    NSLog("Shadowtype[smoke]: PASS — generated \(count) tokens (>=20)")
-                }
-                engine.unload()
-            } catch {
-                NSLog("Shadowtype[smoke]: FAIL — \(error)")
-                print("SMOKE_RESULT error=\(error)")
-                exitCode = 1
-            }
-            exit(exitCode)
-        }
-    }
-
-    // MARK: - KV-reuse benchmark (SHADOWTYPE_BENCH=1)
-
-    // Reproduces Spike 1's typing loop with the real engine: prefill a ~200-token base context the
-    // user "already typed" (cold), then simulate keystrokes that append a couple of words at a time
-    // and measure time-to-first-token for each. With KV reuse (FR-CE-5) only the appended tokens are
-    // evaluated per keystroke -> warm TTFT should sit far under the 150 ms budget (Spike 1: ~65 ms),
-    // versus the cold first prefill. Prints BENCH_RESULT for at-a-glance regression checking.
-    private func runBench() {
-        Task {
-            var exitCode: Int32 = 0
-            do {
-                let url = try await resolveModelForSmoke()
-                try engine.load(modelPath: url.path)
-
-                let base = String(repeating:
-                    "The quarterly review went well and the team is confident about the roadmap, ",
-                    count: 6) + "and so"
-                let additions = [" the plan", " is", " realistic", " given", " our", " current",
-                                 " capacity", " this", " quarter", " overall"]
-
-                // Cold first suggestion on the base context (no warm cache).
-                let coldStart = Date()
-                try engine.generate(prompt: base, maxTokens: 1) { _ in false }
-                let coldMs = Date().timeIntervalSince(coldStart) * 1000
-
-                // Warm loop: each "keystroke" appends text (strict extension) -> only the new tokens
-                // are prefilled thanks to KV reuse. Measure TTFT (here: time to produce one token).
-                var context = base
-                var warm: [Double] = []
-                for add in additions {
-                    context += add
-                    let t = Date()
-                    try engine.generate(prompt: context, maxTokens: 1) { _ in false }
-                    warm.append(Date().timeIntervalSince(t) * 1000)
-                }
-                let avg = warm.reduce(0, +) / Double(warm.count)
-                let mx = warm.max() ?? 0
-
-                NSLog("Shadowtype[bench]: cold=\(String(format: "%.1f", coldMs))ms warm avg=\(String(format: "%.1f", avg))ms max=\(String(format: "%.1f", mx))ms")
-                print("BENCH_RESULT coldMs=\(String(format: "%.1f", coldMs)) warmAvgMs=\(String(format: "%.1f", avg)) warmMaxMs=\(String(format: "%.1f", mx)) budget150=\(mx < 150 ? "PASS" : "FAIL")")
-                engine.unload()
-            } catch {
-                print("BENCH_RESULT error=\(error)")
-                exitCode = 1
-            }
-            exit(exitCode)
-        }
-    }
 }

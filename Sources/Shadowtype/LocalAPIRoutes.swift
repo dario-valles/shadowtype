@@ -95,7 +95,7 @@ enum LocalAPIRoutes {
                                           cors: [String: String],
                                           isChat: Bool) {
         guard let coordinator = server.coordinator else {
-            LocalHTTPParser.writeResponse(to: fd, status: 500, reason: "Server Error",
+            LocalHTTPParser.writeResponse(to: fd, status: 503, reason: "Service Unavailable",
                                           headers: cors, body: server.errorJSON("coordinator unavailable"))
             return
         }
@@ -258,8 +258,12 @@ enum LocalAPIRoutes {
                 case .success: break
                 case .failure(.modelNotLoaded):
                     finishReason = "model_not_loaded"
-                case .failure(.decodeFailed):
-                    finishReason = "error"
+                case .failure(.decodeFailed(let inner)):
+                    if case InferenceError.cancelled = inner {
+                        finishReason = "cancelled"
+                    } else {
+                        finishReason = "error"
+                    }
                 }
                 // Final terminal chunk with finish_reason set.
                 let json = encodeChunk(piece: "", isChat: isChat, requestID: requestID,
@@ -438,10 +442,13 @@ enum LocalAPIRoutes {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "dev"
     }
 
-    private static func mapError(_ err: CompletionCoordinator.LocalAPIError) -> (Int, String, String) {
+    static func mapError(_ err: CompletionCoordinator.LocalAPIError) -> (Int, String, String) {
         switch err {
         case .modelNotLoaded:  return (503, "Service Unavailable", "no model loaded")
         case .decodeFailed(let inner):
+            if case InferenceError.cancelled = inner {
+                return (499, "Client Closed Request", "generation cancelled")
+            }
             // Review #2: surface FIM context overflow as a user-fixable 400 ("shorten your
             // prefix/suffix") instead of a generic 500. The engine refuses to silently front-
             // trim a FIM token stream because dropping fim_pre / fim_suf would feed the model

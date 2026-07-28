@@ -42,8 +42,9 @@ enum HFResolver {
     static func parse(_ raw: String) -> Parsed {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: s),
+              url.scheme?.lowercased() == "https",
               let host = url.host, host == "huggingface.co" else {
-            return .invalid(reason: "URL must point at huggingface.co")
+            return .invalid(reason: "URL must use HTTPS and point at huggingface.co")
         }
         // Path components: ["/", owner, repo, ...maybeMore]
         let parts = url.path.split(separator: "/").map(String.init)

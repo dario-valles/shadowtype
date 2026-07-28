@@ -4,9 +4,21 @@ import XCTest
 @testable import Shadowtype
 
 final class AppSettingsStoreTests: XCTestCase {
+    private enum PersistenceFailure: Error {
+        case unwritableDirectory
+        case atomicWrite
+    }
+
     private func tempURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("gw-appsettings-\(UUID().uuidString).json")
+    }
+
+    private func quarantinedURLs(for url: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(
+            at: url.deletingLastPathComponent(),
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix("\(url.lastPathComponent).corrupt-") }
     }
 
     // MARK: - Tri-state resolution (the one place three-state collapses to a Bool)
@@ -77,6 +89,19 @@ final class AppSettingsStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.config(forBundleId: "com.apple.mail").collectInputs, .on)
     }
 
+    func testWritesVersionedEnvelope() throws {
+        let url = tempURL()
+        let store = AppSettingsStore(storeURL: url)
+        XCTAssertTrue(store.set(.off, \.disableTab, forBundleId: "com.apple.dt.Xcode"))
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        XCTAssertEqual((object["version"] as? NSNumber)?.intValue, 1)
+        let apps = try XCTUnwrap(object["apps"] as? [String: Any])
+        XCTAssertNotNil(apps["com.apple.dt.Xcode"])
+    }
+
     func testTolerantDecodeOfMissingFields() throws {
         let url = tempURL()
         // A file written by an older build with only one field present.
@@ -88,6 +113,117 @@ final class AppSettingsStoreTests: XCTestCase {
         XCTAssertEqual(cfg.midLine, .auto)        // absent → inert default
         XCTAssertEqual(cfg.collectInputs, .auto)
         XCTAssertEqual(cfg.rightArrowAccept, .auto)
+    }
+
+    func testMalformedJSONIsQuarantinedWithoutBeingOverwritten() throws {
+        let url = tempURL()
+        let malformed = Data(#"{"com.apple.mail":"#.utf8)
+        try malformed.write(to: url)
+
+        let store = AppSettingsStore(storeURL: url)
+
+        XCTAssertTrue(store.configuredBundleIds().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        let quarantine = try XCTUnwrap(quarantinedURLs(for: url).first)
+        XCTAssertEqual(try Data(contentsOf: quarantine), malformed)
+
+        XCTAssertTrue(store.set(.on, \.autocorrect, forBundleId: "com.apple.TextEdit"))
+        XCTAssertEqual(try Data(contentsOf: quarantine), malformed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testUnknownEnumEntryIsQuarantined() throws {
+        let url = tempURL()
+        let source = Data(
+            #"{"version":1,"apps":{"com.example.future":{"midLine":"sometimes"}}}"#.utf8
+        )
+        try source.write(to: url)
+
+        let store = AppSettingsStore(storeURL: url)
+
+        XCTAssertTrue(store.configuredBundleIds().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        let quarantine = try XCTUnwrap(quarantinedURLs(for: url).first)
+        XCTAssertEqual(try Data(contentsOf: quarantine), source)
+    }
+
+    func testMixedValidAndInvalidEntriesPreserveValidEntryAndQuarantineSource() throws {
+        let url = tempURL()
+        let source = Data(
+            """
+            {"version":1,"apps":{
+              "com.apple.mail":{"autocorrect":"off"},
+              "com.example.future":{"midLine":"sometimes"}
+            }}
+            """.utf8
+        )
+        try source.write(to: url)
+
+        let store = AppSettingsStore(storeURL: url)
+
+        XCTAssertEqual(store.config(forBundleId: "com.apple.mail").autocorrect, .off)
+        XCTAssertEqual(store.config(forBundleId: "com.example.future"), AppConfig())
+        XCTAssertEqual(store.configuredBundleIds(), ["com.apple.mail"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        let quarantine = try XCTUnwrap(quarantinedURLs(for: url).first)
+        XCTAssertEqual(try Data(contentsOf: quarantine), source)
+
+        // The first successful mutation writes a clean envelope containing the recovered entry;
+        // it never modifies the quarantined source.
+        XCTAssertTrue(store.set(.on, \.midLine, forBundleId: "com.apple.mail"))
+        XCTAssertEqual(try Data(contentsOf: quarantine), source)
+        let reloaded = AppSettingsStore(storeURL: url)
+        XCTAssertEqual(reloaded.config(forBundleId: "com.apple.mail").autocorrect, .off)
+        XCTAssertEqual(reloaded.config(forBundleId: "com.apple.mail").midLine, .on)
+    }
+
+    func testFutureEnvelopeRecoversKnownEntriesAndQuarantinesSource() throws {
+        let url = tempURL()
+        let source = Data(
+            #"{"version":99,"apps":{"com.apple.mail":{"collectInputs":"on"}}}"#.utf8
+        )
+        try source.write(to: url)
+
+        let store = AppSettingsStore(storeURL: url)
+
+        XCTAssertEqual(store.config(forBundleId: "com.apple.mail").collectInputs, .on)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        let quarantine = try XCTUnwrap(quarantinedURLs(for: url).first)
+        XCTAssertEqual(try Data(contentsOf: quarantine), source)
+    }
+
+    func testUnwritableDirectoryFailureRevertsInMemoryValueAndReturnsFailure() {
+        let url = tempURL()
+        var attemptedAtomicWrite = false
+        let store = AppSettingsStore(
+            storeURL: url,
+            createDirectory: { _ in throw PersistenceFailure.unwritableDirectory },
+            atomicWrite: { _, _ in attemptedAtomicWrite = true }
+        )
+
+        XCTAssertFalse(store.set(.off, \.midLine, forBundleId: "com.apple.mail"))
+        XCTAssertEqual(store.config(forBundleId: "com.apple.mail"), AppConfig())
+        XCTAssertTrue(store.configuredBundleIds().isEmpty)
+        XCTAssertFalse(attemptedAtomicWrite)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testAtomicWriteFailureRevertsInMemoryValueAndReturnsFailure() {
+        let url = tempURL()
+        var attemptedAtomicWrite = false
+        let store = AppSettingsStore(
+            storeURL: url,
+            atomicWrite: { _, _ in
+                attemptedAtomicWrite = true
+                throw PersistenceFailure.atomicWrite
+            }
+        )
+
+        XCTAssertFalse(store.set(.on, \.collectInputs, forBundleId: "com.apple.mail"))
+        XCTAssertEqual(store.config(forBundleId: "com.apple.mail"), AppConfig())
+        XCTAssertTrue(store.configuredBundleIds().isEmpty)
+        XCTAssertTrue(attemptedAtomicWrite)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
 
     func testRightArrowAcceptOverride() {

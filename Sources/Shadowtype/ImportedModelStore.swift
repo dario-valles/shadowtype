@@ -12,6 +12,7 @@
 // lives under `~/Library/Application Support/Shadowtype/models/imported/`; deleting an import
 // removes the symlink + JSON entry, never the user's original file.
 import Foundation
+import CryptoKit
 
 struct ImportedModelEntry: Codable, Equatable, Identifiable {
     let id: String                    // "byom-<uuid>" — distinct from curated catalog ids
@@ -141,6 +142,42 @@ final class ImportedModelStore {
             try fm.createSymbolicLink(at: candidate, withDestinationURL: source)
             return candidate.path
         }
+    }
+
+    /// Stable destination for a Hugging Face download. HF filenames are not globally unique, so
+    /// putting every import directly under `models/imported/` lets a second repository overwrite a
+    /// same-named model from the first. Keep the remote basename, but namespace it under a directory
+    /// derived from the source URL.
+    ///
+    /// Query and fragment are deliberately excluded: they may contain credentials, and changing a
+    /// signed query must not create a second identity for the same repository object.
+    func huggingFaceDownloadDestination(filename: String, sourceURL: URL) -> URL {
+        let basename = (filename as NSString).lastPathComponent
+        return importsDir
+            .appendingPathComponent(Self.huggingFaceStorageDirectoryName(sourceURL: sourceURL),
+                                    isDirectory: true)
+            .appendingPathComponent(basename)
+    }
+
+    static func huggingFaceStorageDirectoryName(sourceURL: URL) -> String {
+        let scheme = sourceURL.scheme?.lowercased() ?? "https"
+        let host = sourceURL.host?.lowercased() ?? "huggingface.co"
+        let port = sourceURL.port.map { ":\($0)" } ?? ""
+        let identity = "\(scheme)://\(host)\(port)\(sourceURL.path)"
+        let digest = SHA256.hash(data: Data(identity.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+
+        let pathParts = sourceURL.path.split(separator: "/").prefix(2).map(String.init)
+        let repository = pathParts.isEmpty ? "source" : pathParts.joined(separator: "--")
+        let safeRepository = repository.unicodeScalars.map { scalar -> Character in
+            CharacterSet.alphanumerics.contains(scalar) || "._-".unicodeScalars.contains(scalar)
+                ? Character(String(scalar))
+                : "-"
+        }
+        let label = String(String(safeRepository).prefix(80))
+        return ".hf-\(label)-\(digest)"
     }
 
     // FileManager.fileExists(atPath:) follows symlinks — a dangling link from a deleted source

@@ -47,6 +47,10 @@ final class TypoGuard {
         // Only judge plain alphabetic words. Anything with digits/punctuation/symbols
         // (URLs, code, file names, hyphenates, contractions) is out of scope -> not a typo.
         guard raw.allSatisfy({ $0.isLetter }) else { return false }
+        // Every remaining signal is specific to English spelling (ASCII vowel inventory, consonant
+        // clusters, and the English common-word anchors). Do not apply it to another script merely
+        // because that script's letters are absent from the English vowel set.
+        guard isLatinScriptToken(raw) else { return false }
 
         let lower = raw.lowercased()
         let chars = Array(lower)
@@ -149,6 +153,23 @@ final class TypoGuard {
         if cs.allSatisfy({ $0.isUppercase }) { return true } // acronym e.g. NASA
         if first.isUppercase && cs.dropFirst().allSatisfy({ $0.isLowercase }) { return true } // Name
         return false
+    }
+
+    private func isLatinScriptToken(_ s: String) -> Bool {
+        s.unicodeScalars.allSatisfy { scalar in
+            switch scalar.value {
+            // Latin, Latin-1 Supplement, Extended-A/B, and the later Latin extensions. This keeps
+            // accented English and other Latin-script spelling languages eligible for the dictionary
+            // gate while excluding Arabic, Hebrew, Cyrillic, and every other non-Latin script.
+            case 0x0041...0x005A, 0x0061...0x007A,
+                 0x00C0...0x024F, 0x1E00...0x1EFF,
+                 0x2C60...0x2C7F, 0xA720...0xA7FF,
+                 0xAB30...0xAB6F, 0xFB00...0xFB06:
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     private func hasRun(_ chars: [Character], ofAtLeast k: Int) -> Bool {

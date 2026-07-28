@@ -57,9 +57,18 @@ final class HFResolverTests: XCTestCase {
 
     func testNonHFHostRejected() {
         XCTAssertEqual(HFResolver.parse("https://example.com/foo/bar"),
-                       .invalid(reason: "URL must point at huggingface.co"))
+                       .invalid(reason: "URL must use HTTPS and point at huggingface.co"))
         XCTAssertEqual(HFResolver.parse("not a url"),
-                       .invalid(reason: "URL must point at huggingface.co"))
+                       .invalid(reason: "URL must use HTTPS and point at huggingface.co"))
+    }
+
+    func testCleartextHFURLsRejected() {
+        XCTAssertEqual(
+            HFResolver.parse("http://huggingface.co/owner/repo/resolve/main/model.gguf"),
+            .invalid(reason: "URL must use HTTPS and point at huggingface.co"))
+        XCTAssertEqual(
+            HFResolver.parse("http://huggingface.co/owner/repo"),
+            .invalid(reason: "URL must use HTTPS and point at huggingface.co"))
     }
 
     func testWhitespaceTrimmed() {

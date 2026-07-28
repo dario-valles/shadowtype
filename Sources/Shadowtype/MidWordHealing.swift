@@ -2,9 +2,9 @@
 // line ("…the weather is gre"), the model otherwise continues from a fragile SUBWORD state where a
 // cheaper wrong token ("asy" → greasy) can outrank the right one ("at" → great). The fix: back the
 // prompt up to the last clean word boundary, regenerate the whole word with the typed stem as a
-// REQUIRED PREFIX (see RequiredPrefix, enforced in the sampler), then strip the re-emitted stem from
-// what the ghost shows/inserts. This file is the model-free split/strip logic; it's unit-tested
-// without llama. Bonus: the KV anchor (head) stays constant while the user types within a word, so
+// REQUIRED PREFIX (see RequiredPrefix, enforced in the sampler), then remove the re-emitted stem in
+// the inference engine. This file is the model-free split logic; it's unit-tested without llama.
+// Bonus: the KV anchor (head) stays constant while the user types within a word, so
 // the engine re-prefills fewer tokens per keystroke.
 enum MidWordHealing {
 
@@ -41,14 +41,5 @@ enum MidWordHealing {
             return nil
         }
         return Split(head: String(prefix.dropLast(stem.count)), stem: stem)
-    }
-
-    // Strip the regenerated `stem` off the front of the model's `emitted` text so the ghost shows only
-    // the NEW characters ("great" with stem "gre" → "at"). nil when `emitted` doesn't begin with the
-    // stem — under the required-prefix constraint it always should, but fail safe so a constraint
-    // miss never shows a glued fragment ("greatat").
-    static func strip(stem: String, from emitted: String) -> String? {
-        guard emitted.hasPrefix(stem) else { return nil }
-        return String(emitted.dropFirst(stem.count))
     }
 }

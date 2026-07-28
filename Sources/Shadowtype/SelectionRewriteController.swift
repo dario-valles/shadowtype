@@ -9,6 +9,56 @@
 // menu's @objc target/action. Main-thread only.
 import Cocoa
 
+struct SelectionRewriteFlowState {
+    enum Phase: Equatable {
+        case idle
+        case generating
+        case previewing
+    }
+
+    private(set) var phase: Phase = .idle
+    private(set) var activeGeneration: UInt64?
+    private var lastGeneration: UInt64 = 0
+
+    mutating func beginGeneration() -> UInt64? {
+        guard phase == .idle, lastGeneration < .max else { return nil }
+        return startGeneration()
+    }
+
+    mutating func beginRegeneration() -> UInt64? {
+        guard phase == .previewing, lastGeneration < .max else { return nil }
+        return startGeneration()
+    }
+
+    func acceptsCallback(for generation: UInt64) -> Bool {
+        phase == .generating && activeGeneration == generation
+    }
+
+    @discardableResult
+    mutating func completeGeneration(_ generation: UInt64, injectionSucceeded: Bool) -> Bool {
+        guard acceptsCallback(for: generation) else { return false }
+        if injectionSucceeded {
+            phase = .previewing
+        } else {
+            phase = .idle
+            activeGeneration = nil
+        }
+        return true
+    }
+
+    mutating func reset() {
+        phase = .idle
+        activeGeneration = nil
+    }
+
+    private mutating func startGeneration() -> UInt64 {
+        lastGeneration += 1
+        activeGeneration = lastGeneration
+        phase = .generating
+        return lastGeneration
+    }
+}
+
 final class SelectionRewriteController: NSObject {
     private let context: EditContextTracker
     private let injector: Injector
@@ -31,6 +81,7 @@ final class SelectionRewriteController: NSObject {
         var native: Bool { insertedRange != nil }
     }
     private var session: Session?
+    private var flow = SelectionRewriteFlowState()
 
     // Safety nets so `coordinator.rewriteActive` (which suppresses ALL ghost completions) can never
     // leak: a click anywhere or an app switch commits the preview, and a hard timeout backstops both
@@ -69,7 +120,7 @@ final class SelectionRewriteController: NSObject {
     // MARK: - Entry (global hotkey)
 
     func trigger() {
-        guard session == nil else { return }          // a HUD is already up — ignore re-trigger
+        guard flow.phase == .idle else { return }
         anchor = context.caretRectOnScreen()
             ?? context.focusedFieldFrameOnScreen()
             ?? CGRect(origin: NSEvent.mouseLocation, size: .zero)
@@ -86,7 +137,7 @@ final class SelectionRewriteController: NSObject {
     // skipping the controller's own action menu. The badge captured `sel` at its menu-build time, so we
     // don't re-read it here. Mirrors trigger()'s guards + anchor capture.
     func rewrite(action: RewriteAction, selection sel: EditContextTracker.CurrentSelection) {
-        guard session == nil else { return }
+        guard flow.phase == .idle else { return }
         anchor = context.caretRectOnScreen()
             ?? context.focusedFieldFrameOnScreen()
             ?? CGRect(origin: NSEvent.mouseLocation, size: .zero)
@@ -127,6 +178,7 @@ final class SelectionRewriteController: NSObject {
             toast("Model not ready — still loading")
             return
         }
+        guard let generation = flow.beginGeneration() else { return }
         coordinator.rewriteActive = true
         hud.showWorking(at: anchor)
         // Arm the key tap NOW, before the async decode — otherwise a Return pressed during "Rewriting…"
@@ -138,13 +190,16 @@ final class SelectionRewriteController: NSObject {
         startWatchdog()
         coordinator.rewrite(selection: sel.text, action: action) { [weak self] result in
             guard let self else { return }
-            guard self.coordinator.rewriteActive else { return }   // dismissed/cancelled mid-generation
-            guard let result else { self.fail(); return }
-            self.place(result: result, selection: sel, action: action)
+            guard self.flow.acceptsCallback(for: generation),
+                  self.coordinator.rewriteActive else { return }
+            guard let result else { self.fail(generation: generation); return }
+            self.place(result: result, selection: sel, action: action, generation: generation)
         }
     }
 
-    private func place(result: String, selection sel: EditContextTracker.CurrentSelection, action: RewriteAction) {
+    private func place(result: String, selection sel: EditContextTracker.CurrentSelection,
+                       action: RewriteAction, generation: UInt64) {
+        guard flow.acceptsCallback(for: generation) else { return }
         // Re-assert the captured selection before replacing. The action menu (a modal tracking loop) and
         // the model latency can collapse the host's LIVE selection to a caret, and inject() replaces
         // whatever is selected NOW — without this, a collapsed selection makes inject INSERT a copy
@@ -162,12 +217,19 @@ final class SelectionRewriteController: NSObject {
         // the identical-replace/append ambiguity in axInsert. Keep the selection as-is and bail.
         if result == sel.text {
             session = Session(original: sel.text, element: sel.element, action: action, insertedRange: sel.range)
+            guard flow.completeGeneration(generation, injectionSucceeded: true) else {
+                session = nil
+                return
+            }
             showHintForSession()
             return
         }
         if let r = sel.range, !isWeb {
             context.selectRange(r, in: sel.element)
-            guard injector.inject(result, into: sel.element) else { fail(); return }
+            guard injector.inject(result, into: sel.element) else {
+                fail(generation: generation)
+                return
+            }
             let range = CFRange(location: r.location, length: (result as NSString).length)
             context.selectRange(range, in: sel.element)  // keep it highlighted for keep/redo/undo
             inserted = range
@@ -182,15 +244,25 @@ final class SelectionRewriteController: NSObject {
             // ordinary synthesized-typing path — the host replaces the selection itself.
             let live = AXTextProbe.webSelectedText(of: sel.element) ?? ""
             if live == sel.text {
-                guard injector.inject(result, into: sel.element) else { fail(); return }
+                guard injector.inject(result, into: sel.element) else {
+                    fail(generation: generation)
+                    return
+                }
             } else {
                 let utf16Len = (sel.text as NSString).length
                 guard injector.replaceBeforeCaret(utf16Length: utf16Len,
                                                   keystrokeCount: sel.text.count,
-                                                  with: result, in: sel.element) else { fail(); return }
+                                                  with: result, in: sel.element) else {
+                    fail(generation: generation)
+                    return
+                }
             }
         }
         session = Session(original: sel.text, element: sel.element, action: action, insertedRange: inserted)
+        guard flow.completeGeneration(generation, injectionSucceeded: true) else {
+            session = nil
+            return
+        }
         showHintForSession()   // keyTap already armed in run()
     }
 
@@ -205,16 +277,26 @@ final class SelectionRewriteController: NSObject {
 
     private func regenerate() {
         guard let s = session, s.native else { return }   // web can't reliably re-replace; ignore ⌘R
+        guard let generation = flow.beginRegeneration() else { return }
         hud.showWorking(at: anchor)
         coordinator.rewrite(selection: s.original, action: s.action) { [weak self] result in
-            guard let self, var s2 = self.session, let inserted = s2.insertedRange else { return }
-            guard let result else { self.showHintForSession(); return }
+            guard let self, self.flow.acceptsCallback(for: generation),
+                  var s2 = self.session, let inserted = s2.insertedRange else { return }
+            guard let result else {
+                guard self.flow.completeGeneration(generation, injectionSucceeded: true) else { return }
+                self.showHintForSession()
+                return
+            }
             self.context.selectRange(inserted, in: s2.element)
-            _ = self.injector.inject(result, into: s2.element)
+            guard self.injector.inject(result, into: s2.element) else {
+                self.fail(generation: generation)
+                return
+            }
             let newRange = CFRange(location: inserted.location, length: (result as NSString).length)
             self.context.selectRange(newRange, in: s2.element)
             s2.insertedRange = newRange
             self.session = s2
+            guard self.flow.completeGeneration(generation, injectionSucceeded: true) else { return }
             self.showHintForSession()
         }
     }
@@ -246,16 +328,25 @@ final class SelectionRewriteController: NSObject {
         removeDismissGuards()
         hud.hide()
         session = nil
+        flow.reset()
         coordinator.rewriteActive = false
     }
 
-    private func fail(message: String = "Couldn't rewrite — try again") {
+    private func fail(message: String = "Couldn't rewrite — try again", generation: UInt64? = nil) {
+        if let generation {
+            guard flow.completeGeneration(generation, injectionSucceeded: false) else { return }
+        } else {
+            flow.reset()
+        }
         keyTap.disarm()           // armed in run(); must come down on the failure path too
         removeDismissGuards()
         coordinator.rewriteActive = false
         session = nil
         hud.showHint(at: anchor, text: message)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in self?.hud.hide() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
+            guard let self, self.flow.phase == .idle else { return }
+            self.hud.hide()
+        }
     }
 
     // Hard timeout backstop: started when generation begins so `rewriteActive` (which suppresses ALL
@@ -308,6 +399,9 @@ final class SelectionRewriteController: NSObject {
 
     private func toast(_ message: String) {
         hud.showHint(at: anchor, text: message)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in self?.hud.hide() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
+            guard let self, self.flow.phase == .idle else { return }
+            self.hud.hide()
+        }
     }
 }

@@ -29,82 +29,201 @@ enum LocalHTTPError: Error {
     case malformedRequest
     case headersTooLarge
     case bodyTooLarge
+    case deadlineExceeded
     case ioFailed(Int32)
 }
 
 enum LocalHTTPParser {
 
-    // Read one HTTP/1.1 request from `fd`. Reads up to `maxHeaderBytes` for the head, then up to
-    // `maxBodyBytes` for the body (rejects with .bodyTooLarge if Content-Length exceeds it).
-    // Returns nil for a clean EOF before any bytes (peer closed without sending).
+    // Deadlines are absolute monotonic times. Unlike SO_RCVTIMEO, they bound the whole header or
+    // body phase and therefore cannot be extended indefinitely by a peer sending one byte at a
+    // time. A nil deadline preserves the blocking behavior used by parser-only callers.
     static func read(from fd: Int32,
                      maxHeaderBytes: Int = 8 * 1024,
-                     maxBodyBytes: Int = 1024 * 1024) throws -> HTTPRequest? {
+                     maxBodyBytes: Int = 1024 * 1024,
+                     headerDeadline: DispatchTime? = nil,
+                     bodyDeadline: DispatchTime? = nil) throws -> HTTPRequest? {
+        guard maxHeaderBytes >= 4, maxBodyBytes >= 0 else {
+            throw LocalHTTPError.malformedRequest
+        }
 
         // --- Read header bytes until "\r\n\r\n" ---------------------------------------------
         var buf = Data()
         var sawAny = false
         while true {
-            if buf.count > maxHeaderBytes { throw LocalHTTPError.headersTooLarge }
-            var chunk = [UInt8](repeating: 0, count: 1024)
-            let n = recv(fd, &chunk, chunk.count, 0)
-            if n == 0 {
-                if sawAny { throw LocalHTTPError.clientClosed }
-                return nil
-            }
-            if n < 0 {
-                if errno == EINTR { continue }
-                throw LocalHTTPError.ioFailed(errno)
-            }
-            sawAny = true
-            buf.append(chunk, count: n)
-            if let range = buf.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])) {  // \r\n\r\n
-                // Split headers from any leading body bytes we read past the boundary.
+            if let range = buf.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])) {
+                let headerEnd = range.upperBound
+                guard headerEnd <= maxHeaderBytes else {
+                    throw LocalHTTPError.headersTooLarge
+                }
+
                 let headerData = buf[..<range.lowerBound]
-                var bodyHead = buf[range.upperBound...]
+                let bodyHead = Data(buf[headerEnd...])
                 guard let headerStr = String(data: headerData, encoding: .utf8) else {
                     throw LocalHTTPError.malformedRequest
                 }
-                let (method, path, query, headers) = try parseHead(headerStr)
-                // --- Read remaining body ----------------------------------------------------
-                let contentLength = Int(headers["content-length"] ?? "0") ?? 0
-                if contentLength < 0 { throw LocalHTTPError.malformedRequest }
+                let (method, path, query, headers, contentLength) = try parseHead(headerStr)
                 if contentLength > maxBodyBytes { throw LocalHTTPError.bodyTooLarge }
-                var body = Data(bodyHead)
-                bodyHead.removeAll()
+                if bodyHead.count > contentLength { throw LocalHTTPError.malformedRequest }
+
+                var body = bodyHead
                 while body.count < contentLength {
-                    var c = [UInt8](repeating: 0, count: min(4096, contentLength - body.count))
-                    let m = recv(fd, &c, c.count, 0)
-                    if m == 0 { throw LocalHTTPError.clientClosed }
-                    if m < 0 {
-                        if errno == EINTR { continue }
-                        throw LocalHTTPError.ioFailed(errno)
-                    }
-                    body.append(c, count: m)
+                    var chunk = [UInt8](repeating: 0,
+                                        count: min(4096, contentLength - body.count))
+                    let n = try receive(fd: fd, into: &chunk, deadline: bodyDeadline)
+                    if n == 0 { throw LocalHTTPError.clientClosed }
+                    body.append(chunk, count: n)
+                }
+                if try hasImmediatelyAvailableByte(fd: fd) {
+                    throw LocalHTTPError.malformedRequest
                 }
                 return HTTPRequest(method: method, path: path, query: query,
                                    headers: headers, body: body)
             }
+
+            // The full header section includes the terminating CRLFCRLF. If the cap is already
+            // occupied without a terminator, no valid request can still fit.
+            if buf.count >= maxHeaderBytes { throw LocalHTTPError.headersTooLarge }
+            let readCount = min(1024, maxHeaderBytes - buf.count)
+            var chunk = [UInt8](repeating: 0, count: readCount)
+            let n = try receive(fd: fd, into: &chunk, deadline: headerDeadline)
+            if n == 0 {
+                if sawAny { throw LocalHTTPError.clientClosed }
+                return nil
+            }
+            sawAny = true
+            buf.append(chunk, count: n)
         }
     }
 
     private static func parseHead(_ s: String) throws
-        -> (method: String, path: String, query: [String: String], headers: [String: String]) {
-        let lines = s.split(separator: "\r\n", omittingEmptySubsequences: false).map(String.init)
-        guard let requestLine = lines.first else { throw LocalHTTPError.malformedRequest }
-        let parts = requestLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
-        guard parts.count >= 2 else { throw LocalHTTPError.malformedRequest }
+        -> (method: String, path: String, query: [String: String],
+            headers: [String: String], contentLength: Int) {
+        let lines = s.components(separatedBy: "\r\n")
+        guard let requestLine = lines.first, !requestLine.isEmpty,
+              !containsControl(requestLine) else {
+            throw LocalHTTPError.malformedRequest
+        }
+        let parts = requestLine.split(separator: " ", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              !parts[0].isEmpty, isHTTPToken(parts[0]),
+              !parts[1].isEmpty,
+              parts[2] == "HTTP/1.1" else {
+            throw LocalHTTPError.malformedRequest
+        }
         let method = String(parts[0])
         let rawTarget = String(parts[1])
         let (path, query) = splitQuery(rawTarget)
         var headers: [String: String] = [:]
-        for line in lines.dropFirst() where !line.isEmpty {
-            guard let colon = line.firstIndex(of: ":") else { continue }
-            let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
-            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-            if !name.isEmpty { headers[name] = value }
+        for line in lines.dropFirst() {
+            guard !line.isEmpty, !containsControl(line),
+                  let colon = line.firstIndex(of: ":") else {
+                throw LocalHTTPError.malformedRequest
+            }
+            let rawName = line[..<colon]
+            guard !rawName.isEmpty, isHTTPToken(rawName) else {
+                throw LocalHTTPError.malformedRequest
+            }
+            let name = rawName.lowercased()
+            guard headers[name] == nil else {
+                // All headers used by this local API are singletons. Rejecting duplicates avoids
+                // downstream Host/Origin/Authorization ambiguity as well as duplicate CL.
+                throw LocalHTTPError.malformedRequest
+            }
+            let rawValue = line[line.index(after: colon)...]
+            let value = rawValue.trimmingCharacters(in: CharacterSet(charactersIn: " "))
+            headers[name] = value
         }
-        return (method, path, query, headers)
+
+        if headers["transfer-encoding"] != nil {
+            // Chunked and other transfer codings are deliberately unsupported. This also rejects
+            // every TE/CL conflict instead of guessing which framing wins.
+            throw LocalHTTPError.malformedRequest
+        }
+
+        var contentLength = 0
+        if let rawLength = headers["content-length"] {
+            guard !rawLength.isEmpty,
+                  rawLength.utf8.allSatisfy({ $0 >= 0x30 && $0 <= 0x39 }),
+                  let parsed = Int(rawLength) else {
+                throw LocalHTTPError.malformedRequest
+            }
+            contentLength = parsed
+        }
+        return (method, path, query, headers, contentLength)
+    }
+
+    private static func isHTTPToken<S: StringProtocol>(_ value: S) -> Bool {
+        value.utf8.allSatisfy { byte in
+            switch byte {
+            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A:
+                return true
+            case 0x21, 0x23...0x27, 0x2A, 0x2B, 0x2D, 0x2E,
+                 0x5E, 0x5F, 0x60, 0x7C, 0x7E:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private static func containsControl<S: StringProtocol>(_ value: S) -> Bool {
+        value.unicodeScalars.contains { scalar in
+            scalar.value < 0x20 || scalar.value == 0x7F
+        }
+    }
+
+    private static func receive(fd: Int32,
+                                into buffer: inout [UInt8],
+                                deadline: DispatchTime?) throws -> Int {
+        while true {
+            if let deadline {
+                try waitUntilReadable(fd: fd, deadline: deadline)
+            }
+            let count = buffer.count
+            let received = recv(fd, &buffer, count, 0)
+            if received >= 0 { return received }
+            if errno == EINTR { continue }
+            throw LocalHTTPError.ioFailed(errno)
+        }
+    }
+
+    private static func waitUntilReadable(fd: Int32, deadline: DispatchTime) throws {
+        while true {
+            let now = DispatchTime.now().uptimeNanoseconds
+            let end = deadline.uptimeNanoseconds
+            guard now < end else { throw LocalHTTPError.deadlineExceeded }
+            let remaining = end - now
+            let roundedMilliseconds = remaining / 1_000_000
+                + (remaining % 1_000_000 == 0 ? 0 : 1)
+            let milliseconds = min(
+                UInt64(Int32.max),
+                roundedMilliseconds
+            )
+            var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let result = poll(&descriptor, 1, Int32(milliseconds))
+            if result > 0 {
+                if descriptor.revents & Int16(POLLNVAL) != 0 {
+                    throw LocalHTTPError.ioFailed(EBADF)
+                }
+                return
+            }
+            if result == 0 { throw LocalHTTPError.deadlineExceeded }
+            if errno == EINTR { continue }
+            throw LocalHTTPError.ioFailed(errno)
+        }
+    }
+
+    private static func hasImmediatelyAvailableByte(fd: Int32) throws -> Bool {
+        var byte: UInt8 = 0
+        while true {
+            let result = recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
+            if result > 0 { return true }
+            if result == 0 { return false }
+            if errno == EINTR { continue }
+            if errno == EAGAIN || errno == EWOULDBLOCK { return false }
+            throw LocalHTTPError.ioFailed(errno)
+        }
     }
 
     private static func splitQuery(_ target: String) -> (path: String, query: [String: String]) {

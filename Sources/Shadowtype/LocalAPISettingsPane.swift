@@ -134,7 +134,7 @@ struct LocalAPISettingsPane: View {
                     .disabled(apiKey.isEmpty)
                 Button("Regenerate") {
                     apiKey = APIKeyStore.regenerateAPIKey()
-                    rotationWarning = "API key rotated — every client still using the old key will be rejected until you paste the new one."
+                    rotationWarning = "API key rotated — manually configured TCP clients need the new key. The MCP bridge discovers the rotated key automatically."
                 }
             }
             if let warning = rotationWarning {
@@ -169,7 +169,7 @@ struct LocalAPISettingsPane: View {
                 .font(.body.weight(.medium))
             ExampleBlock(title: "curl",
                          text: curlSnippet)
-            ExampleBlock(title: "Claude Code MCP",
+            ExampleBlock(title: "Claude Code MCP (protected local discovery)",
                          text: mcpSnippet)
             ExampleBlock(title: "Cursor / Continue / llm-cli",
                          text: "Base URL: \(serverURL)\nAPI key: <paste from above>")
@@ -208,7 +208,10 @@ struct LocalAPISettingsPane: View {
     }
 
     private var mcpSnippet: String {
-        let bundlePath = Bundle.main.bundlePath
+        Self.mcpConfiguration(bundlePath: Bundle.main.bundlePath)
+    }
+
+    static func mcpConfiguration(bundlePath: String) -> String {
         return """
         {
           "mcpServers": {

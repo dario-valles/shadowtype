@@ -2,22 +2,24 @@
 
 Shadowtype is licensed under the MIT License (see [LICENSE](LICENSE)).
 
-Release builds (`./scripts/make-app.sh`) bundle the following third-party
-libraries into `Shadowtype.app/Contents/Frameworks/`. Their licenses and
-copyright notices are reproduced below, as required.
+Release builds (`./scripts/make-app.sh`) statically link the following third-party
+libraries into the Shadowtype executable. Their licenses and copyright notices
+are reproduced below, as required.
 
 ---
 
 ## llama.cpp / ggml — MIT License
 
-`libllama`, `libggml`, `libggml-base` come from the llama.cpp / ggml project
-(https://github.com/ggml-org/llama.cpp), installed via the Homebrew `llama.cpp`
-formula.
+`libllama`, `libggml`, `libggml-base`, and the compiled-in CPU, BLAS, and Metal
+backends come from [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp).
+Shadowtype pins upstream tag `b10156`, commit
+`91f8c9c5fb038c086e13e9cd823c29b33b07ba54`, and builds it from source with
+OpenMP disabled.
 
-```
+```text
 MIT License
 
-Copyright (c) 2023-2024 The ggml authors
+Copyright (c) 2023-2026 The ggml authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -37,14 +39,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
-
----
-
-## LLVM OpenMP runtime (`libomp`) — Apache License 2.0 with LLVM Exceptions
-
-`libomp` (an llama.cpp/ggml runtime dependency, from the Homebrew `libomp`
-formula) is part of the LLVM Project and is licensed under the Apache License
-2.0 with LLVM Exceptions. Full text: https://llvm.org/LICENSE.txt
 
 ---
 

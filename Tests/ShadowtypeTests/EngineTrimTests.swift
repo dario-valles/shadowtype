@@ -31,6 +31,42 @@ final class EngineTrimTests: XCTestCase {
         }
     }
 
+    func testPromptCapAccountsForResidentGhostSequence() {
+        let resident = InferenceEngine.residentTokenCount(
+            nPastBySeq: [0: 1024, 1: 128, 2: 0],
+            excluding: 1
+        )
+        let available = 4096 - resident
+        let cap = InferenceEngine.promptCap(
+            nCtx: available,
+            maxTokens: 2048,
+            maxContextTokens: 4096
+        )
+
+        XCTAssertEqual(resident, 1024)
+        XCTAssertLessThanOrEqual(resident + cap + 2048, 4096)
+        XCTAssertLessThan(cap, 1984,
+                          "the API prompt must be rejected/trimmed before it overcommits unified KV")
+    }
+
+    func testResidentAccountingExcludesCurrentSequenceReuse() {
+        XCTAssertEqual(
+            InferenceEngine.residentTokenCount(
+                nPastBySeq: [0: 1024, 1: 1984, 2: 64],
+                excluding: 1
+            ),
+            1088
+        )
+    }
+
+    func testResidentCapacityCannotUsePromptCapFloorToOvercommit() {
+        let resident = 3_900
+        let available = 4_096 - resident
+        let reserve = InferenceEngine.generationReserve(maxTokens: 24)
+        XCTAssertLessThan(available, reserve + 8,
+                          "generate must reject before promptCap's arithmetic floor can be used")
+    }
+
     func testGhostBudgetIsUnchangedByTheReserveFix() {
         // Ghost generates ~16-24 tokens, so the 256 floor still binds and the shipping cap stays 3840
         // — the anchored-trim tests above are written against that number.
@@ -58,6 +94,28 @@ final class EngineTrimTests: XCTestCase {
         // An absurd max_tokens must not produce a negative cap that the trim would then misuse.
         XCTAssertGreaterThanOrEqual(
             InferenceEngine.promptCap(nCtx: 4096, maxTokens: 100_000, maxContextTokens: 4096), 8)
+    }
+
+    func testEmptyPromptTokenizationHasStableNonNilStorage() {
+        let input = InferenceEngine.tokenizationInput("")
+        XCTAssertEqual(input.byteCount, 0)
+        XCTAssertEqual(input.storage, [0],
+                       "llama_tokenize must receive stable storage even for a zero-byte prompt")
+    }
+
+    func testSamplingFastPathDecision() {
+        XCTAssertFalse(InferenceEngine.requiresCandidateSampling(
+            hasSampleObserver: false,
+            hasRequiredPrefix: false
+        ))
+        XCTAssertTrue(InferenceEngine.requiresCandidateSampling(
+            hasSampleObserver: true,
+            hasRequiredPrefix: false
+        ))
+        XCTAssertTrue(InferenceEngine.requiresCandidateSampling(
+            hasSampleObserver: false,
+            hasRequiredPrefix: true
+        ))
     }
 
     // MARK: - Under the cap: untouched

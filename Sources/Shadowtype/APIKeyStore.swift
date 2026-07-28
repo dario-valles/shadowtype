@@ -49,7 +49,10 @@ enum APIKeyStore {
         let update: [CFString: Any] = [kSecValueData: data]
 
         let updateStatus = SecItemUpdate(attrs as CFDictionary, update as CFDictionary)
-        if updateStatus == errSecSuccess { return true }
+        if updateStatus == errSecSuccess {
+            notifyIfAPIKey(item, value: value)
+            return true
+        }
         if updateStatus == errSecItemNotFound {
             var insert = attrs
             insert[kSecValueData] = data
@@ -57,9 +60,20 @@ enum APIKeyStore {
             // session only. Don't downgrade to AfterFirstUnlock; this isn't a daemon.
             insert[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlocked
             let addStatus = SecItemAdd(insert as CFDictionary, nil)
-            return addStatus == errSecSuccess
+            if addStatus == errSecSuccess {
+                notifyIfAPIKey(item, value: value)
+                return true
+            }
+            return false
         }
         return false
+    }
+
+    private static func notifyIfAPIKey(_ item: Item, value: String) {
+        guard item == .apiKey else { return }
+        NotificationCenter.default.post(name: .shadowtypeAPIKeyDidChange,
+                                        object: nil,
+                                        userInfo: ["apiKey": value])
     }
 
     @discardableResult
@@ -76,10 +90,25 @@ enum APIKeyStore {
     // Read the API key, auto-generating + persisting one on first use so the server never starts
     // without a key configured. The returned key is the hex of 32 random bytes (64 hex chars).
     static func ensureAPIKey() -> String {
-        if let existing = read(.apiKey), !existing.isEmpty { return existing }
+        verifiedAPIKey() ?? ""
+    }
+
+    // Server startup must not accept a generated key that failed to reach Keychain: a later read
+    // would generate a different value, leaving discovery and authentication out of sync. Verify
+    // the persisted bytes before returning a newly-created key.
+    static func verifiedAPIKey() -> String? {
+        if let existing = read(.apiKey), isValidAPIKey(existing) { return existing }
         let fresh = randomHex(byteCount: 32)
-        write(.apiKey, value: fresh)
+        guard write(.apiKey, value: fresh),
+              read(.apiKey) == fresh else { return nil }
         return fresh
+    }
+
+    static func isValidAPIKey(_ value: String) -> Bool {
+        value.utf8.count == 64
+            && value.utf8.allSatisfy {
+                ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x61 && $0 <= 0x66)
+            }
     }
 
     // Rotate the API key — used by the settings panel "Regenerate" button. Invalidates all
@@ -87,7 +116,9 @@ enum APIKeyStore {
     @discardableResult
     static func regenerateAPIKey() -> String {
         let fresh = randomHex(byteCount: 32)
-        write(.apiKey, value: fresh)
+        guard write(.apiKey, value: fresh) else {
+            return read(.apiKey) ?? ""
+        }
         return fresh
     }
 
@@ -104,4 +135,8 @@ enum APIKeyStore {
         }
         return bytes.map { String(format: "%02x", $0) }.joined()
     }
+}
+
+extension Notification.Name {
+    static let shadowtypeAPIKeyDidChange = Notification.Name("shadowtypeAPIKeyDidChange")
 }

@@ -1,4 +1,4 @@
-// InferenceEngine — wraps llama.cpp (CLlama, build 9430) for forward-from-caret
+// InferenceEngine — wraps the pinned llama.cpp build for forward-from-caret
 // token generation on Metal. Forward-only / prefix-growth hot path (FINDINGS Spike 1/2):
 // never feed post-caret text; keep the cheap longest-prefix KV-cache path on SWA models.
 //
@@ -13,15 +13,10 @@
 import Foundation
 import CLlama
 import os
-// INTEGRATOR-NOTE: CLlama fails to compile out of the box — llama.h does `#include "ggml.h"`,
-// but ggml.h ships in the SEPARATE `ggml` Homebrew formula at /opt/homebrew/include, not in
-// llama.cpp's includedir (pkg-config "llama" only emits -I.../llama.cpp/.../include). Add the
-// ggml include path to the CLlama systemLibrary in Package.swift, e.g. cSettings/cxxSettings
-// .unsafeFlags(["-I/opt/homebrew/include"]) or a -Xcc -I/opt/homebrew/include build flag.
-// Verified: `swift build -Xcc -I/opt/homebrew/include` links the whole target cleanly.
 
 enum InferenceError: Error, LocalizedError {
     case notLoaded
+    case cancelled
     case modelLoadFailed(String)
     case contextInitFailed
     case tokenizeFailed
@@ -46,6 +41,7 @@ enum InferenceError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notLoaded:                  return "No model is loaded."
+        case .cancelled:                  return "Generation was cancelled."
         case .modelLoadFailed(let path):  return "llama failed to load the model file at \(path) — the GGUF may be corrupt or unsupported by this build."
         case .contextInitFailed:          return "llama failed to initialize the Metal context — the GPU/OS may not support this model's settings."
         case .tokenizeFailed:             return "Tokenization failed."
@@ -60,7 +56,38 @@ enum InferenceError: Error, LocalizedError {
 }
 
 final class InferenceEngine: InferenceEngineProtocol {
-    private(set) var isLoaded: Bool = false
+    struct MetadataSnapshot: Equatable {
+        let isLoaded: Bool
+        let contextWindowTokens: Int
+        let modelChatTemplate: String?
+        let modelArchitecture: String?
+        let modelSupportsChat: Bool
+        let supportsFIM: Bool
+    }
+
+    private var metadataLock = os_unfair_lock_s()
+    private var _metadata = MetadataSnapshot(
+        isLoaded: false,
+        contextWindowTokens: 4096,
+        modelChatTemplate: nil,
+        modelArchitecture: nil,
+        modelSupportsChat: false,
+        supportsFIM: false
+    )
+
+    var metadataSnapshot: MetadataSnapshot {
+        os_unfair_lock_lock(&metadataLock)
+        defer { os_unfair_lock_unlock(&metadataLock) }
+        return _metadata
+    }
+
+    private func publishMetadata(_ snapshot: MetadataSnapshot) {
+        os_unfair_lock_lock(&metadataLock)
+        _metadata = snapshot
+        os_unfair_lock_unlock(&metadataLock)
+    }
+
+    var isLoaded: Bool { metadataSnapshot.isLoaded }
 
     // llama.cpp handles (owned).
     private var model: OpaquePointer?
@@ -69,17 +96,20 @@ final class InferenceEngine: InferenceEngineProtocol {
 
     // GGUF `tokenizer.chat_template` populated on load (nil = no template, e.g. Base/pretrained
     // models). The /v1/chat/completions route consults this; ghost text never touches it.
-    private(set) var modelChatTemplate: String? = nil
+    private var loadedModelChatTemplate: String? = nil
+    var modelChatTemplate: String? { metadataSnapshot.modelChatTemplate }
 
     // GGUF `general.architecture` (e.g. "gemma4"), read on load. Feeds ChatTemplate's built-in
     // fallback renderer when llama.cpp can't classify the model's baked-in Jinja template.
-    private(set) var modelArchitecture: String? = nil
+    private var loadedModelArchitecture: String? = nil
+    var modelArchitecture: String? { metadataSnapshot.modelArchitecture }
 
     // Whether /v1/chat/completions can actually render a prompt for this model — a dry-run of the
     // template (or an available architecture fallback), NOT mere template presence. Newer instruct
     // models ship Jinja templates llama.cpp's bare apply can't parse; advertising chat off presence
     // alone made /v1/models claim support, then 400 on the first request.
-    private(set) var modelSupportsChat: Bool = false
+    private var loadedModelSupportsChat: Bool = false
+    var modelSupportsChat: Bool { metadataSnapshot.modelSupportsChat }
 
     // M5 FIM: the three FIM token IDs (prefix / suffix / middle) when the loaded model is a
     // FIM-trained variant — Qwen-Coder, DeepSeek-Coder, CodeLlama, StarCoder all qualify. nil for
@@ -91,7 +121,7 @@ final class InferenceEngine: InferenceEngineProtocol {
         let mid: Int32
     }
     private(set) var modelFIMTokens: FIMTokens? = nil
-    var supportsFIM: Bool { modelFIMTokens != nil }
+    var supportsFIM: Bool { metadataSnapshot.supportsFIM }
 
     // Tier 2b: control/chat-marker tokens to drop at sample time (logit = -inf) so scaffolding like
     // <|channel>, <|think|>, <start_of_turn>, <|assistant|>, ### Response can NEVER leak into the
@@ -173,16 +203,61 @@ final class InferenceEngine: InferenceEngineProtocol {
     private var cachedTokensBySeq: [Int32: [llama_token]] = [:]
     private var nPastBySeq: [Int32: Int32] = [:]
 
-    // Cooperative cancel (FR-CE-4). Written by the coordinator (any thread), polled on chunk
-    // boundaries in generate(). Guarded by os_unfair_lock so the cross-thread read/write isn't a data
-    // race (benign on arm64 but UB unsynchronized). A single flag is shared across seqs because the
-    // inferenceQueue is serial — only one generate is ever in flight at a time. The computed property
-    // keeps every call site (`cancelRequested = …`, `if cancelRequested`) unchanged.
-    private var _cancelLock = os_unfair_lock_s()
-    private var _cancelRequested = false
-    private var cancelRequested: Bool {
-        get { os_unfair_lock_lock(&_cancelLock); defer { os_unfair_lock_unlock(&_cancelLock) }; return _cancelRequested }
-        set { os_unfair_lock_lock(&_cancelLock); defer { os_unfair_lock_unlock(&_cancelLock) }; _cancelRequested = newValue }
+    // Per-sequence cooperative cancellation. A ghost keystroke targets seq 0 only, so it cannot
+    // truncate an unrelated API decode on seq 1. API requests additionally carry the coordinator's
+    // per-request token, which survives time spent queued and returns false from onToken when cancelled.
+    final class CancellationRegistry {
+        struct Request: Hashable {
+            let seqID: Int32
+            let id: UInt64
+        }
+
+        private var lock = os_unfair_lock_s()
+        private var nextID: UInt64 = 0
+        private var active: [Int32: Request] = [:]
+        private var cancelled: Set<Request> = []
+
+        func begin(seqID: Int32) -> Request? {
+            os_unfair_lock_lock(&lock)
+            defer { os_unfair_lock_unlock(&lock) }
+            nextID &+= 1
+            let request = Request(seqID: seqID, id: nextID)
+            active[seqID] = request
+            return request
+        }
+
+        func cancel(seqID: Int32) {
+            os_unfair_lock_lock(&lock)
+            defer { os_unfair_lock_unlock(&lock) }
+            if let request = active[seqID] {
+                cancelled.insert(request)
+            }
+        }
+
+        func isCancelled(_ request: Request) -> Bool {
+            os_unfair_lock_lock(&lock)
+            defer { os_unfair_lock_unlock(&lock) }
+            return cancelled.contains(request)
+        }
+
+        func end(_ request: Request) {
+            os_unfair_lock_lock(&lock)
+            defer { os_unfair_lock_unlock(&lock) }
+            if active[request.seqID] == request { active[request.seqID] = nil }
+            cancelled.remove(request)
+        }
+
+        func reset() {
+            os_unfair_lock_lock(&lock)
+            active.removeAll()
+            cancelled.removeAll()
+            os_unfair_lock_unlock(&lock)
+        }
+    }
+    private let cancellations = CancellationRegistry()
+
+    static func requireAPIContinuation(_ shouldContinue: Bool) throws {
+        if !shouldContinue { throw InferenceError.cancelled }
     }
 
     // Tunables.
@@ -240,9 +315,12 @@ final class InferenceEngine: InferenceEngineProtocol {
     // per-call cap from this so a 3000-token editor request is no longer front-trimmed to the ghost's
     // 1024-token setting, and /v1/health advertises it instead of the old hardcoded 4096.
     var contextWindowTokens: Int {
-        if let ctx { return Int(llama_n_ctx(ctx)) }
-        return Int(contextSize)
+        metadataSnapshot.contextWindowTokens
     }
+
+    private static let initializeBackendOnce: Void = {
+        llama_backend_init()
+    }()
 
     init() {}
 
@@ -251,20 +329,7 @@ final class InferenceEngine: InferenceEngineProtocol {
     func load(modelPath: String) throws {
         guard !isLoaded else { return }
 
-        // ggml loads its compute backends (Metal/CPU/BLAS) as runtime plugins, searching a path baked
-        // into libggml at build time (the dev's Homebrew Cellar). A distributed .app has no such path,
-        // so without this it logs "no backends are loaded" and every model load fails. Load the backend
-        // .so's we bundle in Contents/Frameworks (see make-app.sh) from that directory. NOTE: the
-        // GGML_BACKEND_PATH env var is dlopen()'d as a single FILE — pointing it at the Frameworks
-        // DIRECTORY fails with "not a file" and loads nothing (issue #3). ggml_backend_load_all_from_path
-        // enumerates the dir and loads each backend by name. Dev builds (`swift run`, no .app bundle)
-        // lack the bundled backends and keep the working Homebrew Cellar fallback.
-        if let fw = Bundle.main.privateFrameworksPath,
-           FileManager.default.fileExists(atPath: fw + "/libggml-metal.so") {
-            ggml_backend_load_all_from_path(fw)
-        }
-
-        llama_backend_init()
+        _ = Self.initializeBackendOnce
 
         var mparams = llama_model_default_params()
         mparams.n_gpu_layers = 999   // all layers on Metal
@@ -307,10 +372,10 @@ final class InferenceEngine: InferenceEngineProtocol {
         // Read the model's chat template (if any) once, while we still have a stable model handle.
         // Nil for raw/Base GGUFs; populated for instruct variants that ship a template in their
         // metadata. /v1/chat/completions reads this; ghost text doesn't.
-        self.modelChatTemplate = ChatTemplate.read(model: m)
-        self.modelArchitecture = ChatTemplate.readArchitecture(model: m)
-        self.modelSupportsChat = self.modelChatTemplate.map {
-            ChatTemplate.canApply(template: $0, architecture: self.modelArchitecture)
+        self.loadedModelChatTemplate = ChatTemplate.read(model: m)
+        self.loadedModelArchitecture = ChatTemplate.readArchitecture(model: m)
+        self.loadedModelSupportsChat = self.loadedModelChatTemplate.map {
+            ChatTemplate.canApply(template: $0, architecture: self.loadedModelArchitecture)
         } ?? false
 
         // M5 FIM: probe for fill-in-middle tokens. llama.cpp's vocab accessors return
@@ -354,12 +419,19 @@ final class InferenceEngine: InferenceEngineProtocol {
 
         // FR-CE-8: confirm the Metal backend initialised. llama.cpp logs "ggml_metal_init: ..."
         // to stderr during model load; this line ties that to our context so it's greppable.
-        NSLog("Shadowtype: InferenceEngine loaded model (Metal, n_gpu_layers=999, n_ctx=\(llama_n_ctx(c)), n_threads=\(llama_n_threads(c)), n_seq_max=\(maxSeqCount), arch=\(modelArchitecture ?? "?"), chatTemplate=\(modelChatTemplate != nil ? "yes" : "no"), supportsChat=\(modelSupportsChat), fim=\(modelFIMTokens != nil ? "yes" : "no"), maskedControl=\(maskedSpecialBias.count))")
+        NSLog("Shadowtype: InferenceEngine loaded model (Metal, n_gpu_layers=999, n_ctx=\(llama_n_ctx(c)), n_threads=\(llama_n_threads(c)), n_seq_max=\(maxSeqCount), arch=\(loadedModelArchitecture ?? "?"), chatTemplate=\(loadedModelChatTemplate != nil ? "yes" : "no"), supportsChat=\(loadedModelSupportsChat), fim=\(modelFIMTokens != nil ? "yes" : "no"), maskedControl=\(maskedSpecialBias.count))")
 
         self.cachedTokensBySeq.removeAll(keepingCapacity: false)
         self.nPastBySeq.removeAll(keepingCapacity: false)
-        self.cancelRequested = false
-        isLoaded = true
+        cancellations.reset()
+        publishMetadata(MetadataSnapshot(
+            isLoaded: true,
+            contextWindowTokens: Int(llama_n_ctx(c)),
+            modelChatTemplate: loadedModelChatTemplate,
+            modelArchitecture: loadedModelArchitecture,
+            modelSupportsChat: loadedModelSupportsChat,
+            supportsFIM: modelFIMTokens != nil
+        ))
     }
 
     // INTEGRATOR-NOTE: CompletionCoordinator should call requestCancel() before issuing a new
@@ -367,7 +439,7 @@ final class InferenceEngine: InferenceEngineProtocol {
     // This is the cooperative-cancel hook for FR-CE-4; generate() itself also stops when onToken
     // returns false, so a synchronous caller can cancel purely via the closure.
     func requestCancel() {
-        cancelRequested = true
+        cancellations.cancel(seqID: 0)
     }
 
     // `onSample`, when provided, is invoked once per sampled CONTENT token (a token whose decoded
@@ -409,7 +481,10 @@ final class InferenceEngine: InferenceEngineProtocol {
                   onToken: (String) -> Bool,
                   onSample: ((_ prob: Float, _ isFirstContent: Bool) -> Void)? = nil) throws {
         guard isLoaded, let ctx, let vocab else { throw InferenceError.notLoaded }
-        cancelRequested = false
+        guard let cancellationRequest = cancellations.begin(seqID: seqID) else {
+            throw InferenceError.cancelled
+        }
+        defer { cancellations.end(cancellationRequest) }
 
         // --- Tokenize prompt -------------------------------------------------------------------
         // M5 FIM: when the caller passed a `fim` payload AND the loaded model exposes FIM tokens
@@ -438,6 +513,19 @@ final class InferenceEngine: InferenceEngineProtocol {
         }
         guard !tokens.isEmpty else { return }
         let nCtx = Int(llama_n_ctx(ctx))
+        let residentTokens = Self.residentTokenCount(
+            nPastBySeq: nPastBySeq,
+            excluding: seqID
+        )
+        let sequenceCapacity = max(0, nCtx - residentTokens)
+        let reserve = Self.generationReserve(maxTokens: maxTokens)
+        guard sequenceCapacity >= reserve + 8 else {
+            throw InferenceError.promptWindowExhausted(
+                tokens: tokens.count,
+                cap: max(0, sequenceCapacity - reserve),
+                maxTokens: maxTokens
+            )
+        }
         // Cap at the live context minus head-room, and further at the user's configured window. The
         // head-room is NOT cosmetic: both decode loops append every generated token to THIS same seq's
         // KV after prefill, and with kv_unified the API/MCP seq shares the same n_ctx pool — so a
@@ -446,7 +534,7 @@ final class InferenceEngine: InferenceEngineProtocol {
         // generate (see generationReserve): it used to be a flat 256 while /v1 admits max_tokens up to
         // 2048, so a prompt at the cap plus 2048 generated tokens overran the 4096 pool and the stream
         // died mid-response with a 500.
-        let cap = Self.promptCap(nCtx: nCtx, maxTokens: maxTokens,
+        let cap = Self.promptCap(nCtx: sequenceCapacity, maxTokens: maxTokens,
                                  maxContextTokens: contextTokenCap ?? maxContextTokens)
         if tokens.count > cap {
             // M5 review #2: refuse to truncate when the prompt is a FIM token stream — front-trim
@@ -463,7 +551,7 @@ final class InferenceEngine: InferenceEngineProtocol {
             // of the prompt and look like a model failure, so fail the request instead — the caller can
             // shorten the prompt or lower max_tokens. Only the RESERVE may trigger this: a user who
             // deliberately set a small "Context window size" still gets the trim they asked for.
-            if nCtx - Self.generationReserve(maxTokens: maxTokens) < Self.minPromptWindow {
+            if sequenceCapacity - Self.generationReserve(maxTokens: maxTokens) < Self.minPromptWindow {
                 throw InferenceError.promptWindowExhausted(tokens: tokens.count, cap: cap, maxTokens: maxTokens)
             }
             // An explicit cap means the caller already asked for the largest window there is, so the
@@ -531,7 +619,9 @@ final class InferenceEngine: InferenceEngineProtocol {
         // contents; a mid-prefill cancel then leaves consistent state for the next call.
         var i = cached.count
         while i < tokens.count {
-            if cancelRequested { return }   // defer above flushes cached/nPast on return
+            if cancellations.isCancelled(cancellationRequest) {
+                throw InferenceError.cancelled
+            }
             let end = min(i + prefillChunk, tokens.count)
             let chunkLen = end - i
             // Fill the batch in place — token, position, seq stamp, logits flag for last token.
@@ -607,7 +697,11 @@ final class InferenceEngine: InferenceEngineProtocol {
         // The buffer itself is a stored property (see `cand`) so it also survives across generate()
         // calls; refill is per-token anyway, so only the size has to match the live vocab.
         let nVocab = Int(llama_vocab_n_tokens(vocab))
-        if cand.count != nVocab {
+        let needsCandidates = Self.requiresCandidateSampling(
+            hasSampleObserver: onSample != nil,
+            hasRequiredPrefix: !(requiredPrefix ?? []).isEmpty
+        )
+        if needsCandidates, cand.count != nVocab {
             cand = [llama_token_data](repeating: llama_token_data(id: 0, logit: 0, p: 0), count: nVocab)
         }
 
@@ -617,6 +711,7 @@ final class InferenceEngine: InferenceEngineProtocol {
                                 cached: &cached, nPast: &nPast,
                                 nVocab: nVocab, cand: &cand,
                                 requiredPrefix: requiredPrefix,
+                                cancellationRequest: cancellationRequest,
                                 onToken: onToken, onSample: onSample)
         } else {
             try apiDecodeLoop(ctx: ctx, vocab: vocab, smpl: smpl, batch: &batch,
@@ -624,6 +719,7 @@ final class InferenceEngine: InferenceEngineProtocol {
                               stops: params.stopStrings,
                               cached: &cached, nPast: &nPast,
                               nVocab: nVocab, cand: &cand,
+                              cancellationRequest: cancellationRequest,
                               onToken: onToken, onSample: onSample)
         }
         // No explicit writeback here — the defer at function entry handles it on every exit
@@ -639,6 +735,7 @@ final class InferenceEngine: InferenceEngineProtocol {
                                  cached: inout [llama_token], nPast: inout Int32,
                                  nVocab: Int, cand: inout [llama_token_data],
                                  requiredPrefix: [UInt8]? = nil,
+                                 cancellationRequest: CancellationRegistry.Request,
                                  onToken: (String) -> Bool,
                                  onSample: ((_ prob: Float, _ isFirstContent: Bool) -> Void)?) throws {
         // Tier 2a: bytes the model must still reproduce before its output becomes the ghost (mid-word
@@ -657,6 +754,7 @@ final class InferenceEngine: InferenceEngineProtocol {
         var wordCount = 0         // words so far: a leading-space piece opens one, and in a space-less
                                   // script (CJK/kana/Thai) each character IS one
         var pending = ""          // un-flushed trailing fragment (the possibly-incomplete current word)
+        var utf8Decoder = UTF8StreamDecoder()
 
         // Flush every settled word in `pending` (text up to and including each interior whitespace),
         // one whitespace-delimited chunk per onToken call so streaming stays incremental (the
@@ -683,22 +781,44 @@ final class InferenceEngine: InferenceEngineProtocol {
         }
 
         while emitted < maxTokens {
-            if cancelRequested { return }
+            if cancellations.isCancelled(cancellationRequest) {
+                throw InferenceError.cancelled
+            }
 
             // Manual sample = apply(chain) + read the step's CONFIDENCE (peak prob) + accept ONCE. (The
             // llama_sampler_sample() shorthand already accepts internally, so the old extra accept here
             // was a double-accept; this path also exposes the peak probability for the confidence gate.)
-            let (tok, confProb) = sampleWithProb(ctx: ctx, smpl: smpl, nVocab: nVocab, cand: &cand,
-                                                 requiredRemaining: remaining[...])
+            let detailedSample = Self.requiresCandidateSampling(
+                hasSampleObserver: onSample != nil,
+                hasRequiredPrefix: !remaining.isEmpty
+            )
+            let tok: llama_token
+            let confProb: Float
+            let alreadyAccepted: Bool
+            if detailedSample {
+                (tok, confProb, alreadyAccepted) = sampleWithProb(
+                    ctx: ctx,
+                    smpl: smpl,
+                    nVocab: nVocab,
+                    cand: &cand,
+                    computeConfidence: onSample != nil,
+                    requiredRemaining: remaining[...]
+                )
+            } else {
+                tok = llama_sampler_sample(smpl, ctx, -1)
+                confProb = 0
+                alreadyAccepted = true
+            }
             if llama_vocab_is_eog(vocab, tok) {            // clean stop: flush the trailing word too
+                pending += utf8Decoder.finish()
                 let tail = pending.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !tail.isEmpty { _ = onToken(pending) }
                 return
             }
-            llama_sampler_accept(smpl, tok)
+            if !alreadyAccepted { llama_sampler_accept(smpl, tok) }
             let hadContentBefore = sawNonSpace
 
-            var piece = tokenToPiece(tok)
+            var pieceBytes = tokenToPieceBytes(tok, vocab: vocab)
             // Tier 2a: consume the still-pending stem bytes from this token; only the post-stem text
             // flows into the ghost. The token is still decoded below so the KV cache advances. Byte
             // level so a multibyte char split across tokens consumes correctly; the post-stem remainder
@@ -708,8 +828,9 @@ final class InferenceEngine: InferenceEngineProtocol {
                 let consumed = min(tb.count, remaining.count)
                 remaining = RequiredPrefix.advanced(remaining: remaining, byEmitting: tb)
                 let post = tb.dropFirst(consumed)
-                piece = post.isEmpty ? "" : String(decoding: Array(post), as: UTF8.self)
+                pieceBytes = Array(post)
             }
+            var piece = utf8Decoder.push(pieceBytes)
             if !piece.isEmpty {
                 // A new word starts whenever a piece opens with whitespace after we've seen content.
                 if sawNonSpace, let first = piece.first, first.isWhitespace { wordCount += 1 }
@@ -812,10 +933,8 @@ final class InferenceEngine: InferenceEngineProtocol {
     // match in the accumulated stream halts the generation, with the matching substring and any
     // text after it NOT emitted).
     //
-    // Stop-string handling caveat: a stop string that spans across two tokens may have its leading
-    // bytes already emitted before the match is detected (we scan AFTER each piece appends).
-    // For M0 this is acceptable; clients see a slightly-truncated extra prefix of the stop. M1
-    // can add a lookback buffer (hold back `max(stopLen) - 1` chars) if it becomes a real issue.
+    // Stop matching is byte-oriented and holds back only maxStopByteLen - 1 bytes, so a delimiter
+    // split across token pieces is removed without retaining or rescanning the full response.
     private func apiDecodeLoop(ctx: OpaquePointer, vocab: OpaquePointer,
                                smpl: UnsafeMutablePointer<llama_sampler>,
                                batch: inout llama_batch,
@@ -823,33 +942,57 @@ final class InferenceEngine: InferenceEngineProtocol {
                                stops: [String],
                                cached: inout [llama_token], nPast: inout Int32,
                                nVocab: Int, cand: inout [llama_token_data],
+                               cancellationRequest: CancellationRegistry.Request,
                                onToken: (String) -> Bool,
                                onSample: ((_ prob: Float, _ isFirstContent: Bool) -> Void)?) throws {
         var emitted = 0
         var firstContentReported = false
         // A stop string can span several tokens (gemma emits "<end_of_turn>" as "<","end_of_turn",">")
-        // and onToken can't be retracted, so StreamStopFilter holds back the last (maxStopLen-1) chars
+        // and onToken can't be retracted, so StreamStopFilter holds back the last delimiter-length bytes
         // until they're proven not to begin a stop. See its definition for the holdback rationale.
         var stopFilter = StreamStopFilter(stops: stops)
+        var utf8Decoder = UTF8StreamDecoder()
 
         while emitted < maxTokens {
-            if cancelRequested { return }
+            if cancellations.isCancelled(cancellationRequest) {
+                throw InferenceError.cancelled
+            }
 
-            let (tok, confProb) = sampleWithProb(ctx: ctx, smpl: smpl, nVocab: nVocab, cand: &cand)
+            let tok: llama_token
+            let confProb: Float
+            let alreadyAccepted: Bool
+            if onSample != nil {
+                (tok, confProb, alreadyAccepted) = sampleWithProb(
+                    ctx: ctx,
+                    smpl: smpl,
+                    nVocab: nVocab,
+                    cand: &cand,
+                    computeConfidence: true
+                )
+            } else {
+                tok = llama_sampler_sample(smpl, ctx, -1)
+                confProb = 0
+                alreadyAccepted = true
+            }
             if llama_vocab_is_eog(vocab, tok) {
-                let tail = stopFilter.finish()
-                if !tail.isEmpty { _ = onToken(tail) }
+                let tail = utf8Decoder.push(stopFilter.finish()) + utf8Decoder.finish()
+                if !tail.isEmpty { try Self.requireAPIContinuation(onToken(tail)) }
                 return
             }
-            llama_sampler_accept(smpl, tok)
+            if !alreadyAccepted { llama_sampler_accept(smpl, tok) }
 
-            let piece = tokenToPiece(tok)
-            if !piece.isEmpty {
+            let pieceBytes = tokenToPieceBytes(tok, vocab: vocab)
+            if !pieceBytes.isEmpty {
                 onSample?(confProb, !firstContentReported)
                 firstContentReported = true
-                let (chunk, stopped) = stopFilter.push(piece)
-                if !chunk.isEmpty, !onToken(chunk) { return }
-                if stopped { return }
+                let (chunkBytes, stopped) = stopFilter.push(pieceBytes)
+                let chunk = utf8Decoder.push(chunkBytes)
+                if !chunk.isEmpty { try Self.requireAPIContinuation(onToken(chunk)) }
+                if stopped {
+                    let tail = utf8Decoder.finish()
+                    if !tail.isEmpty { try Self.requireAPIContinuation(onToken(tail)) }
+                    return
+                }
             }
 
             // Advance the KV cache by the just-sampled token (manual batch stamps seq).
@@ -866,19 +1009,27 @@ final class InferenceEngine: InferenceEngineProtocol {
             emitted += 1
         }
         // maxTokens reached without a stop/EOG: release the held-back tail (it never began a stop).
-        let tail = stopFilter.finish()
-        if !tail.isEmpty { _ = onToken(tail) }
+        let tail = utf8Decoder.push(stopFilter.finish()) + utf8Decoder.finish()
+        if !tail.isEmpty { try Self.requireAPIContinuation(onToken(tail)) }
     }
 
     func unload() {
+        publishMetadata(MetadataSnapshot(
+            isLoaded: false,
+            contextWindowTokens: Int(contextSize),
+            modelChatTemplate: nil,
+            modelArchitecture: nil,
+            modelSupportsChat: false,
+            supportsFIM: false
+        ))
         if let ctx { llama_free(ctx) }
         if let model { llama_model_free(model) }
         ctx = nil
         model = nil
         vocab = nil
-        modelChatTemplate = nil
-        modelArchitecture = nil
-        modelSupportsChat = false
+        loadedModelChatTemplate = nil
+        loadedModelArchitecture = nil
+        loadedModelSupportsChat = false
         modelFIMTokens = nil
         // Tier 2a: the byte table is vocab-specific. reloadModel() is unload+load on this same
         // instance, so leaving it behind hands the next model the previous vocab's bytes (see
@@ -890,7 +1041,7 @@ final class InferenceEngine: InferenceEngineProtocol {
         cand.removeAll(keepingCapacity: false)
         cachedTokensBySeq.removeAll(keepingCapacity: false)
         nPastBySeq.removeAll(keepingCapacity: false)
-        isLoaded = false
+        cancellations.reset()
     }
 
     // MARK: - KV-cache helpers (FR-CE-5)
@@ -950,6 +1101,14 @@ final class InferenceEngine: InferenceEngineProtocol {
     // ghost path (maxTokens ~16-24) byte-identical to the old behaviour; +64 is slack for the
     // single-token decode batches themselves.
     static func generationReserve(maxTokens: Int) -> Int { max(256, maxTokens + 64) }
+
+    // Unified KV is one n_ctx-sized pool. Tokens held by every OTHER sequence reduce the cells this
+    // request can safely budget; the current sequence's own tail is reusable or trimmed below.
+    static func residentTokenCount(nPastBySeq: [Int32: Int32], excluding seqID: Int32) -> Int {
+        nPastBySeq.reduce(into: 0) { total, entry in
+            if entry.key != seqID { total += max(0, Int(entry.value)) }
+        }
+    }
 
     // Prompt-token budget for one generate(): the live context minus the generation reserve, then the
     // user's configured "Context window size". Floored at 8 so the arithmetic can't go negative.
@@ -1017,44 +1176,107 @@ final class InferenceEngine: InferenceEngineProtocol {
 
     // Streaming stop-string filter for the API decode loop. A stop string can span several tokens
     // (gemma emits "<end_of_turn>" as "<", "end_of_turn", ">"), and an emitted piece cannot be
-    // retracted — so we hold back the last (maxStopLen-1) chars of the running output until they're
+    // retracted — so we hold back the last (maxStopByteLen-1) bytes of the running output until they're
     // proven not to begin a stop. `push` returns the chunk safe to emit now plus whether a stop hit;
     // `finish` releases the held tail at a clean end (EOG / maxTokens). Pure + testable: no model.
     struct StreamStopFilter {
-        private let stops: [String]
-        private let maxStopLen: Int
-        private var acc = ""          // all chars seen (the stop-scan window)
-        private var emitted = 0       // chars already returned to the caller
+        private let stops: [[UInt8]]
+        private let maxStopByteLen: Int
+        private var lookback: [UInt8] = []
+        var bufferedByteCount: Int { lookback.count }
 
         init(stops: [String]) {
-            self.stops = stops.filter { !$0.isEmpty }
-            self.maxStopLen = self.stops.map { $0.count }.max() ?? 0
+            self.stops = stops.filter { !$0.isEmpty }.map { Array($0.utf8) }
+            self.maxStopByteLen = self.stops.map(\.count).max() ?? 0
         }
 
-        // Feed one decoded piece. Returns (chunkToEmitNow, stopped). When stopped is true the stop
+        // Feed one raw token piece. Returns (bytesToEmitNow, stopped). When stopped is true the stop
         // string (and anything after) has been dropped and the loop should end.
-        mutating func push(_ piece: String) -> (chunk: String, stopped: Bool) {
-            let tentative = acc + piece
-            if let stopStart = InferenceEngine.firstStopMatch(in: tentative, stops: stops) {
-                let off = tentative.distance(from: tentative.startIndex, to: stopStart)
-                acc = String(tentative.prefix(off))
-                return (drain(flush: true), true)
+        mutating func push(_ piece: [UInt8]) -> (chunk: [UInt8], stopped: Bool) {
+            let tentative = lookback + piece
+            if let stopStart = Self.firstStopMatch(in: tentative, stops: stops) {
+                lookback.removeAll(keepingCapacity: true)
+                return (Array(tentative[..<stopStart]), true)
             }
-            acc = tentative
-            return (drain(flush: false), false)
+            let holdback = max(0, maxStopByteLen - 1)
+            let safeEnd = max(0, tentative.count - holdback)
+            let chunk = Array(tentative[..<safeEnd])
+            lookback = Array(tentative[safeEnd...])
+            return (chunk, false)
         }
 
         // Release the held-back tail (no stop ever completed). Call once at a clean end.
-        mutating func finish() -> String { drain(flush: true) }
+        mutating func finish() -> [UInt8] {
+            defer { lookback.removeAll(keepingCapacity: true) }
+            return lookback
+        }
 
-        private mutating func drain(flush: Bool) -> String {
-            let total = acc.count
-            let safeEnd = flush ? total : max(emitted, total - max(0, maxStopLen - 1))
-            guard safeEnd > emitted else { return "" }
-            let s = acc.index(acc.startIndex, offsetBy: emitted)
-            let e = acc.index(acc.startIndex, offsetBy: safeEnd)
-            emitted = safeEnd
-            return String(acc[s..<e])
+        private static func firstStopMatch(in bytes: [UInt8], stops: [[UInt8]]) -> Int? {
+            var earliest: Int?
+            for stop in stops where stop.count <= bytes.count {
+                for start in 0...(bytes.count - stop.count)
+                where bytes[start..<(start + stop.count)].elementsEqual(stop) {
+                    if earliest.map({ start < $0 }) ?? true { earliest = start }
+                    break
+                }
+            }
+            return earliest
+        }
+    }
+
+    // Token pieces are byte strings, not independently valid Swift strings. Byte-fallback
+    // vocabularies may split one scalar across several tokens, so retain only the incomplete UTF-8
+    // suffix and emit complete prefixes.
+    struct UTF8StreamDecoder {
+        private var pending: [UInt8] = []
+        var bufferedByteCount: Int { pending.count }
+
+        mutating func push(_ bytes: [UInt8]) -> String {
+            pending.append(contentsOf: bytes)
+            if let whole = String(bytes: pending, encoding: .utf8) {
+                pending.removeAll(keepingCapacity: true)
+                return whole
+            }
+
+            let maxHold = min(3, pending.count)
+            guard maxHold > 0 else { return "" }
+            for hold in 1...maxHold {
+                let split = pending.count - hold
+                let suffix = Array(pending[split...])
+                guard Self.isIncompleteScalarPrefix(suffix) else { continue }
+                let prefix = String(decoding: pending[..<split], as: UTF8.self)
+                pending = suffix
+                return prefix
+            }
+            let recovered = String(decoding: pending, as: UTF8.self)
+            pending.removeAll(keepingCapacity: true)
+            return recovered
+        }
+
+        mutating func finish() -> String {
+            defer { pending.removeAll(keepingCapacity: true) }
+            return String(decoding: pending, as: UTF8.self)
+        }
+
+        private static func isIncompleteScalarPrefix(_ bytes: [UInt8]) -> Bool {
+            guard let first = bytes.first else { return false }
+            let expected: Int
+            switch first {
+            case 0xC2...0xDF: expected = 2
+            case 0xE0...0xEF: expected = 3
+            case 0xF0...0xF4: expected = 4
+            default: return false
+            }
+            guard bytes.count < expected else { return false }
+            for byte in bytes.dropFirst() where !(0x80...0xBF).contains(byte) { return false }
+            if bytes.count >= 2 {
+                let second = bytes[1]
+                if first == 0xE0 && second < 0xA0 { return false }
+                if first == 0xED && second > 0x9F { return false }
+                if first == 0xF0 && second < 0x90 { return false }
+                if first == 0xF4 && second > 0x8F { return false }
+            }
+            return true
         }
     }
 
@@ -1082,13 +1304,20 @@ final class InferenceEngine: InferenceEngineProtocol {
     // suppressed everything the moment `params.greedy` was set (the API temperature == 0 path, and the
     // one-line experiment any maintainer would try on the ghost).
     // Falls back to the plain sampler if logits are unavailable (conf 0 = unknown).
+    static func requiresCandidateSampling(hasSampleObserver: Bool,
+                                          hasRequiredPrefix: Bool) -> Bool {
+        hasSampleObserver || hasRequiredPrefix
+    }
+
     private func sampleWithProb(ctx: OpaquePointer,
                                 smpl: UnsafeMutablePointer<llama_sampler>,
                                 nVocab: Int,
                                 cand: inout [llama_token_data],
-                                requiredRemaining: ArraySlice<UInt8> = [][...]) -> (llama_token, Float) {
+                                computeConfidence: Bool,
+                                requiredRemaining: ArraySlice<UInt8> = [][...])
+        -> (token: llama_token, confidence: Float, alreadyAccepted: Bool) {
         guard nVocab > 0, let logits = llama_get_logits_ith(ctx, -1) else {
-            return (llama_sampler_sample(smpl, ctx, -1), 0)
+            return (llama_sampler_sample(smpl, ctx, -1), 0, true)
         }
         // Tier 2a: when a stem is pending, drop (logit = -inf) every candidate whose bytes aren't
         // prefix-compatible with the remaining stem — done in the candidate fill the loop already runs,
@@ -1101,7 +1330,7 @@ final class InferenceEngine: InferenceEngineProtocol {
                !RequiredPrefix.isAdmissible(tokenBytes: tokenBytesSlice(llama_token(i)), remaining: requiredRemaining) {
                 lg = -.infinity
             }
-            if lg > maxLogit { maxLogit = lg }
+            if computeConfidence, lg > maxLogit { maxLogit = lg }
             cand[i] = llama_token_data(id: llama_token(i), logit: lg, p: 0)
         }
         // Raw softmax peak = exp(maxLogit - logSumExp) = 1 / Σexp(logit - maxLogit). Subtracting the
@@ -1109,7 +1338,7 @@ final class InferenceEngine: InferenceEngineProtocol {
         // entries drop out of both max and sum, so a healed step reports the peak among the tokens the
         // required-prefix constraint actually left admissible.
         var sumExp = 0.0
-        if maxLogit > -.infinity {
+        if computeConfidence, maxLogit > -.infinity {
             // Terms more than 20 nats below the peak contribute < 2.1e-9 each (< 6e-4 total across the
             // whole vocab), and skipping them turns ~262k expf() calls per SAMPLED TOKEN — milliseconds
             // out of a 400 ms end-to-end budget — into a compare sweep plus a few thousand exps.
@@ -1118,15 +1347,15 @@ final class InferenceEngine: InferenceEngineProtocol {
                 sumExp += Double(exp(cand[i].logit - maxLogit))
             }
         }
-        let rawPeak: Float = sumExp > 0 ? Float(1.0 / sumExp) : 0
-        return cand.withUnsafeMutableBufferPointer { buf -> (llama_token, Float) in
+        let rawPeak: Float = computeConfidence && sumExp > 0 ? Float(1.0 / sumExp) : 0
+        return cand.withUnsafeMutableBufferPointer { buf -> (llama_token, Float, Bool) in
             var cur = llama_token_data_array(
                 data: buf.baseAddress, size: nVocab, selected: -1, sorted: false)
             llama_sampler_apply(smpl, &cur)
             guard cur.selected >= 0, let data = cur.data else {
-                return (llama_sampler_sample(smpl, ctx, -1), rawPeak)
+                return (llama_sampler_sample(smpl, ctx, -1), rawPeak, true)
             }
-            return (data[Int(cur.selected)].id, rawPeak)
+            return (data[Int(cur.selected)].id, rawPeak, false)
         }
     }
 
@@ -1140,15 +1369,27 @@ final class InferenceEngine: InferenceEngineProtocol {
         return (String(s[...lastSpace]), String(s[s.index(after: lastSpace)...]))
     }
 
+    struct TokenizationInput: Equatable {
+        let storage: [UInt8]
+        let byteCount: Int32
+    }
+
+    static func tokenizationInput(_ text: String) -> TokenizationInput {
+        var storage = Array(text.utf8)
+        let byteCount = Int32(storage.count)
+        storage.append(0)
+        return TokenizationInput(storage: storage, byteCount: byteCount)
+    }
+
     private func tokenize(_ text: String, addSpecial: Bool) throws -> [llama_token] {
         guard let vocab else { throw InferenceError.notLoaded }
-        let utf8 = Array(text.utf8)
-        let cap = Int32(utf8.count) + 8
+        let input = Self.tokenizationInput(text)
+        let cap = input.byteCount + 8
         var out = [llama_token](repeating: 0, count: Int(cap))
-        let n = utf8.withUnsafeBufferPointer { src in
+        let n = input.storage.withUnsafeBufferPointer { src in
             out.withUnsafeMutableBufferPointer { dst in
-                src.baseAddress!.withMemoryRebound(to: CChar.self, capacity: utf8.count) { cstr in
-                    llama_tokenize(vocab, cstr, Int32(utf8.count), dst.baseAddress, cap, addSpecial, true)
+                src.baseAddress!.withMemoryRebound(to: CChar.self, capacity: src.count) { cstr in
+                    llama_tokenize(vocab, cstr, input.byteCount, dst.baseAddress, cap, addSpecial, true)
                 }
             }
         }
@@ -1157,19 +1398,4 @@ final class InferenceEngine: InferenceEngineProtocol {
         return out
     }
 
-    private func tokenToPiece(_ tok: llama_token) -> String {
-        guard let vocab else { return "" }
-        var buf = [CChar](repeating: 0, count: 64)
-        var n = llama_token_to_piece(vocab, tok, &buf, Int32(buf.count), 0, false)
-        if n < 0 {
-            buf = [CChar](repeating: 0, count: Int(-n))
-            n = llama_token_to_piece(vocab, tok, &buf, Int32(buf.count), 0, false)
-        }
-        if n <= 0 { return "" }
-        return buf.withUnsafeBufferPointer { p in
-            p.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: Int(n)) {
-                String(decoding: UnsafeBufferPointer(start: $0, count: Int(n)), as: UTF8.self)
-            }
-        }
-    }
 }

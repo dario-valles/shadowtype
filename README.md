@@ -5,7 +5,7 @@
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-required-black)
 
 **System-wide, fully on-device ghost-text autocomplete for macOS.** Shadowtype predicts
-your next words inline — as faint ghost text at the caret — in *every* Mac text field, powered
+your next words inline — as faint ghost text at the caret — in supported Mac text fields, powered
 entirely by a local LLM running on Apple Silicon via Metal. Nothing leaves your machine. Press
 **Tab** to accept a word (or the whole line); keep typing to dismiss. It behaves like
 spell-check: invisible until useful, never in the way.
@@ -14,8 +14,8 @@ spell-check: invisible until useful, never in the way.
 
 ## Features
 
-- **System-wide inline completions** — works in Mail, Notes, Slack, Safari, Word, terminals,
-  Electron/WebKit editors, and the long tail of Mac text fields. Not locked to one app or browser.
+- **System-wide inline completions** — works across supported fields in apps such as Mail, Notes,
+  Slack, Safari, and Word. Terminals and incompatible editors are deliberately suppressed.
 - **Runs fully on-device** — completion inference is 100% local via [llama.cpp](https://github.com/ggml-org/llama.cpp)
   + Metal. Your keystrokes and prompts never become training data and never leave the Mac.
 - **No telemetry, no account** — no analytics backend, no sign-in, no usage tracking. The app
@@ -38,15 +38,15 @@ spell-check: invisible until useful, never in the way.
 
 - macOS 14 (Sonoma) or newer
 - Apple Silicon (M1 or later)
-- For building from source: the Swift 6 toolchain (Xcode 16+ or the standalone toolchain), and
-  `llama.cpp` + `ggml` installed via Homebrew:
+- For building from source: the Swift 6 toolchain (Xcode 16+ or the standalone toolchain), CMake,
+  and Git. Build the pinned llama.cpp/ggml sources into the local vendored prefix:
 
   ```sh
-  brew install llama.cpp
+  ./scripts/build-llama.sh
   ```
 
-  Headers/libs are consumed through `pkg-config llama` plus an explicit `-I/opt/homebrew/include`
-  for the separate `ggml` formula (see `Package.swift`).
+  The script produces static libraries under `vendor/llama/`; no Homebrew native dependency is
+  required.
 
 ---
 
@@ -71,9 +71,10 @@ the default model.
 ## Build from source
 
 ```sh
+./scripts/build-llama.sh        # build pinned static llama.cpp + ggml dependencies
 swift build -c release          # → .build/release/Shadowtype
 swift test                      # unit tests (model-gated tests auto-skip without a GGUF)
-./scripts/make-app.sh           # assemble dist/Shadowtype.app (bundled, signed)
+./scripts/make-app.sh           # assemble and sign dist/Shadowtype.app
 ```
 
 `swift build` produces a bare executable; `make-app.sh` wraps it in a real `.app` bundle with an
@@ -126,5 +127,5 @@ requests go through [GitHub Issues](https://github.com/dario-valles/shadowtype/i
 
 [MIT](LICENSE) © 2026 Darío Vallés.
 
-Shadowtype bundles MIT/Apache-2.0 libraries (llama.cpp, ggml, libomp) in release builds and
-downloads third-party models at runtime — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+Shadowtype statically links llama.cpp and ggml in release builds and downloads third-party models
+at runtime — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

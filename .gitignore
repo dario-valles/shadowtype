@@ -3,6 +3,9 @@
 .swiftpm/
 Package.resolved
 
+# Locally built, pinned llama.cpp static prefix
+vendor/llama/
+
 # Xcode
 DerivedData/
 *.xcodeproj/xcuserdata/

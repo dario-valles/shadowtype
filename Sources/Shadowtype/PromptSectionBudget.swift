@@ -1,3 +1,5 @@
+import Foundation
+
 // PromptSectionBudget — pure character-budget allocator for the base-model prompt.
 //
 // Why this exists: the prompt carries optional leading context (instruction, style hint, clipboard,
@@ -7,11 +9,10 @@
 // highest-priority-first within a total budget and truncates each to fit, so the caret text (given the
 // top priority and a guaranteed minimum) is never starved by a noisy screen capture.
 //
-// Cost is measured in UTF-8 BYTES, not Swift Characters: a byte count is a closer proxy for tokens
-// than a grapheme count (an emoji or CJK glyph is one Character but several bytes / often several
-// tokens), so a byte budget can't be silently blown by multi-byte context the way a Character budget
-// could. Truncation still happens on grapheme boundaries so a multi-scalar character is never split.
-// Pure and deterministic (no tokenizer dependency); swappable for a real token count later.
+// The first allocation pass is measured in UTF-8 bytes because this type is pure and has no model
+// handle. The caller MUST validate the rendered result with the loaded tokenizer before decode and
+// call nextByteBudget after an overflow. Truncation stays on grapheme boundaries so a multi-scalar
+// character is never split.
 struct PromptSection: Equatable {
     // Which end to keep when the content must be shortened. `preserveEnd` keeps the tail (the text
     // nearest the caret — right for the prefix and for screen context that trails the conversation);
@@ -30,6 +31,19 @@ struct PromptSection: Equatable {
 }
 
 enum PromptSectionBudget {
+    enum TokenDensityProfile: Hashable {
+        case asciiProse
+        case code
+        case cjk
+        case mixedCJK
+        case otherUnicode
+    }
+
+    struct CacheKey: Hashable {
+        let profile: TokenDensityProfile
+        let tokenCap: Int
+    }
+
     // Fills sections by priority (descending; ties broken by original order for determinism) within
     // `totalChars`. Each section is capped at min(maxChars, contentLength, remainingBudget), dropped if
     // that is below its minChars, and dropped if it trims to empty. Surviving sections are returned in
@@ -66,6 +80,50 @@ enum PromptSectionBudget {
 
     // UTF-8 byte cost of a string (the budget unit).
     static func cost(_ s: String) -> Int { s.utf8.count }
+
+    // Coarse performance-only key for tokenizer-validated byte ceilings. Correctness never depends on
+    // this classification: every prompt still goes through the engine's real tokenizer, and an
+    // inaccurate cache hit merely causes another pre-decode overflow/re-budget pass. Sampling the
+    // complete assembled prompt accounts for byte-heavy OCR/clipboard blocks as well as the prefix.
+    static func tokenDensityProfile(_ text: String) -> TokenDensityProfile {
+        var hasCJK = false
+        var hasASCIIWord = false
+        var hasOtherUnicode = false
+        var codePunctuation = 0
+        var asciiCount = 0
+
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x4E00...0x9FFF, 0x3400...0x4DBF, 0x3040...0x30FF, 0xAC00...0xD7AF:
+                hasCJK = true
+            case 0x00...0x7F:
+                asciiCount += 1
+                if CharacterSet.alphanumerics.contains(scalar) { hasASCIIWord = true }
+                if "{}[]();=<>/\\|`$#@".unicodeScalars.contains(scalar) {
+                    codePunctuation += 1
+                }
+            default:
+                hasOtherUnicode = true
+            }
+        }
+
+        if hasCJK { return hasASCIIWord ? .mixedCJK : .cjk }
+        if hasOtherUnicode { return .otherUnicode }
+        if codePunctuation >= 8, codePunctuation * 12 >= max(1, asciiCount) { return .code }
+        return .asciiProse
+    }
+
+    // Convert an exact tokenizer overflow into the next section-allocation byte ceiling. The ratio is
+    // only a fast first guess: removing a section can change token density discontinuously, so the
+    // caller retries validation until the loaded tokenizer accepts the prompt. Progress is strict,
+    // which makes the loop finite even for atomic sections and unusual tokenizers.
+    static func nextByteBudget(current: Int, tokenCount: Int, tokenCap: Int,
+                               safetyTokens: Int = 8) -> Int? {
+        guard current > 1, tokenCount > tokenCap, tokenCap > 0 else { return nil }
+        let target = max(1, tokenCap - max(0, safetyTokens))
+        let scaled = Int((Int64(current) * Int64(target)) / Int64(max(1, tokenCount)))
+        return max(1, min(current - 1, scaled))
+    }
 
     // Tail window whose START only moves in `anchor`-byte steps — the byte-level twin of the engine's
     // anchored token trim (InferenceEngine.trimToWindow).

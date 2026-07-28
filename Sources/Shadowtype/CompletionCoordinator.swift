@@ -9,13 +9,6 @@
 import Cocoa
 import NaturalLanguage
 
-// Ghost-text opacity. Shadowtype is free and unlimited — every suggestion shows at full opacity and
-// nothing is ever suppressed for a word cap. Kept as a thin shim so call sites stay readable.
-enum WordCap {
-    /// Ghost-text opacity multiplier — always full (1). Never nil; suggestions are never capped.
-    static func opacity() -> CGFloat? { 1 }
-}
-
 final class CompletionCoordinator {
     // Confidence-gating thresholds (see ConfidenceGate), expressed in RAW top-1 probability — the
     // model's own softmax peak, not the post-sampler-chain peak these numbers were originally read
@@ -72,27 +65,27 @@ final class CompletionCoordinator {
     // autocorrect OFFER path is independent and still fires when licensed + enabled. Mirrored by
     // AppDelegate.syncToggles.
     var holdBackOnTypos: Bool = true
-    // FR-AC-1 (paid): the upgrade to TypoGuard. When the last word looks like a typo AND the user is
-    // licensed AND autocorrectEnabled, OFFER a concrete fix (correction ghost) instead of merely
+    // FR-AC-1: the upgrade to TypoGuard. When the last word looks like a typo and autocorrect is enabled,
+    // OFFER a concrete fix (correction ghost) instead of merely
     // suppressing. Pure value type; default-constructed so it is safe even before wiring. nil disables.
     var autocorrect: Autocorrect? = Autocorrect()
     // FR-AC-1 user toggle (paid). Mirrors the OCR/emoji toggle flow: default OFF, persisted in
     // UserDefaults ("GW.autocorrectEnabled"), kept in sync by AppDelegate's didChange observer.
     var autocorrectEnabled: Bool = false
-    // FR-CTX-3 (paid): on-device encrypted writing-style personalization. Injected (defaults to the
+    // FR-CTX-3: on-device encrypted writing-style personalization. Injected (defaults to the
     // shared instance) so M-loop tests can pass a hermetic StyleProfile(storeURL:secret:). Read+written
-    // only when isLicensed && styleProfileEnabled.
+    // only when styleProfileEnabled.
     var styleProfile: StyleProfile? = StyleProfile.shared
     var styleProfileEnabled: Bool = true
     // FR-CTX-3 Personalization → "strength" (paid, 0...3). Scales the style-hint char budget prepended
     // to the prompt: 0 = off (no hint, even when learning stays on), 1/2/3 = progressively larger bias.
     // Mirrored by AppDelegate.syncToggles; read on focus-in when the hint snapshot is rebuilt.
     var personalizationStrength: Int = 3
-    // FR-CTX-2 (paid): clipboard-aware context. Synchronous pasteboard read prepended as leading
-    // context. Read only when isLicensed && clipboardContextEnabled (default OFF).
+    // FR-CTX-2: clipboard-aware context. Synchronous pasteboard read prepended as leading
+    // context. Read only when clipboardContextEnabled (default OFF).
     var clipboard: ClipboardContextProvider? = ClipboardContextProvider()
     var clipboardContextEnabled: Bool = false
-    // FR-PA-3 (paid): custom global + per-app instructions. Shared store; read only when isLicensed.
+    // FR-PA-3: custom global + per-app instructions.
     var instructionStore: InstructionStore? = InstructionStore.shared
     // FR-CTX-1 on-screen OCR context (Free). Only consulted when `useScreenOCR` is true (default OFF);
     // the recognized text is prepended as extra LEADING context — the prompt stays forward-from-caret.
@@ -125,27 +118,21 @@ final class CompletionCoordinator {
     private let pageContextChars = 4000
     // Last OCR text resolved off the hot path (FR-CTX-1). Read synchronously when building the prompt
     // so the latency-critical generate() never awaits; refreshed by a background Task on each fire.
-    private var ocrCache: String?
-    private let ocrLock = NSLock()
     // Dominant language of the CACHED screen context, latched once per CAPTURE rather than re-detected on
     // every prompt assembly (#10). Re-detecting per fire let a borderline read flip between two fires of
     // the same typing burst, and that name lands in the `Text (in <Language>):` marker sitting IMMEDIATELY
     // before the prefix — i.e. a change in the prompt head, i.e. a full cold re-prefill on every flip.
     // Recomputed only when storeOCRCache accepts a genuinely different capture. Main-thread only.
-    private var ocrCacheLang: NLLanguage?
     // Text around the caret whose KV warm is waiting on this focus's first OCR capture (#11).
     // warmFocus() defers the prefill rather than warming a prompt the first real fire will not match;
     // the capture's completion flushes it. Carries the post-caret text as well as the prefix for the
     // same reason the deferral exists at all: warming without the `After the cursor:` block the first
     // real fire WILL assemble diverges the two streams inside the context region and throws the whole
     // prefill away. Main-thread only.
-    private var pendingWarm: (prefix: String, postCaret: String?)?
 
     // Per-focus OCR capture lifecycle (main-thread only). `.pending` = the capture for this focus is in
     // flight and we have NO context yet, so fire() holds back the first (context-blind) guess until it
     // lands; `.ready` = the capture completed (even if it found no prose) so prefix-only is allowed.
-    private enum OCRCaptureState { case idle, pending, ready }
-    private var ocrCaptureState: OCRCaptureState = .idle
 
     // Bound for the context-driven re-fire (main-thread only). refreshOCRContextIfEnabled re-fires
     // generation when the captured on-screen context changes, so a context-blind first guess gets
@@ -157,14 +144,12 @@ final class CompletionCoordinator {
     // matched and the re-fire was never blocked. The count is immune to that and to the OCR-feedback
     // case (a capture that includes the rendered ghost). cancel() (every keystroke / focus change /
     // force-activate) resets it so each new typing action gets exactly one fresh context upgrade.
-    private var contextRefireCount = 0
     private static let maxContextRefires = 1
 
     // Dominant language of the on-screen context fed into the CURRENT generation's prompt (nil when
     // there is no confident single-language context). Set in assembledPrompt, read in renderSuggestion
     // to suppress a completion that drifts to a different language than the surrounding conversation
     // (user choice: match the conversation, else hide). Reset in cancel().
-    private var generationContextLang: NLLanguage?
 
     // Tier 2a: true while the current generation is a mid-word HEAL — the engine regenerated the typed
     // word from a clean boundary and already stripped the reproduced stem, so the ghost text is final.
@@ -172,14 +157,12 @@ final class CompletionCoordinator {
     // glue guard / prefix-dup), which assume a fresh continuation and would mangle the healed tail
     // ("at" → " at"). Language safety still applies: a healed wrong-language tail is still wrong.
     // Set per generation in startGeneration. See MidWordHealing / RequiredPrefix.
-    private var generationIsHealed = false
 
     // True while the current generation is a TERMINAL shell-command completion (the buffer was a plain
     // shell prompt). renderSuggestion then skips ALL prose transforms (markup strip, list-marker strip,
     // glue/leading-space reconcile, language-drift guards) — every one corrupts shell syntax (backticks =
     // command substitution, `*` = glob, leading `-` = flag) — and instead runs only a newline truncation
     // plus the destructive-command guard. Set per generation in startGeneration / the history fast path.
-    private var generationShellMode = false
 
     // True once the CURRENT generation has actually painted a ghost. renderSuggestion runs per streamed
     // snapshot and its reject filters are evaluated on PARTIAL text, where none of them is monotonic: a
@@ -189,7 +172,6 @@ final class CompletionCoordinator {
     // flicker the confidence gate refuses to cause. Once this is set, a reject STOPS further renders
     // instead of retracting (see rejectRender). Reset in bumpGeneration (a superseded generation's ghost
     // is no longer protected) and in clearSuggestion (nothing on screen to protect).
-    private var generationCommitted = false
 
     // Cached writing-style hint (FR-CTX-3). Like the OCR cache, this is refreshed ONLY on focus-in (the
     // cold path), NOT per keystroke: the profile only changes on a Tab-accept, and recomputing it inside
@@ -197,22 +179,11 @@ final class CompletionCoordinator {
     // keystroke and (b) SHIFT the prompt's leading tokens after each accept, busting the FR-CE-5 warm KV
     // cache on the next keystroke. Snapshotting it per focus-in keeps the leading block stable during a
     // typing burst (warm) and moves the sort off the hot path.
-    private var styleHintCache: String?
-    private let styleHintLock = NSLock()
-
-    // Shadowtype is free and fully unlocked: every feature path is always on. This constant keeps the
-    // ~12 historical `if isLicensed` gates readable while always taking the unlocked branch.
-    let isLicensed = true
+    private let contextAssembler = CompletionContextAssembler()
 
     // True while a selection-rewrite is generating or its preview HUD is up (set by AppDelegate). The
     // keystroke hot path stays quiet during it so the ghost loop doesn't fight the rewrite UI.
     var rewriteActive = false
-
-    // No daily cap: the product is unlimited, so the menu meter shows no cap.
-    var dailyCap: Int? { nil }
-
-    // Suggestions are never suppressed for a cap.
-    var isSuppressedByCap: Bool { false }
 
     // INTEGRATOR-NOTE: this fires when a suggestion's visibility changes. Wire it to
     // TabSwallowTap.setSuggestionVisible(_:) so Tab is only swallowed while a ghost is
@@ -257,9 +228,9 @@ final class CompletionCoordinator {
     // stays as-is; the engine gains a *settable* stop policy (e.g. engine.stopPolicy = .phrase).
     // If you expose that setter, set it once at wiring time in AppDelegate; the coordinator does
     // not configure it here to keep that single owner.
-    // INTEGRATOR-OWNED: settable so AppDelegate can drive it from CompletionLength.current(isLicensed:)
-    // at launch and on every license / length-preference change (FR-CE-3). Default 24 keeps the Free
-    // product unchanged until wired. The coordinator never reads CompletionLength itself — AppDelegate
+    // INTEGRATOR-OWNED: settable so AppDelegate can drive it from CompletionLength.current at launch
+    // and on every length-preference change (FR-CE-3). The coordinator never reads CompletionLength
+    // itself — AppDelegate
     // is the single owner of that tunable wiring (see lines above).
     var maxTokens = 24
 
@@ -286,17 +257,7 @@ final class CompletionCoordinator {
     // MARK: - State (all mutated on main unless noted)
     private var debounceWork: DispatchWorkItem?
 
-    // Newest-wins generation token. Bumped on every cancel/new-request. The inference
-    // closure compares its captured id to this; a mismatch means it has been superseded
-    // and returns false to cooperatively stop the engine (FR-CE-4). Read on the inference
-    // queue, written on main — guarded by `genLock`.
-    private let genLock = NSLock()
-    private var generation: Int = 0
-
-    // The prompt-prefix that produced the currently-displayed (or in-flight) suggestion.
-    // Used both to detect strict-extension (KV reuse opportunity, FR-CE-5) and to size
-    // word/line acceptance against the live suggestion text.
-    private var activePrefix: String = ""
+    private let generationSession = CompletionGenerationSession()
     // Memo for applyGlueGuard: renderSuggestion runs on every streamed token snapshot, but for a fixed
     // prefix the trailing word and the suggestion's leading glue run are stable — so the language detect
     // + two spell lookups should run once per generation, not per token. Keyed on (prefix, glue run,
@@ -304,90 +265,22 @@ final class CompletionCoordinator {
     // that share a prefix + leading-letter run (e.g. both space-leading).
     private var glueGuardMemoKey: String?
     private var glueGuardMemoResult: String?
-    private var suggestionText: String = ""
-    // When the live suggestion is an emoji match (FR-EM-1), accept inserts exactly this emoji and
-    // counts 0 words. The query length is how much of the typed `:shortcode` to replace on accept.
-    private var emojiSuggestion: String?
-    private var emojiQueryLength: Int = 0
-    // FR-AC-1 (paid): the autocorrect "correction" ghost. When set, the live ghost is a one-edit fix for
-    // the mistyped trailing token (`correctionRun`); accept atomically replaces that run with
-    // `correctionSuggestion` (Injector.replaceBeforeCaret), counting 0 words. Never the LLM path.
-    private var correctionSuggestion: String?
-    private var correctionRun: String?
-    private var suggestionVisible: Bool = false {
-        didSet {
-            guard suggestionVisible != oldValue else { return }
-            onSuggestionVisibleChanged?(suggestionVisible)
-            // Snapshot caret-at-end only on the rising edge — a per-token push would burn an AX
-            // call per frame. Falling edge always pushes false (no AX) so a stale-true can't
-            // outlive the ghost. Accept-advance paths re-push explicitly after the inject.
-            if suggestionVisible {
-                onCaretAtLineEndChanged?(context.caretAtLineEnd())
-                startFontWatch()
-            } else {
-                onCaretAtLineEndChanged?(false)
-                stopFontWatch()
+    private lazy var ghostPresentation = GhostPresentationController(overlay: overlay)
+    private var suggestionVisible: Bool {
+        get { ghostPresentation.isVisible }
+        set {
+            ghostPresentation.setVisible(newValue) { visible in
+                onSuggestionVisibleChanged?(visible)
+                if visible {
+                    onCaretAtLineEndChanged?(context.caretAtLineEnd())
+                    startFontWatch()
+                } else {
+                    onCaretAtLineEndChanged?(false)
+                    stopFontWatch()
+                }
             }
         }
     }
-    // A host font-size/typeface change (e.g. TextEdit's toolbar stepper) emits no AX value- or
-    // focus-changed notification, so the visible ghost would keep its stale size until the next
-    // keystroke or app switch. Such a change is driven by a click (toolbar/menu/stepper); while a
-    // gate-tracked completion ghost is up, watch left-mouse-up and re-read the host font, re-rendering
-    // in place only if it actually changed. Keyboard size shortcuts (⌘+/⌘-) already route through
-    // onKeystroke()→cancel(), so they regenerate with the new font on their own — no watch needed.
-    private var fontWatchMonitor: Any?
-    // Acceptance-rate bookkeeping (local Statistics only): true once the currently-shown completion has
-    // had ≥1 word accepted, so word-by-word Tab accepts of one suggestion count as a single acceptance.
-    // Reset to false when a fresh completion is shown (the rising edge in renderSuggestion).
-    private var currentSuggestionAccepted = false
-
-    // Floors the ghost font's caret height to the per-focus-session minimum so a single AX poll that
-    // returns the full field-height fallback can't render a giant ghost (#1).
-    private var ghostFontStabilizer = GhostFontSizeStabilizer()
-    // Geometry of the last overlay we actually drew; gates whether a render tick repositions the panel
-    // or holds it (#2). nil when nothing is shown.
-    private var lastRenderedOverlay: OverlayStabilityGate.Rendered?
-    // Surviving record of the last text actually sent to overlay.show(), independent of the stability
-    // gate's snapshot (which is reset on clearSuggestion()/untrackOverlay()). Catches the dominant
-    // "shows twice" pattern: a context re-fire (or any path that briefly clears) regenerates the
-    // IDENTICAL text and would re-emit it — this drops the redundant emission within a short window.
-    // Reset only on user-initiated clears (so an Esc + retype still shows the suggestion fresh).
-    private var lastEmitState: OverlayEmitDedup.State?
-    // Whether a ghost is ACTUALLY on screen right now (true after overlay.show(), false after
-    // overlay.hide()). Gates the emit-dedup: a dropped re-show is only correct while the ghost is still
-    // up — otherwise the dedup record (kept across a re-fire clear) would suppress a real show and leave
-    // suggestionVisible=true with nothing visible (phantom Tab-accept).
-    private var overlayPresented = false
-    // True while a context-driven re-fire's generation is streaming. Holds the visible ghost as long
-    // as the new token stream is a prefix of the currently-shown suggestion (the model regenerating
-    // the same text), avoiding the otherwise-visible "Lorem ipsum" → "L" → "Lo" … rebuild flicker.
-    // Cleared on stream divergence, generation done, or any explicit clear/cancel.
-    private var inContextRefire: Bool = false
-    // Stream-token render coalescer. Local-model bursts can fire many main-queue renderSuggestion
-    // calls per frame; coalescing subsequent tokens to ≤1 render per ~33 ms (≈1 frame at 30 fps)
-    // kills per-token re-anchor jitter while still respecting "first token shows immediately".
-    private var pendingStreamSnapshot: String?
-    private var pendingStreamWork: DispatchWorkItem?
-    private let streamCoalesceWindow: TimeInterval = 0.033
-    // RTL-ness of the current generation's prefix, computed ONCE when the prefix is set (the caret text
-    // is fixed for a generation) instead of re-scanning it on every streamed token (#14).
-    private var generationRTL = false
-    // Prefix-invariant work hoisted OUT of the per-33 ms render tick (#9). renderSuggestion runs once per
-    // streamed snapshot, and for a fixed `activePrefix` — which is exactly what a generation has, since
-    // the user is paused — none of these can change between ticks, yet each was recomputed every tick:
-    // a fresh NLLanguageRecognizer().processString over the WHOLE prefix, plus an AX caret-rect read and
-    // an AX caret-font read (two IPC round trips a frame). Resolved once in startGeneration next to
-    // generationRTL; nil means "resolve live" (the emoji / correction / shell-history ghosts and the
-    // post-accept remainder re-render, whose caret HAS moved). Cleared by cancel()/clearSuggestion().
-    private var generationCaretRect: CGRect?
-    private var generationFont: NSFont?
-    // The prefix side of the language-drift guard. `.none` = not computed / prefix too short or
-    // ambiguous (the guard then never fires, matching languageDrifts' own conservative bail).
-    private var generationPrefixLang: NLLanguage?
-    // User-declared onboarding languages latched once with the generation, so every prefix/suggestion
-    // read uses the same candidate set without hitting UserDefaults on every streamed render tick.
-    private var generationLanguageConstraints: [NLLanguage] = []
     // The ONE focus resolution for the current fire() (#9). Every gate in fire() and the render path
     // reads AX facts from here instead of re-walking the tree. Dropped in cancel(); `currentFocusSnapshot`
     // additionally refuses to hand back a snapshot whose focus session has since changed, so a stale
@@ -475,15 +368,26 @@ final class CompletionCoordinator {
         debounceWork = nil
         bumpGeneration()           // supersede any in-flight closure
         engine.requestCancel()     // cooperative stop between chunks/tokens
-        contextRefireCount = 0     // a new keystroke/focus/force re-arms the one context-upgrade re-fire
-        generationContextLang = nil
+        contextAssembler.refireCount = 0     // a new keystroke/focus/force re-arms the one context-upgrade re-fire
+        generationSession.contextLanguage = nil
         // #9: the focus resolution belongs to the superseded fire(). Dropping it here (plus the focus-seq
         // check in `currentFocusSnapshot`) is what guarantees a stale snapshot can never cross into
         // another field — cancel() runs on every keystroke, focus change and force-activate.
         focusSnapshot = nil
         // #11: a warm prefill deferred behind a capture is for the field we are leaving.
-        pendingWarm = nil
+        contextAssembler.pendingWarm = nil
         clearSuggestion()
+    }
+
+    // Same-app focus moves do not emit an NSWorkspace activation notification. AppDelegate calls this
+    // from EditContextTracker.onFocusChange so the old field's decode, ghost, and OCR context are all
+    // invalidated before the new field is warmed.
+    func focusDidChange() {
+        cancel()
+        screenContext?.focusDidChange()
+        storeOCRCache(nil)
+        contextAssembler.captureState = .idle
+        contextAssembler.pendingWarm = nil
     }
 
     // MARK: - Local API runner (M1 — Pro)
@@ -618,11 +522,11 @@ final class CompletionCoordinator {
     // M5 FIM: surface engine capability so /v1/completions can gate the OpenAI `suffix` field.
     var modelSupportsFIM: Bool { engine.supportsFIM }
 
-    // MARK: - Selection rewrite (local, paid)
+    // MARK: - Selection rewrite (local)
 
     // Run the on-device model to rewrite `selection` per `action`, delivering the cleaned result on the
-    // main queue (nil = unavailable / empty output). Paid feature, gated on isLicensed like instructions/
-    // style/clipboard. Reuses the single engine on the serial inferenceQueue with the same newest-wins
+    // main queue (nil = unavailable / empty output). Reuses the single engine on the serial
+    // inferenceQueue with the same newest-wins
     // bumpGeneration discipline as ghost generation: it cancels any running decode so its prompt gets the
     // queue promptly, and is itself superseded (returns nothing) if the user triggers again. Unlike the
     // ghost path this is a ONE-SHOT instruction-style few-shot prompt (RewriteAction), so the KV cache
@@ -634,7 +538,7 @@ final class CompletionCoordinator {
     // full cold prefill. Seq 1 is the API/MCP slot (see runRawCompletion), so rewrite takes 2; the
     // engine's n_seq_max is 4 and kv_unified means the seqs share one n_ctx pool rather than carving it up.
     func rewrite(selection: String, action: RewriteAction, completion: @escaping (String?) -> Void) {
-        guard isLicensed, engine.isLoaded, !selection.isEmpty else { completion(nil); return }
+        guard engine.isLoaded, !selection.isEmpty else { completion(nil); return }
         let tone = instructionStore?.effectiveInstruction(bundleId: context.frontmostBundleId)
         // Steer the base model to the SELECTION's language. The exemplar is English; without an explicit
         // marker the model mirrors it and emits English regardless of what the user selected. Confidence
@@ -721,12 +625,6 @@ final class CompletionCoordinator {
         let shellBuffer = ActivationPolicy.isTerminal(bundleId: context.frontmostBundleId)
             ? context.focusedElementText() : nil
 
-        // Auto-idle contexts (terminals at a normal shell prompt, code-editor surfaces): stay quiet by
-        // default so we don't fight shell/editor completion. The force-activate path bypasses this.
-        if !forced, shouldStayIdle(terminalText: shellBuffer) {
-            Diag.log("fire: skip idleContext \(context.frontmostBundleId ?? "?")"); clearSuggestion(); return
-        }
-
         // FR-CE-9: prefix-before-caret ONLY. nil => no editable focus. Read once and run it through the
         // capability-flicker gate (#3): a single nil read on the SAME focus session is usually a
         // transient republish (Catalyst fields drop their value mid-redraw), so hold the current ghost
@@ -738,15 +636,43 @@ final class CompletionCoordinator {
         // sees the user's actual new prose (often empty → bail cleanly).
         let originalPrefix = snapshot?.prefix
         let rawPrefix = Self.prefixAfterEmailQuoteStrip(originalPrefix, host: host)
-        let hasContext = !((rawPrefix ?? "").isEmpty)
-        if case let .suppress(misses) = capabilityGate.evaluate(hasContext: hasContext,
-                                                                focusSeq: context.focusChangeSequence) {
+        let bundleId = context.frontmostBundleId
+        let managed = !forced && ActivationPolicy.isManaged(bundleId: bundleId)
+        let heights = managed && ActivationPolicy.isEditor(bundleId: bundleId)
+            ? context.focusedFieldAndWindowHeights() : nil
+        let shellOptIn = managed && ActivationPolicy.isTerminal(bundleId: bundleId)
+            && appSettings.resolve(\.shellCommands, forBundleId: bundleId, globalDefault: false)
+        let prefixEvaluation = CompletionActivationEvaluator.evaluatePrefix(
+            .init(
+                forced: forced,
+                bundleId: bundleId,
+                terminalText: shellBuffer,
+                editorFieldHeight: heights?.field,
+                editorWindowHeight: heights?.window,
+                shellCommandsEnabled: shellOptIn,
+                originalPrefix: originalPrefix,
+                prefix: rawPrefix,
+                focusSeq: context.focusChangeSequence,
+                emojiTrigger: rawPrefix.map(isEmojiTrigger) ?? false,
+                minPrefixChars: minPrefixChars
+            ),
+            capabilityGate: capabilityGate
+        )
+        capabilityGate = prefixEvaluation.capabilityGate
+
+        let prefix: String
+        let shellMode: Bool
+        switch prefixEvaluation.decision {
+        case let .holdCapability(misses):
             Diag.log("fire: hold (capability flicker, miss \(misses))")
             return
-        }
-        guard let snapshot, let prefix = rawPrefix, !prefix.isEmpty else {
+        case .skip(.idleContext):
+            Diag.log("fire: skip idleContext \(bundleId ?? "?")")
+            clearSuggestion()
+            return
+        case .skip(.missingPrefix):
             let cause = (originalPrefix?.isEmpty == false) ? "quoted-strip consumed all" : "AX gave no text-before-caret"
-            Diag.log("fire: skip prefix=nil/empty (app=\(context.frontmostBundleId ?? "?")) — \(cause)")
+            Diag.log("fire: skip prefix=nil/empty (app=\(bundleId ?? "?")) — \(cause)")
             // Web editors like Google Docs render to a canvas macOS AX can't read; rather than fail
             // silently, surface a one-time nudge (gated + de-duped by AXNudgeStore) pointing the user
             // at that app's own screen-reader setting.
@@ -764,131 +690,131 @@ final class CompletionCoordinator {
             if ActivationPolicy.isWebMailHost(host) {
                 context.rewakeBrowserAXIfPossible()
             }
-            clearSuggestion(); return
-        }
-
-        // Terminal shell-command mode decision (buffer already read above). Drives gate relaxation
-        // (commands fire mid-token), the history fast path, and the command-shaped prompt/sampling in
-        // startGeneration. nil buffer / non-terminal → shellMode false, every prose path below unchanged.
-        let shellMode = shellBuffer.map { ActivationPolicy.terminalMode($0) == .shellCommand } ?? false
-
-        // The three PURE gates run FIRST, immediately after the prefix read (#9). They are
-        // allocation-free string tests that reject the majority of pauses, and they used to sit BELOW
-        // `focusedFieldIsNonProse()` and the mid-line `caretAtLineEnd()` — four descendToEditable BFS
-        // passes plus descriptor/marker reads — so every rejected pause paid the full AX bill first.
-        // Reordering is outcome-neutral: each of those gates ends in the same clearSuggestion()+return,
-        // and none of the three reads state a probe establishes (they take only `prefix` and `shellMode`,
-        // both already resolved). The one place order was load-bearing is the emoji bypass below.
-
-        // FR-KC-5: only fire at a word/whitespace boundary where a continuation is
-        // meaningful — i.e. just after finishing a word (last char is alnum) or right
-        // after a separating space. Mid-token keystrokes are too noisy to suggest on.
-        // Shell mode bypasses this: shells autosuggest on every keystroke (paths/flags have no word
-        // boundaries — `cd /et`, `git -`), matching fish/zsh-autosuggestions behaviour.
-        // Emoji shortcodes bypass it too, and MUST: a partial shortcode may end on `_`, `+` or `-`
-        // (`:thumbs_`, `:+`), which is not a word boundary — before this gate moved above the emoji
-        // block those ghosts fired, and without the bypass the move would silently kill them. The
-        // predicate is only evaluated when the boundary test already failed.
-        guard shellMode || isMeaningfulBoundary(prefix) || isEmojiTrigger(prefix) else {
+            clearSuggestion()
+            return
+        case .skip(.notBoundary):
             Diag.log("fire: skip notBoundary")
-            Diag.logContent("fire: skip notBoundary prefixTail=\"\(String(prefix.suffix(12)))\"")
-            clearSuggestion(); return
-        }
-
-        // FR-KC-5: require a minimum useful context (>= minPrefixChars non-space chars or >= 1
-        // completed word) before triggering — avoids firing on a lone letter or stray punctuation.
-        guard hasUsefulContext(prefix) else {
+            Diag.logContent("fire: skip notBoundary prefixTail=\"\(String((rawPrefix ?? "").suffix(12)))\"")
+            clearSuggestion()
+            return
+        case .skip(.thinContext):
             Diag.log("fire: skip thinContext")
-            Diag.logContent("fire: skip thinContext prefixTail=\"\(String(prefix.suffix(12)))\"")
-            clearSuggestion(); return
-        }
-
-        // Don't fire in the gap right after a finished sentence (terminal punctuation + a space): a
-        // continuation there is usually an unwanted new clause, not a completion of the user's text.
-        // Shell mode bypasses this — `.`/`!`/`?` are ordinary in paths and command args, not sentence ends.
-        guard shellMode || !Self.endsCompleteStatement(prefix) else {
+            Diag.logContent("fire: skip thinContext prefixTail=\"\(String((rawPrefix ?? "").suffix(12)))\"")
+            clearSuggestion()
+            return
+        case .skip(.completeStatement):
             Diag.log("fire: skip completeStatement")
-            clearSuggestion(); return
-        }
-
-        // Structured-input fields (browser address/omnibox, find bar, search boxes) are not prose —
-        // a ghost there offers URL/query garbage (the "aelo.com in the address bar" case). Skip unless
-        // force-activated.
-        if !forced, context.focusedFieldIsNonProse(in: snapshot) {
-            Diag.log("fire: skip nonProseField \(context.frontmostBundleId ?? "?")"); clearSuggestion(); return
-        }
-
-        // Per-app "mid-line completions" (Cotypist): only suggest at end-of-line by default —
-        // suppress when there's text after the caret on the same line. Mid-line ghosts overlap real
-        // post-caret text and read as broken UX; users can opt in per-app to restore the old behavior.
-        if !appSettings.resolve(\.midLine, forBundleId: context.frontmostBundleId, globalDefault: false),
-           !context.caretAtLineEnd(in: snapshot) {
-            Diag.log("fire: skip midLineOff \(context.frontmostBundleId ?? "?")")
-            clearSuggestion(); return
-        }
-
-        // FR-EM-1: emoji shortcode mode. When the prefix ends in an active `:shortcode`, show the best
-        // emoji match as the ghost and let Tab insert it (0 words). This pre-empts the LLM path.
-        if let emoji, emojiEnabled, emoji.isTrigger(prefix: prefix),
-           let best = emoji.matches(prefix: prefix, limit: 1).first,
-           let query = emoji.currentQuery(prefix: prefix) {
-            Diag.logContent("fire: emoji match :\(best.shortcode): -> \(best.emoji)")
-            // +1 for the leading `:`; this is the run we replace when the user accepts.
-            showEmoji(best.emoji, queryLength: query.count + 1)
+            clearSuggestion()
+            return
+        case let .continueEvaluation(evaluatedPrefix, evaluatedShellMode):
+            prefix = evaluatedPrefix
+            shellMode = evaluatedShellMode
+        case .skip:
+            clearSuggestion()
             return
         }
 
-        // FR-CE-6 (Free half) + FR-AC-1 (paid upgrade): if the last typed word looks like a mid-typing
-        // typo, the Free behavior holds back the suggestion entirely (Cotypist). The PAID upgrade, when
-        // isLicensed && autocorrectEnabled, instead OFFERS a concrete one-edit fix as a special
-        // "correction" ghost (Tab deletes the mistyped run + injects the fix, 0 words). Gating order
-        // matters: only offer when BOTH licensed and toggled on; otherwise fall through to Free suppress.
-        let lastWord = Self.lastWord(of: prefix)
-        if let typoGuard, typoGuard.looksLikeTypo(lastWord: lastWord) {
-            if isLicensed,
-               appSettings.resolve(\.autocorrect, forBundleId: context.frontmostBundleId, globalDefault: autocorrectEnabled),
-               let autocorrect, let fix = autocorrect.correction(for: lastWord) {
-                Diag.log("fire: autocorrect offer")
-                Diag.logContent("fire: autocorrect \"\(lastWord)\" -> \"\(fix)\"")
-                showCorrection(fix, run: lastWord)
-                return
-            }
-            // General → "Hold back on likely typos" (default ON): suppress the suggestion. When the user
-            // turns it off, fall through and let the model continue from the (possibly mistyped) word.
-            if holdBackOnTypos {
-                Diag.log("fire: skip typo")
-                Diag.logContent("fire: skip typo lastWord=\"\(lastWord)\"")
-                clearSuggestion(); return
-            }
+        guard let resolvedSnapshot = snapshot else {
+            clearSuggestion()
+            return
+        }
+        let midLineEnabled = appSettings.resolve(
+            \.midLine, forBundleId: bundleId, globalDefault: false
+        )
+        let nonProseField = !forced && context.focusedFieldIsNonProse(in: resolvedSnapshot)
+        let caretAtLineEnd = midLineEnabled || context.caretAtLineEnd(in: resolvedSnapshot)
+        let preTypoSnapshot = CompletionActivationEvaluator.Snapshot(
+            prefix: prefix,
+            shellMode: shellMode,
+            terminalText: shellBuffer,
+            nonProseField: nonProseField,
+            midLineEnabled: midLineEnabled,
+            caretAtLineEnd: caretAtLineEnd,
+            emojiEnabled: emojiEnabled,
+            emoji: emoji,
+            typo: .notLikely,
+            holdBackOnTypos: holdBackOnTypos,
+            contextCapturePendingWithoutContext: false
+        )
+        switch CompletionActivationEvaluator.evaluateBeforeTypo(preTypoSnapshot) {
+        case .skip(.nonProseField):
+            Diag.log("fire: skip nonProseField \(bundleId ?? "?")")
+            clearSuggestion()
+            return
+        case .skip(.midLineDisabled):
+            Diag.log("fire: skip midLineOff \(bundleId ?? "?")")
+            clearSuggestion()
+            return
+        case let .emoji(value, queryLength):
+            Diag.logContent("fire: emoji match -> \(value)")
+            showEmoji(value, queryLength: queryLength)
+            return
+        case .continueEvaluation:
+            break
+        case .skip:
+            clearSuggestion()
+            return
         }
 
-        // Shell-command mode: the terminal buffer IS the context, so the OCR path is irrelevant. Try the
-        // zero-hallucination history fast path (a prior visible command that extends the typed stem) and,
-        // on a hit, render it verbatim without ever touching the model. Secret-bearing matches are dropped
-        // (never surface a token/password as a ghost), and the danger guard still applies.
-        if shellMode, let buffer = shellBuffer {
-            let current = Self.shellTypedCommand(prefix)
-            if let remainder = ShellHistory.prefixMatch(currentLine: current, buffer: buffer),
-               !remainder.isEmpty {
-                let full = current + remainder
-                if Self.redactingSecrets(full) == full, !ShellCommandGuard.isDangerous(fullCommand: full) {
-                    Diag.log("fire: shell history match -> render (no model)")
-                    showShellHistory(prefix: prefix, remainder: remainder)
-                    return
-                }
-            }
+        let typoAssessment = CompletionActivationEvaluator.assessTypo(
+            prefix: prefix,
+            typoGuard: typoGuard,
+            autocorrectEnabled: appSettings.resolve(
+                \.autocorrect, forBundleId: bundleId, globalDefault: autocorrectEnabled
+            ),
+            autocorrect: autocorrect
+        )
+        let action = CompletionActivationEvaluator.evaluateAfterTypo(
+            .init(
+                prefix: prefix,
+                shellMode: shellMode,
+                terminalText: shellBuffer,
+                nonProseField: nonProseField,
+                midLineEnabled: midLineEnabled,
+                caretAtLineEnd: caretAtLineEnd,
+                emojiEnabled: emojiEnabled,
+                emoji: emoji,
+                typo: typoAssessment,
+                holdBackOnTypos: holdBackOnTypos,
+                contextCapturePendingWithoutContext: false
+            )
+        )
+        switch action {
+        case .skip(.typo):
+            let lastWord = Self.lastWord(of: prefix)
+            Diag.log("fire: skip typo")
+            Diag.logContent("fire: skip typo lastWord=\"\(lastWord)\"")
+            clearSuggestion()
+            return
+        case let .correction(value, run):
+            Diag.log("fire: autocorrect offer")
+            Diag.logContent("fire: autocorrect \"\(run)\" -> \"\(value)\"")
+            showCorrection(value, run: run)
+            return
+        case let .shellHistory(remainder):
+            Diag.log("fire: shell history match -> render (no model)")
+            showShellHistory(prefix: prefix, remainder: remainder)
+            return
+        case .generate:
+            break
+        case .emoji:
+            clearSuggestion()
+            return
+        case .skip:
+            clearSuggestion()
+            return
         }
 
         // FR-CTX-1: keep the OCR context fresh for the CURRENT viewport. Re-capturing on this pause (not
         // just focus-in) reflects scrolling and late captures; the provider's ≤1/s throttle + the
         // storeOCRCache change-guard keep KV warm when the visible text hasn't changed.
         if useScreenOCR, !shellMode {
-            refreshOCRContextIfEnabled(prefix: prefix, snapshot: snapshot)
+            refreshOCRContextIfEnabled(prefix: prefix, snapshot: resolvedSnapshot)
             // Don't paint a context-blind guess while this focus's first capture is still in flight — its
             // completion re-fires with real context. Only suppress when we have NOTHING yet (.pending, no
             // cache); a completed-but-empty capture (.ready) falls through to prefix-only.
-            ocrLock.lock(); let haveOCR = ocrCache != nil; ocrLock.unlock()
-            if !haveOCR, ocrCaptureState == .pending {
+            let haveOCR = contextAssembler.cachedOCR != nil
+            if !haveOCR, contextAssembler.captureState == .pending {
                 Diag.log("fire: defer (OCR capture pending, no context yet)")
                 clearSuggestion(); return
             }
@@ -899,7 +825,7 @@ final class CompletionCoordinator {
         // from the snapshot — the same single AX read that produced the prefix — and is nil on the
         // web/text-marker hosts, which can't see past the caret. Off in shell mode: the terminal buffer
         // IS the context there, and assembleShellPrompt doesn't take context blocks at all.
-        let postCaret = shellMode ? nil : snapshot.suffix
+        let postCaret = shellMode ? nil : resolvedSnapshot.suffix
         Diag.log("fire: START gen len=\(prefix.count) post=\(postCaret?.count ?? -1)\(shellMode ? " [shell]" : "")")
         Diag.logContent("fire: START gen prefixTail=\"\(String(prefix.suffix(24)))\"")
         startGeneration(prefix: prefix, postCaret: postCaret,
@@ -908,20 +834,21 @@ final class CompletionCoordinator {
 
     // Render a history-derived shell completion verbatim, bypassing the model. Mirrors how
     // startGeneration seeds the per-generation flags so renderSuggestion takes the shell-mode branch
-    // (Tab then injects `suggestionText`, exactly like a model completion).
+    // (Tab then injects `ghostPresentation.suggestionText`, exactly like a model completion).
     private func showShellHistory(prefix: String, remainder: String) {
         bumpGeneration()                       // supersede any in-flight model run
-        activePrefix = prefix
-        generationRTL = false
-        generationIsHealed = false
-        generationContextLang = nil
-        generationShellMode = true
+        generationSession.activePrefix = prefix
+        generationSession.focusSeq = context.focusChangeSequence
+        generationSession.rtl = false
+        generationSession.isHealed = false
+        generationSession.contextLanguage = nil
+        generationSession.shellMode = true
         // This ghost never goes through startGeneration, so it has no hoisted geometry/language of its
         // own — clear any left over from the superseded generation and let renderSuggestion read live.
-        generationCaretRect = nil
-        generationFont = nil
-        generationPrefixLang = nil
-        generationLanguageConstraints = []
+        generationSession.caretRect = nil
+        generationSession.font = nil
+        generationSession.prefixLanguage = nil
+        generationSession.languageConstraints = []
         renderSuggestion(remainder)
     }
 
@@ -933,72 +860,31 @@ final class CompletionCoordinator {
         return emoji.isTrigger(prefix: prefix)
     }
 
-    // Ghost opacity — Shadowtype is free and unlimited, so suggestions always show at full opacity.
-    private func capOpacity() -> CGFloat? { WordCap.opacity() }
-
-    // Trigger when the prefix ends on a word char (completing a word) or a single
-    // trailing space (starting the next word). Avoid firing inside leading/trailing
-    // whitespace runs or on pure punctuation noise.
-    private func isMeaningfulBoundary(_ prefix: String) -> Bool {
-        guard let last = prefix.last else { return false }
-        if last.isLetter || last.isNumber { return true }
-        if last == " " {
-            // exactly one trailing space, preceded by a word char
-            let trimmed = prefix.dropLast()
-            if let prev = trimmed.last, !prev.isWhitespace { return true }
-        }
-        return false
-    }
-
-    // Enough signal to be worth a generation: at least `minPrefixChars` non-space chars, OR a
-    // completed word already exists in the prefix (a trailing space after a word counts).
-    private func hasUsefulContext(_ prefix: String) -> Bool {
-        let nonSpace = prefix.reduce(0) { $1.isWhitespace ? $0 : $0 + 1 }
-        if nonSpace >= minPrefixChars { return true }
-        // A single short token followed by a space still gives the model a word to continue from.
-        return prefix.contains(" ") && nonSpace >= 1
-    }
-
-    // Whether the focused field is an auto-idle context Shadowtype stays quiet in by default
-    // (terminals at a normal shell prompt, code-editor surfaces). Gathers the AX signals only for the
-    // managed app families so ordinary apps pay nothing; ActivationPolicy makes the pure decision.
-    private func shouldStayIdle(terminalText: String?) -> Bool {
-        let bundleId = context.frontmostBundleId
-        guard ActivationPolicy.isManaged(bundleId: bundleId) else { return false }
-        let heights = ActivationPolicy.isEditor(bundleId: bundleId) ? context.focusedFieldAndWindowHeights() : nil
-        let shellOptIn = ActivationPolicy.isTerminal(bundleId: bundleId)
-            && appSettings.resolve(\.shellCommands, forBundleId: bundleId, globalDefault: false)
-        return ActivationPolicy.isIdle(.init(bundleId: bundleId,
-                                             terminalText: terminalText,
-                                             fieldHeight: heights?.field,
-                                             windowHeight: heights?.window,
-                                             shellCommandsEnabled: shellOptIn))
-    }
-
     // MARK: - Generation (newest-wins, deadline-drop)
 
     // `postCaret` is the text following the caret for THIS fire (nil when the host's AX read can't see
     // past the caret, when nothing follows it, or in shell mode). It only reaches the prompt — never the
     // ghost — see assembledPrompt / postCaretBlock.
-    private func startGeneration(prefix: String, postCaret: String? = nil,
-                                 shellMode: Bool = false, terminalBuffer: String? = nil) {
+    func startGeneration(prefix: String, postCaret: String? = nil,
+                         shellMode: Bool = false, terminalBuffer: String? = nil) {
         let myGen = bumpGeneration()
-        activePrefix = prefix
-        generationShellMode = shellMode
-        generationRTL = TextDirectionDetector.isRightToLeft(prefix)   // #14: once per generation, not per token
+        generationSession.activePrefix = prefix
+        generationSession.focusSeq = currentFocusSnapshot?.focusSeq ?? context.focusChangeSequence
+        generationSession.shellMode = shellMode
+        generationSession.rtl = TextDirectionDetector.isRightToLeft(prefix)   // #14: once per generation, not per token
         glueGuardMemoKey = nil; glueGuardMemoResult = nil   // fresh prefix -> recompute the glue decision
         // #9: everything else that is a pure function of the (now fixed) prefix or of a caret the paused
         // user is not moving. Each of these ran on EVERY ~33 ms render tick: a full
         // NLLanguageRecognizer pass over the whole prefix, plus an AX caret-rect and an AX caret-font
         // round trip per frame.
         let declared = UserDefaults.standard.string(forKey: Self.personalizeLanguagesKey) ?? ""
-        generationLanguageConstraints = Self.parsePersonalizedLanguages(declared)
-        generationPrefixLang = Self.driftPrefixLanguage(
-            prefix, languageConstraints: generationLanguageConstraints)
+        generationSession.languageConstraints = Self.parsePersonalizedLanguages(declared)
+        generationSession.prefixLanguage = Self.driftPrefixLanguage(
+            prefix, languageConstraints: generationSession.languageConstraints)
         let caret = currentFocusSnapshot.flatMap { context.caretRectOnScreen(in: $0) }
             ?? context.caretRectOnScreen()
-        generationCaretRect = caret
-        generationFont = hostFont(caretHeight: (caret ?? .null).height)
+        generationSession.caretRect = caret
+        generationSession.font = hostFont(caretHeight: (caret ?? .null).height)
 
         // FR-CE-5 (KV reuse): the engine keeps its context warm across calls and diffs the
         // full prefix internally — when `prefix` strictly extends the previous one only the
@@ -1013,10 +899,21 @@ final class CompletionCoordinator {
         // so the captured-var box needs no extra locking.
         var gate = ConfidenceGate(firstTokenMinProb: Self.firstTokenMinProb,
                                   meanMinProb: Self.meanMinProb)
-        let deadlineWork = DispatchWorkItem { [weak self] in
+        let deadlineWork = generationSession.makeDeadlineWork(
+            generation: myGen,
+            firstTokenSeen: { firstTokenSeen }
+        ) { [weak self] in
             guard let self else { return }
-            if !firstTokenSeen && self.isCurrent(myGen) {
-                self.bumpGeneration()          // supersede the slow run
+            self.bumpGeneration()          // supersede the slow run
+            self.engine.requestCancel()
+            if Self.shouldPreserveHeldSuggestion(
+                isRefire: self.generationSession.inContextRefire,
+                visible: self.suggestionVisible,
+                text: self.ghostPresentation.suggestionText) {
+                self.generationSession.inContextRefire = false
+                self.generationSession.clearPendingStream()
+                Diag.log("gen: deadline expired -> kept held ghost")
+            } else {
                 self.clearSuggestion()
             }
         }
@@ -1042,16 +939,25 @@ final class CompletionCoordinator {
             promptPrefix = headTrimmed
             requiredPrefix = Array((trimmedWS + split.stem).utf8)
         }
-        generationIsHealed = (requiredPrefix != nil)
+        generationSession.isHealed = (requiredPrefix != nil)
 
-        // FR-CTX-1/2/3, FR-PA-3: assemble leading context, each block gated by isLicensed + its toggle,
-        // then the user's prefix as the forward-from-caret tail. Default Free -> effectivePrompt is the
+        // FR-CTX-1/2/3, FR-PA-3: assemble enabled leading context, then the user's prefix as the
+        // forward-from-caret tail. With context toggles off, effectivePrompt is the
         // prefix (anchor-windowed once it outgrows the budget), so KV reuse holds across a typing burst.
         // Shell mode swaps in the few-shot `$ command` framing
         // built from the terminal buffer (the OCR/style/clipboard context blocks don't apply there).
-        let effectivePrompt = shellMode
-            ? Self.assembleShellPrompt(prefix: promptPrefix, terminalBuffer: terminalBuffer)
-            : assembledPrompt(prefix: promptPrefix, postCaret: postCaret)
+        let preparedPrompt = shellMode
+            ? CompletionContextAssembler.PreparedPrompt(
+                prompt: Self.assembleShellPrompt(
+                    prefix: promptPrefix,
+                    terminalBuffer: terminalBuffer
+                ),
+                byteBudget: nil,
+                cacheKey: nil
+            )
+            : tokenizerBudgetedPrompt(prefix: promptPrefix, postCaret: postCaret)
+        var effectivePrompt = preparedPrompt.prompt
+        var effectivePromptByteBudget = preparedPrompt.byteBudget
         // Command-shaped sampling for shell mode: deterministic (temp 0.2), single line (stop at "\n",
         // useEngineStopPolicy=false → raw stream, no prose word/sentence caps). Same seq 0 for KV continuity.
         let genParams: SamplingParams = shellMode ? .commandDefaults : .ghostDefaults
@@ -1059,11 +965,16 @@ final class CompletionCoordinator {
 
         inferenceQueue.async { [weak self] in
             guard let self else { return }
+            // The request may expire or lose focus while queued behind another serial decode. Reject it
+            // before prefill so stale work cannot monopolize inference after its UI generation is dead.
+            guard self.isCurrent(myGen) else { return }
             var acc = ""
-            do {
-                try self.engine.generate(prompt: effectivePrompt, maxTokens: genMaxTokens,
-                                         seqID: 0, params: genParams,
-                                         requiredPrefix: requiredPrefix, onToken: { piece in
+            while true {
+                do {
+                    try self.engine.generate(prompt: effectivePrompt, maxTokens: genMaxTokens,
+                                             seqID: 0, params: genParams,
+                                             contextTokenCap: shellMode ? nil : self.engine.maxContextTokens,
+                                             requiredPrefix: requiredPrefix, onToken: { piece in
                     // Cooperative cancel: bail the instant a newer request supersedes us
                     // (FR-CE-4). Checked between every token and (in the engine) between
                     // prefill chunks.
@@ -1114,45 +1025,65 @@ final class CompletionCoordinator {
                         // so the re-fire never repaints in that case — the visible ghost stays.
                         // The hold flag is cleared on clearSuggestion()/cancel()/gen-done, NOT on
                         // stream divergence — divergent tokens just no-op until the gen ends.
-                        if self.inContextRefire {
-                            switch OverlayRefireDecision.decide(visible: self.suggestionText, snapshot: snapshot) {
+                        if self.generationSession.inContextRefire {
+                            switch self.ghostPresentation.refireDecision(for: snapshot) {
                             case .hold, .discard:
                                 return
                             case .renderExtension:
-                                break    // fall through to the render path; keep inContextRefire true
+                                break    // fall through to the render path; keep generationSession.inContextRefire true
                             }
                         }
                         // First token renders immediately so the ghost appears without delay; subsequent
                         // tokens are coalesced to ≤1 render per ~33 ms, killing per-token re-anchor
                         // jitter on fast local models without delaying the perceived first-appearance.
                         if isFirst {
-                            self.pendingStreamWork?.cancel()
-                            self.pendingStreamWork = nil
-                            self.pendingStreamSnapshot = nil
+                            self.generationSession.clearPendingStream()
                             self.renderSuggestion(snapshot)
                             return
                         }
-                        self.pendingStreamSnapshot = snapshot
-                        if self.pendingStreamWork == nil {
-                            let work = DispatchWorkItem { [weak self] in
-                                guard let self else { return }
-                                self.pendingStreamWork = nil
-                                guard let s = self.pendingStreamSnapshot else { return }
-                                self.pendingStreamSnapshot = nil
-                                guard self.isCurrent(myGen) else { return }
-                                self.renderSuggestion(s)
-                            }
-                            self.pendingStreamWork = work
-                            DispatchQueue.main.asyncAfter(deadline: .now() + self.streamCoalesceWindow, execute: work)
+                        self.generationSession.coalesce(
+                            snapshot: snapshot,
+                            generation: myGen
+                        ) { [weak self] pending in
+                            self?.renderSuggestion(pending)
                         }
                     }
-                    return !halt
-                }, onSample: { prob, isFirst in
-                    gate.record(prob: Double(prob), isFirst: isFirst)
-                })
-            } catch {
-                NSLog("Shadowtype: generate failed: \(error)")
-                Diag.log("gen: ERROR \(error)")
+                        return !halt
+                    }, onSample: { prob, isFirst in
+                        gate.record(prob: Double(prob), isFirst: isFirst)
+                    })
+                    if let key = preparedPrompt.cacheKey,
+                       let budget = effectivePromptByteBudget {
+                        self.storeTokenizerValidatedBudget(budget, for: key)
+                    }
+                    break
+                } catch InferenceError.contextOverflow(let tokenCount, let tokenCap) {
+                    guard !shellMode, self.isCurrent(myGen),
+                          let currentBudget = effectivePromptByteBudget,
+                          let nextBudget = PromptSectionBudget.nextByteBudget(
+                            current: currentBudget, tokenCount: tokenCount, tokenCap: tokenCap)
+                    else {
+                        NSLog("Shadowtype: generate failed: prompt tokenizer overflow")
+                        Diag.log("gen: ERROR tokenizer overflow tokens=\(tokenCount) cap=\(tokenCap)")
+                        break
+                    }
+                    effectivePromptByteBudget = nextBudget
+                    if let key = preparedPrompt.cacheKey, key.tokenCap == tokenCap {
+                        self.storeTokenizerValidatedBudget(nextBudget, for: key)
+                    }
+                    let rebuilt: String? = DispatchQueue.main.sync {
+                        guard self.isCurrent(myGen) else { return nil }
+                        return self.assembledPrompt(prefix: promptPrefix, postCaret: postCaret,
+                                                    totalChars: nextBudget)
+                    }
+                    guard let rebuilt else { break }
+                    effectivePrompt = rebuilt
+                    Diag.log("gen: tokenizer re-budget \(tokenCount)>\(tokenCap), bytes=\(nextBudget)")
+                } catch {
+                    NSLog("Shadowtype: generate failed: \(error)")
+                    Diag.log("gen: ERROR \(error)")
+                    break
+                }
             }
             let finalGate = gate
             DispatchQueue.main.async {
@@ -1161,13 +1092,10 @@ final class CompletionCoordinator {
                 // During a held re-fire we honour the same monotonic rule the per-token branch uses:
                 // commit only if the coalesced snapshot strictly extends the visible ghost; hold or
                 // discard otherwise. (Outside a re-fire, render normally as before.)
-                if let s = self.pendingStreamSnapshot {
-                    self.pendingStreamWork?.cancel()
-                    self.pendingStreamWork = nil
-                    self.pendingStreamSnapshot = nil
+                if let s = self.generationSession.takePendingStream() {
                     if self.isCurrent(myGen) {
-                        if self.inContextRefire {
-                            if case .renderExtension = OverlayRefireDecision.decide(visible: self.suggestionText, snapshot: s) {
+                        if self.generationSession.inContextRefire {
+                            if case .renderExtension = self.ghostPresentation.refireDecision(for: s) {
                                 self.renderSuggestion(s)
                             }
                         } else {
@@ -1180,10 +1108,10 @@ final class CompletionCoordinator {
                 // silently discarded so the visible ghost stays untouched — replacing it would be
                 // the very mid-pause flicker the gate exists to kill. The identical-text case is
                 // a no-op here (decide returns .hold for equal strings).
-                let heldRefire = self.inContextRefire
-                self.inContextRefire = false
+                let heldRefire = self.generationSession.inContextRefire
+                self.generationSession.inContextRefire = false
                 if heldRefire, self.isCurrent(myGen), !acc.isEmpty {
-                    if case .renderExtension = OverlayRefireDecision.decide(visible: self.suggestionText, snapshot: acc) {
+                    if case .renderExtension = self.ghostPresentation.refireDecision(for: acc) {
                         self.renderSuggestion(acc)
                     } else {
                         Diag.log("gen: refire divergent -> discard (kept visible ghost)")
@@ -1194,8 +1122,21 @@ final class CompletionCoordinator {
                 // and by the time this runs the first-token render always has — it was dead code. The
                 // mean gate now runs per token inside onToken above, where it can still stop the decode.
                 // If the stream produced nothing and is still current, hide.
-                if self.isCurrent(myGen) && acc.isEmpty { Diag.log("gen: produced nothing (deadline/EOG)"); self.clearSuggestion() }
-                else if self.isCurrent(myGen) { Diag.log("gen: done len=\(acc.count) mean=\(finalGate.meanProbString)"); Diag.logContent("gen: done acc=\"\(acc.prefix(40))\"") }
+                if self.isCurrent(myGen) && acc.isEmpty {
+                    Diag.log("gen: produced nothing (deadline/EOG)")
+                    if !Self.shouldPreserveHeldSuggestion(
+                        isRefire: heldRefire,
+                        visible: self.suggestionVisible,
+                        text: self.ghostPresentation.suggestionText) {
+                        self.clearSuggestion()
+                    }
+                } else if self.isCurrent(myGen) {
+                    Diag.log("gen: done len=\(acc.count) mean=\(finalGate.meanProbString)")
+                    Diag.logContent("gen: done acc=\"\(acc.prefix(40))\"")
+                }
+                if self.isCurrent(myGen), !heldRefire {
+                    self.maybeNoteSmartComposeOverlap(forGeneration: myGen)
+                }
             }
         }
     }
@@ -1216,8 +1157,12 @@ final class CompletionCoordinator {
         // switch (the capture below + on the first keystroke repopulates it for THIS window). Done before
         // the prefix guard so it also resets when focusing an empty field. fire() then holds the first
         // guess until this focus's capture lands (see the .pending gate in fire()/refreshOCRContextIfEnabled).
-        if useScreenOCR { storeOCRCache(nil); ocrCaptureState = .idle }
-        pendingWarm = nil
+        if useScreenOCR {
+            screenContext?.focusDidChange()
+            storeOCRCache(nil)
+            contextAssembler.captureState = .idle
+        }
+        contextAssembler.pendingWarm = nil
 
         guard let prefix = context.currentPrefix(), !prefix.isEmpty else { return }
         // Same post-caret text the first real fire will assemble into the prompt (see postCaretBlock).
@@ -1235,7 +1180,7 @@ final class CompletionCoordinator {
         // (warm KV) and its sort stays off the per-keystroke path.
         refreshStyleHintIfEnabled()
 
-        // #11: the OCR branch of refreshOCRContextIfEnabled is ASYNCHRONOUS — it returns with `ocrCache`
+        // #11: the OCR branch of refreshOCRContextIfEnabled is ASYNCHRONOUS — it returns with `contextAssembler.cachedOCR`
         // still nil and lands the capture milliseconds later. Warming here anyway (what this used to do,
         // under a comment claiming it assembled "exactly as startGeneration does") prefilled
         // `Text:\n<prefix>` while the first real fire assembles `Context:\n<ocr>…Text:\n<prefix>`: the two
@@ -1243,9 +1188,9 @@ final class CompletionCoordinator {
         // the serial inferenceQueue, the first real generation then queued behind a cold prefill it could
         // not use. So warm only once the capture has landed; the capture's completion flushes this.
         // The AX page-text branch is synchronous and has already set .ready, so browsers warm right away.
-        if useScreenOCR, ocrCaptureState == .pending {
+        if useScreenOCR, contextAssembler.captureState == .pending {
             Diag.log("warm: deferred (OCR capture pending)")
-            pendingWarm = (prefix, postCaret)
+            contextAssembler.pendingWarm = (prefix, postCaret)
             return
         }
         warmAssembledPrompt(prefix: prefix, postCaret: postCaret)
@@ -1271,8 +1216,8 @@ final class CompletionCoordinator {
     // Run the focus warm that was deferred behind this focus's first capture (#11). No-op unless one is
     // pending; cancel() drops it, so a keystroke or focus change that arrived first wins.
     private func flushPendingWarm() {
-        guard let pending = pendingWarm else { return }
-        pendingWarm = nil
+        guard let pending = contextAssembler.pendingWarm else { return }
+        contextAssembler.pendingWarm = nil
         Diag.log("warm: capture landed -> warming deferred prefill")
         warmAssembledPrompt(prefix: pending.prefix, postCaret: pending.postCaret)
     }
@@ -1349,12 +1294,13 @@ final class CompletionCoordinator {
     // FR-EM-1: when the live suggestion is an emoji, insert the emoji (replacing the typed shortcode
     // run) and count 0 words — emojis never touch the WordMeter.
     func acceptWord() -> Int {
-        if let fix = correctionSuggestion { return acceptCorrection(fix) }
-        if let emoji = emojiSuggestion { return acceptEmoji(emoji) }
-        guard suggestionVisible, !suggestionText.isEmpty else { return 0 }
-        let word = nextWord(from: suggestionText)
+        if let fix = ghostPresentation.correctionSuggestion { return acceptCorrection(fix) }
+        if let emoji = ghostPresentation.emojiSuggestion { return acceptEmoji(emoji) }
+        guard suggestionVisible, !ghostPresentation.suggestionText.isEmpty else { return 0 }
+        guard let target = acceptanceTarget() else { return 0 }
+        let word = SuggestionAcceptor.nextWord(from: ghostPresentation.suggestionText)
         guard !word.isEmpty else { return 0 }
-        let injected = inject(word)
+        let injected = inject(word, into: target)
         guard injected else { return 0 }
         countAcceptanceOnce()
 
@@ -1367,7 +1313,7 @@ final class CompletionCoordinator {
 
         // Advance the displayed suggestion past the accepted word so the remainder stays
         // ghosted (it now sits after the freshly-typed text).
-        let remainder = String(suggestionText.dropFirst(word.count))
+        let remainder = String(ghostPresentation.suggestionText.dropFirst(word.count))
         if remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             clearSuggestion()
         } else {
@@ -1387,17 +1333,13 @@ final class CompletionCoordinator {
 
     // Inject the whole current line of the suggestion (up to the first newline).
     func acceptLine() -> Int {
-        if let fix = correctionSuggestion { return acceptCorrection(fix) }
-        if let emoji = emojiSuggestion { return acceptEmoji(emoji) }
-        guard suggestionVisible, !suggestionText.isEmpty else { return 0 }
-        let line: String
-        if let nl = suggestionText.firstIndex(of: "\n") {
-            line = String(suggestionText[..<nl])
-        } else {
-            line = suggestionText
-        }
+        if let fix = ghostPresentation.correctionSuggestion { return acceptCorrection(fix) }
+        if let emoji = ghostPresentation.emojiSuggestion { return acceptEmoji(emoji) }
+        guard suggestionVisible, !ghostPresentation.suggestionText.isEmpty else { return 0 }
+        guard let target = acceptanceTarget() else { return 0 }
+        let line = SuggestionAcceptor.firstLine(from: ghostPresentation.suggestionText)
         guard !line.isEmpty else { return 0 }
-        guard inject(line) else { return 0 }
+        guard inject(line, into: target) else { return 0 }
         countAcceptanceOnce()
         // Supersede any in-flight generation before clearing, so a late token can't re-show the
         // just-accepted line (which a stray Tab could then re-inject).
@@ -1411,18 +1353,18 @@ final class CompletionCoordinator {
     // Local acceptance-rate counter (Statistics only): count the currently-shown completion as accepted
     // exactly once, even when the user Tab-accepts it word-by-word. Reset when the next ghost is shown.
     private func countAcceptanceOnce() {
-        guard !currentSuggestionAccepted else { return }
-        currentSuggestionAccepted = true
+        guard !ghostPresentation.currentSuggestionAccepted else { return }
+        ghostPresentation.currentSuggestionAccepted = true
         wordMeter?.recordSuggestionAccepted()
         // Count distinct accepted suggestions toward retiring the Tab hint (stop writing once retired).
         if tabHintAcceptCount < tabHintThreshold { tabHintAcceptCount += 1 }
     }
 
-    // FR-CTX-3 (paid): fold a genuine accepted phrasing into the on-device style profile. Gated behind
-    // isLicensed && styleProfileEnabled. Skips empty/whitespace accepts (consistent with the 0-word
+    // FR-CTX-3: fold a genuine accepted phrasing into the on-device style profile when enabled.
+    // Skips empty/whitespace accepts (consistent with the 0-word
     // emoji/correction paths, which never reach here). StyleProfile itself ignores >12-word pastes.
     private func recordStyle(_ text: String) {
-        guard isLicensed, styleProfileEnabled, let styleProfile else { return }
+        guard styleProfileEnabled, let styleProfile else { return }
         let bundleId = context.frontmostBundleId
         // Per-app "Collect inputs for personalization": global learning is already on (styleProfileEnabled),
         // so an app contributes unless the user set its tri-state to Off.
@@ -1435,20 +1377,30 @@ final class CompletionCoordinator {
     // FR-IN-2/3: prefer the direct-AX insert into the live focused element (atomic, no synthetic
     // events); the Injector falls back to Unicode typing when AX writes are refused (many
     // Electron/Chromium fields) or no element is focused. Returns true on success.
-    private func inject(_ text: String) -> Bool {
-        guard let injector else { return false }
-        return injector.inject(text, into: context.focusedElement())
+    private func inject(_ text: String, into target: AXUIElement) -> Bool {
+        SuggestionAcceptor(injector: injector, context: context).inject(text, into: target)
     }
 
-    // First word of `text` including its leading whitespace, so injection preserves spacing
-    // (e.g. " world" stays separated from the prior token).
-    private func nextWord(from text: String) -> String {
-        var idx = text.startIndex
-        // consume leading whitespace
-        while idx < text.endIndex, text[idx].isWhitespace { idx = text.index(after: idx) }
-        // consume the word body
-        while idx < text.endIndex, !text[idx].isWhitespace { idx = text.index(after: idx) }
-        return String(text[text.startIndex..<idx])
+    // Strictly re-resolve the live injection target before comparing focus sequences. The strict read
+    // itself advances EditContextTracker's sequence if Tab observes a same-app A→B move before the AX
+    // focus notification, closing the stale-visible-ghost race without a cached-element fallback.
+    private func acceptanceTarget() -> AXUIElement? {
+        SuggestionAcceptor(injector: injector, context: context).acceptanceTarget(
+            suggestionFocusSeq: ghostPresentation.suggestionFocusSeq
+        ) {
+            Diag.log("accept: stale or unresolved focus -> reject")
+            bumpGeneration()
+            engine.requestCancel()
+            clearSuggestion()
+        }
+    }
+
+    static func focusLatchMatches(_ suggestionFocusSeq: UInt64?, current: UInt64) -> Bool {
+        suggestionFocusSeq == current
+    }
+
+    static func shouldPreserveHeldSuggestion(isRefire: Bool, visible: Bool, text: String) -> Bool {
+        isRefire && visible && !text.isEmpty
     }
 
     // MARK: - Overlay (main only)
@@ -1461,7 +1413,7 @@ final class CompletionCoordinator {
     // (FR-OV-4). Native AX injection moves the caret synchronously, so when the live caret HAS advanced
     // past the old anchor we trust the real read (handles wraps/scroll the prediction can't).
     private func remainderAnchor(after word: String) -> CGRect? {
-        guard let base = lastRenderedOverlay?.caretRect, !base.isNull else {
+        guard let base = ghostPresentation.lastRendered?.caretRect, !base.isNull else {
             return context.caretRectOnScreen()
         }
         // Native AX insert advances the caret SYNCHRONOUSLY, so the live read is already correct. Web/
@@ -1478,7 +1430,7 @@ final class CompletionCoordinator {
         let font = hostFont(caretHeight: base.height)
             ?? NSFont.systemFont(ofSize: max(11, base.height > 0 ? base.height / 1.17 : 13))
         let advance = (word as NSString).size(withAttributes: [.font: font]).width
-        let x = base.minX + (generationRTL ? -advance : advance)
+        let x = base.minX + (generationSession.rtl ? -advance : advance)
         Diag.log("remainderAnchor: synthetic=\(synthetic) base=\(Int(base.minX)) adv=\(Int(advance)) -> x=\(Int(x))")
         return CGRect(x: x, y: base.minY, width: 0, height: base.height)
     }
@@ -1490,7 +1442,7 @@ final class CompletionCoordinator {
     // context re-fire counts as committed too — the visible ghost there belongs to a deliberately held
     // earlier generation the re-fire is contractually forbidden to replace.
     private func rejectRender(_ reason: String) {
-        if (generationCommitted || inContextRefire), suggestionVisible, !suggestionText.isEmpty {
+        if (generationSession.committed || generationSession.inContextRefire), suggestionVisible, !ghostPresentation.suggestionText.isEmpty {
             Diag.log("render: \(reason) -> stop (kept visible ghost)")
             return
         }
@@ -1499,23 +1451,28 @@ final class CompletionCoordinator {
     }
 
     private func renderSuggestion(_ rawText: String, checkPrefixDup: Bool = true, caretOverride: CGRect? = nil) {
+        guard let focusSeq = generationSession.focusSeq,
+              Self.focusLatchMatches(focusSeq, current: context.focusChangeSequence) else {
+            Diag.log("render: stale focus -> discard")
+            return
+        }
         // Rising edge: a fresh completion (not the streamed re-render of a growing ghost, nor the
         // remainder re-render after a word accept — both keep the ghost already-visible). Drives the
         // local acceptance-rate counter and resets the "already accepted" flag for the new suggestion.
         let wasVisible = suggestionVisible
         // Strip cosmetic markup the base (pretrained) model leaks from its web/Markdown training
         // (`<strong>`, `<code>`, `**`, backticks). Done ONCE here so the displayed ghost and the
-        // text that Tab/⌥Tab inject (both read `suggestionText`) stay identical. Idempotent, so the
+        // text that Tab/⌥Tab inject (both read `ghostPresentation.suggestionText`) stay identical. Idempotent, so the
         // re-render of the remainder after an accept is a no-op.
         var text: String
-        if generationShellMode {
+        if generationSession.shellMode {
             // Shell-command mode: bypass EVERY prose transform — markup strip (backticks = command
             // substitution), list-marker strip (leading `-` = flag), glue/leading-space reconcile, and the
             // language guards all corrupt shell syntax. Keep exactly one line, then apply the destructive-
             // command guard on the JOINED command (the typed command with the prompt chrome stripped, plus
             // the suggestion) so a split `rm -rf ` + `/` is still caught.
             text = Self.truncatedAtNewline(rawText)
-            let fullCommand = Self.shellTypedCommand(activePrefix) + text
+            let fullCommand = Self.shellTypedCommand(generationSession.activePrefix) + text
             // The ONE reject that keeps the right to retract a committed ghost. Every other filter here
             // is a quality judgement whose worst case is a slightly worse suggestion, so it defers to the
             // no-flicker rule; this one is a safety judgement whose worst case is irreversible (`rm -rf `
@@ -1532,54 +1489,55 @@ final class CompletionCoordinator {
         } else {
         text = Self.truncatedAtParagraphBreak(
             Self.strippingLeadingListMarker(Self.sanitizedSuggestion(rawText)))
-        // The prefix-relative transforms assume `text` is a FRESH continuation of `activePrefix`. They
+        // The prefix-relative transforms assume `text` is a FRESH continuation of `generationSession.activePrefix`. They
         // must NOT run on a Tier-2a healed generation (the engine already regenerated the typed word from
         // a clean boundary and stripped the reproduced stem, so `text` is the final word-completion tail —
         // reconciling a leading space would turn "at" into " at") nor on the post-accept remainder
         // re-render (checkPrefixDup:false; already spaced, stale prefix).
-        let prefixTransforms = checkPrefixDup && !generationIsHealed
+        let prefixTransforms = checkPrefixDup && !generationSession.isHealed
         // Reconcile the model's leading separator space with the live prefix so Tab-accept inserts a
         // proper word break. Drop a spurious mid-word glue fragment ("...pot" + "er fer..." -> "poter"):
         // a no-leading-space first token that extends an already-complete word into a non-word — now the
         // common case healing handles directly, so this is the fallback for non-healed continuations.
-        if prefixTransforms { text = applyGlueGuard(text, prefix: activePrefix) }
-        if prefixTransforms { text = Self.reconcileLeadingSpace(suggestion: text, prefix: activePrefix) }
+        if prefixTransforms { text = applyGlueGuard(text, prefix: generationSession.activePrefix) }
+        if prefixTransforms { text = Self.reconcileLeadingSpace(suggestion: text, prefix: generationSession.activePrefix) }
         guard !text.isEmpty, !Self.isLowValueSuggestion(text) else {
             rejectRender("low-value"); return
         }
         // Suppress a completion that just loops back over text already typed ("thanks for " +
         // "for reading" -> stutter on inject). Skipped on the accept-remainder re-render, whose
-        // `activePrefix` is stale (the accepted word isn't folded into it).
-        if prefixTransforms, Self.isPrefixDuplicate(suggestion: text, prefix: activePrefix) {
+        // `generationSession.activePrefix` is stale (the accepted word isn't folded into it).
+        if prefixTransforms, Self.isPrefixDuplicate(suggestion: text, prefix: generationSession.activePrefix) {
             rejectRender("prefix-duplicate"); return
         }
         // Language safety is skipped only on the stale accept-remainder re-render. Unlike the text
         // transforms above, it stays active for healed generations: healing changes token alignment,
         // not whether a confidently wrong-language completion is safe to show.
         if let reason = Self.languageRejectionReason(
-            checkPrefixDup: checkPrefixDup, generationIsHealed: generationIsHealed,
-            prefixLanguage: generationPrefixLang, suggestion: text, contextLang: generationContextLang,
-            languageConstraints: generationLanguageConstraints
+            checkPrefixDup: checkPrefixDup, generationIsHealed: generationSession.isHealed,
+            prefixLanguage: generationSession.prefixLanguage, suggestion: text, contextLang: generationSession.contextLanguage,
+            languageConstraints: generationSession.languageConstraints
         ) {
             rejectRender(reason); return
         }
         }
         // Drop leading newlines (the model often "ends" the line then starts a template) and require
         // at least one printable char — otherwise the ghost would render as invisible whitespace.
-        let display = String(text.drop(while: { $0 == "\n" || $0 == "\r" }))
+        let display = Self.normalizedPresentationPayload(text)
         guard display.contains(where: { !$0.isWhitespace }) else {
             rejectRender("blank/whitespace-only"); return
         }
-        let opacity = capOpacity() ?? 1
-        suggestionText = text
+        let opacity: CGFloat = 1
+        ghostPresentation.suggestionText = display
+        ghostPresentation.suggestionFocusSeq = focusSeq
         // FR-OV-3/6: anchor at the live caret; OverlayRenderer falls back to a chip if nil. A word-accept
         // remainder re-render passes a predicted anchor (see remainderAnchor) because the live caret is
         // stale until an async synthetic-injection host applies the keystrokes.
-        // #9: `generationCaretRect` is the caret resolved once for this generation. The user is paused
-        // and `activePrefix` is fixed, so it cannot move between the ~30 render ticks of one stream —
+        // #9: `generationSession.caretRect` is the caret resolved once for this generation. The user is paused
+        // and `generationSession.activePrefix` is fixed, so it cannot move between the ~30 render ticks of one stream —
         // re-reading it per tick was an AX round trip a frame. nil (emoji/correction/shell-history
         // ghosts) still reads live.
-        let caret = caretOverride ?? generationCaretRect ?? (context.caretRectOnScreen() ?? .null)
+        let caret = caretOverride ?? generationSession.caretRect ?? (context.caretRectOnScreen() ?? .null)
         let caretDesc = caret.isNull ? "null" : "\(Int(caret.minX)),\(Int(caret.minY))"
         Diag.log("render: show len=\(display.count) caret=\(caretDesc)")
         Diag.logContent("render: show \"\(display.prefix(40))\"")
@@ -1590,32 +1548,42 @@ final class CompletionCoordinator {
         // on a real change. #11: anchor the ghost left of the caret in a right-to-left field.
         // Same hoist for the host font (#9): a second AX round trip per tick for a value that is fixed
         // while the field, the caret and the generation are.
-        let font = generationFont ?? hostFont(caretHeight: caret.height)
+        let font = generationSession.font ?? hostFont(caretHeight: caret.height)
         let candidate = OverlayStabilityGate.Rendered(
-            text: display, caretRect: caret, focusSeq: context.focusChangeSequence,
-            opacity: opacity, rtl: generationRTL, fontKey: OverlayStabilityGate.fontKey(font))
-        if OverlayStabilityGate.shouldRePresent(last: lastRenderedOverlay, candidate: candidate) {
+            text: display, caretRect: caret, focusSeq: focusSeq,
+            opacity: opacity, rtl: generationSession.rtl, fontKey: OverlayStabilityGate.fontKey(font))
+        if ghostPresentation.shouldPresent(candidate) {
             // FR-OV-4: match the host text size so the ghost reads as part of the field.
-            emit(text: display, at: caret, font: font, opacity: opacity, rtl: generationRTL)
-            lastRenderedOverlay = candidate
+            if emit(text: display, at: caret, font: font, opacity: opacity, rtl: generationSession.rtl) {
+                // emit() returns true for an actual draw or an exactly presentation-equivalent one.
+                ghostPresentation.lastRendered = candidate
+            }
         } else {
             Diag.log("render: hold overlay geometry (stable)")
         }
         if !wasVisible {
-            currentSuggestionAccepted = false
+            ghostPresentation.currentSuggestionAccepted = false
             wordMeter?.recordSuggestionShown()
         }
         suggestionVisible = true
-        generationCommitted = true
-        // Cotypist-pattern coexistence nudge for Gmail's Smart Compose. Gated by the per-session/
-        // dismiss pre-gate before any AX read so the steady state (already prompted or dismissed) is
-        // free. See SmartComposeNudge for the detection heuristic.
-        maybeNoteSmartComposeOverlap()
+        generationSession.committed = true
     }
 
-    // Smart Compose detection — runs on a SUCCESSFUL render only (the ghost actually went up). Mirrors
-    // the AXNudge pre-gate flow: cheap pre-checks before the AX value read, threshold-driven post.
-    private func maybeNoteSmartComposeOverlap() {
+    // One stored payload feeds both the overlay and every acceptance path. Leading line breaks that are
+    // not drawn and characters beyond the renderer's cap therefore cannot be injected invisibly.
+    static func normalizedPresentationPayload(_ text: String) -> String {
+        GhostPresentationController.normalizedPayload(text)
+    }
+
+    // Smart Compose detection runs once after a generation's final stable payload, never once per
+    // streamed frame. This keeps one suggestion from satisfying a multi-suggestion threshold and avoids
+    // repeated synchronous AX value reads during rendering.
+    private func maybeNoteSmartComposeOverlap(forGeneration generation: Int) {
+        guard Self.shouldProbeSmartCompose(
+            lastProbedGeneration: generationSession.lastSmartComposeProbeGeneration,
+            generation: generation) else { return }
+        guard isCurrent(generation), suggestionVisible, ghostPresentation.overlayPresented else { return }
+        generationSession.lastSmartComposeProbeGeneration = generation
         guard smartComposeNudgeEnabled else { return }
         guard SmartComposeNudgeStore.shared.mayStillPrompt() else { return }
         // Host comes from the fire()-time snapshot when it is still current (#9) — this runs on every
@@ -1624,8 +1592,8 @@ final class CompletionCoordinator {
               SmartComposeNudge.isApplicableHost(host) else { return }
         let fieldValue = context.focusedElementText()
         if SmartComposeNudge.detectsOverlap(fieldValue: fieldValue,
-                                            prefix: activePrefix,
-                                            suggestion: suggestionText) {
+                                            prefix: generationSession.activePrefix,
+                                            suggestion: ghostPresentation.suggestionText) {
             if SmartComposeNudgeStore.shared.noteOverlap() {
                 Diag.log("smartCompose: nudge fired (consecutive overlap threshold reached)")
                 NotificationCenter.default.post(name: .shadowtypeShowSmartComposeNudge, object: nil)
@@ -1633,6 +1601,10 @@ final class CompletionCoordinator {
         } else {
             SmartComposeNudgeStore.shared.noteNoOverlap()
         }
+    }
+
+    static func shouldProbeSmartCompose(lastProbedGeneration: Int?, generation: Int) -> Bool {
+        lastProbedGeneration != generation
     }
 
     // The host text font for the ghost (FR-OV-4): the exact AX font at the caret when the app exposes
@@ -1648,7 +1620,7 @@ final class CompletionCoordinator {
         }
         // #1: floor the caret height to the smallest seen this focus session before deriving the size,
         // so a single AX poll that returns the coarse full-field-height fallback can't size a giant ghost.
-        let stableHeight = ghostFontStabilizer.stabilizedCaretHeight(caretHeight,
+        let stableHeight = ghostPresentation.fontStabilizer.stabilizedCaretHeight(caretHeight,
                                                                      focusSessionKey: context.focusChangeSequence)
         guard let base = Self.ghostFontSize(caretHeight: stableHeight) else {
             Diag.log("font: none (caretH=\(Int(caretHeight))) -> overlay default")
@@ -1689,65 +1661,50 @@ final class CompletionCoordinator {
     // width of the mistyped `run`, so the fix previews IN PLACE over the typo instead of appended after
     // the caret (which would read as "tehthe"). Pure (NSString sizing is window-server-independent).
     static func correctionGhostMinX(caretMinX: CGFloat, run: String, font: NSFont?) -> CGFloat {
-        let f = font ?? NSFont.systemFont(ofSize: 13)
-        let width = (run as NSString).size(withAttributes: [.font: f]).width
-        return caretMinX - width
+        GhostPresentationController.correctionGhostMinX(
+            caretMinX: caretMinX,
+            run: run,
+            font: font
+        )
     }
 
     private func clearSuggestion() {
-        suggestionText = ""
-        emojiSuggestion = nil
-        emojiQueryLength = 0
-        correctionSuggestion = nil
-        correctionRun = nil
-        overlay.hide()
-        overlayPresented = false    // nothing on screen now → next emit() must actually show
-        untrackOverlay()            // #2: next show re-anchors from scratch
-        // Drop the emit-dedup record so a user-initiated clear+retype of the same text still shows.
-        // Skipped during a context re-fire (the whole point of the re-fire is to suppress the
-        // identical re-show — clearing here would defeat that across the cancel→fire boundary).
-        if !inContextRefire { lastEmitState = nil }
+        ghostPresentation.clear(preserveEmitState: generationSession.inContextRefire)
         // The hold flag is single-shot: any explicit clear during/after a re-fire (deadline-drop,
         // confidence reject, fire() early-out from a guard) must end the hold so the next genuine
         // emission isn't suppressed by stale state. The gen-done handler also clears it on success.
-        inContextRefire = false
+        generationSession.inContextRefire = false
         // Any coalesced token render queued for the now-gone ghost is moot — drop it.
-        pendingStreamWork?.cancel()
-        pendingStreamWork = nil
-        pendingStreamSnapshot = nil
+        generationSession.clearPendingStream()
         suggestionVisible = false   // didSet notifies the Tab swallow only on transition
-        generationCommitted = false // nothing on screen → the next reject may hide freely
+        generationSession.committed = false // nothing on screen → the next reject may hide freely
         // The hoisted per-generation geometry/language belong to the ghost that just went away (#9);
         // the next show must resolve its own rather than paint at a dead caret.
-        generationCaretRect = nil
-        generationFont = nil
-        generationPrefixLang = nil
-        generationLanguageConstraints = []
+        generationSession.caretRect = nil
+        generationSession.font = nil
+        generationSession.prefixLanguage = nil
+        generationSession.languageConstraints = []
+        generationSession.focusSeq = nil
     }
 
     // MARK: - Host font watch (FR-OV-4)
 
     private func startFontWatch() {
-        guard fontWatchMonitor == nil else { return }
-        fontWatchMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] _ in
-            // The host applies the new font a beat after the click lands; let AX settle, then re-read.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-                self?.revalidateHostFont()
-            }
+        ghostPresentation.startFontWatch { [weak self] in
+            self?.revalidateHostFont()
         }
     }
 
     private func stopFontWatch() {
-        if let m = fontWatchMonitor { NSEvent.removeMonitor(m) }
-        fontWatchMonitor = nil
+        ghostPresentation.stopFontWatch()
     }
 
     // Re-read the host font for the visible completion ghost; re-render in place only if it changed.
     // No regeneration — same text, same focus session — so it cannot churn or shift the suggestion.
-    // Scope: only the gate-tracked completion ghost (lastRenderedOverlay != nil). Emoji/correction
+    // Scope: only the gate-tracked completion ghost (ghostPresentation.lastRendered != nil). Emoji/correction
     // ghosts untrack themselves, so they're skipped here.
     private func revalidateHostFont() {
-        guard suggestionVisible, let last = lastRenderedOverlay, !last.text.isEmpty else { return }
+        guard suggestionVisible, let last = ghostPresentation.lastRendered, !last.text.isEmpty else { return }
         guard context.focusChangeSequence == last.focusSeq else { return }
         let caret = context.caretRectOnScreen() ?? last.caretRect
         let font = hostFont(caretHeight: caret.height)
@@ -1756,12 +1713,18 @@ final class CompletionCoordinator {
         Diag.log("font: host font changed while visible -> re-render (\(last.fontKey ?? "default") -> \(newKey ?? "default"))")
         // Keep the per-generation hoist in step, or a later coalesced render tick would repaint with the
         // stale font this call just replaced (#9).
-        generationFont = font
+        generationSession.font = font
         // Bypass emit()'s identical-text dedup: the text is unchanged by design, so emit() would drop
         // this deliberate in-place re-font. Drive overlay.show directly and resync the gate snapshot.
-        overlay.show(text: last.text, at: caret, font: font, opacity: last.opacity, rtl: last.rtl,
-                     showHint: tabHintActive)
-        lastRenderedOverlay = OverlayStabilityGate.Rendered(
+        ghostPresentation.showDirect(
+            text: last.text,
+            at: caret,
+            font: font,
+            opacity: last.opacity,
+            rtl: last.rtl,
+            showHint: tabHintActive
+        )
+        ghostPresentation.lastRendered = OverlayStabilityGate.Rendered(
             text: last.text, caretRect: caret, focusSeq: last.focusSeq,
             opacity: last.opacity, rtl: last.rtl, fontKey: newKey)
     }
@@ -1770,7 +1733,7 @@ final class CompletionCoordinator {
     // all bypass the gate, so they must drop the last-rendered snapshot or the next completion render
     // could wrongly HOLD a stale frame (#12). Centralized so no show-path can forget it.
     private func untrackOverlay() {
-        lastRenderedOverlay = nil
+        ghostPresentation.untrackOverlay()
     }
 
     // Single funnel for every overlay.show() in the file. Catches an identical re-emission on the same
@@ -1780,30 +1743,42 @@ final class CompletionCoordinator {
     // and persists across clearSuggestion()/untrackOverlay() so the gate's reset can't defeat it.
     @discardableResult
     private func emit(text: String, at caret: CGRect, font: NSFont?, opacity: CGFloat, rtl: Bool) -> Bool {
-        let focusSeq = context.focusChangeSequence
-        let now = ProcessInfo.processInfo.systemUptime
-        // Drop a duplicate re-show ONLY while that ghost is still on screen (overlayPresented). The dedup
-        // record is kept across a re-fire's clearSuggestion() — without the presence gate it could suppress
-        // a show with nothing visible, leaving suggestionVisible=true over an empty field (phantom accept).
-        if OverlayEmitDedup.shouldDrop(last: lastEmitState, text: text, focusSeq: focusSeq, now: now,
-                                       presented: overlayPresented) {
-            Diag.log("emit: dedup identical within window len=\(text.count)")
-            return false
-        }
-        overlay.show(text: text, at: caret, font: font, opacity: opacity, rtl: rtl, showHint: tabHintActive)
-        overlayPresented = true
-        lastEmitState = OverlayEmitDedup.State(text: text, focusSeq: focusSeq, emittedAt: now)
-        return true
+        ghostPresentation.emit(
+            text: text,
+            at: caret,
+            font: font,
+            opacity: opacity,
+            rtl: rtl,
+            showHint: tabHintActive,
+            focusSeq: context.focusChangeSequence,
+            now: ProcessInfo.processInfo.systemUptime
+        )
+    }
+
+    // Text-only emit dedup is insufficient: a stability-approved caret/font/opacity/RTL/hint change is a
+    // real presentation update even when the string is unchanged. Keep the independent dedup gate, but
+    // key it on the complete presentation reaching OverlayRenderer.
+    static func presentationFingerprint(text: String, caret: CGRect, font: NSFont?,
+                                        opacity: CGFloat, rtl: Bool, showHint: Bool) -> String {
+        GhostPresentationController.presentationFingerprint(
+            text: text,
+            caret: caret,
+            font: font,
+            opacity: opacity,
+            rtl: rtl,
+            showHint: showHint
+        )
     }
 
     // MARK: - Emoji mode (FR-EM-1)
 
     // Show `emoji` as the ghost; remember the typed `:shortcode` run length so accept can delete it.
     private func showEmoji(_ emoji: String, queryLength: Int) {
-        let opacity = capOpacity() ?? 1
-        emojiSuggestion = emoji
-        emojiQueryLength = queryLength
-        suggestionText = emoji
+        let opacity: CGFloat = 1
+        ghostPresentation.emojiSuggestion = emoji
+        ghostPresentation.emojiQueryLength = queryLength
+        ghostPresentation.suggestionText = emoji
+        ghostPresentation.suggestionFocusSeq = context.focusChangeSequence
         let caret = context.caretRectOnScreen() ?? .null
         emit(text: emoji, at: caret, font: hostFont(caretHeight: caret.height), opacity: opacity, rtl: false)
         untrackOverlay()                // emoji ghost isn't tracked by the stability gate
@@ -1811,16 +1786,20 @@ final class CompletionCoordinator {
     }
 
     // Replace the typed `:shortcode` run with the emoji via the Injector's atomic before-caret replace.
-    // Counts 0 words (FR-EM-1). Shortcodes are ASCII, so utf16 == keystroke count == emojiQueryLength.
+    // Counts 0 words (FR-EM-1). Shortcodes are ASCII, so utf16 == keystroke count == ghostPresentation.emojiQueryLength.
     private func acceptEmoji(_ emoji: String) -> Int {
-        guard let injector else { return 0 }
-        guard injector.replaceBeforeCaret(utf16Length: emojiQueryLength, keystrokeCount: emojiQueryLength,
-                                          with: emoji, in: context.focusedElement()) else { return 0 }
+        guard let target = acceptanceTarget() else { return 0 }
+        guard SuggestionAcceptor(injector: injector, context: context).replaceBeforeCaret(
+            utf16Length: ghostPresentation.emojiQueryLength,
+            keystrokeCount: ghostPresentation.emojiQueryLength,
+            with: emoji,
+            in: target
+        ) else { return 0 }
         clearSuggestion()
         return 0
     }
 
-    // MARK: - Autocorrect mode (FR-AC-1, paid)
+    // MARK: - Autocorrect mode (FR-AC-1)
 
     // Show `fix` as a special correction ghost over the mistyped `run`. Unlike a forward completion the
     // correction REPLACES already-typed text, so the ghost is drawn shifted LEFT by the run's rendered
@@ -1828,10 +1807,11 @@ final class CompletionCoordinator {
     // Mirrors showEmoji() — never calls the model. `run` is the raw mistyped token (its utf16/keystroke
     // lengths drive the atomic delete on accept).
     private func showCorrection(_ fix: String, run: String) {
-        let opacity = capOpacity() ?? 1
-        correctionSuggestion = fix
-        correctionRun = run
-        suggestionText = fix
+        let opacity: CGFloat = 1
+        ghostPresentation.correctionSuggestion = fix
+        ghostPresentation.correctionRun = run
+        ghostPresentation.suggestionText = fix
+        ghostPresentation.suggestionFocusSeq = context.focusChangeSequence
         var caret = context.caretRectOnScreen() ?? .null
         let font = hostFont(caretHeight: caret.height)
         // Shift the ghost left over the mistyped run so it previews the replacement in place (FR-AC-1).
@@ -1849,9 +1829,14 @@ final class CompletionCoordinator {
     // never touch the WordMeter). utf16 length drives the AX range; grapheme count drives the fallback
     // Delete presses.
     private func acceptCorrection(_ fix: String) -> Int {
-        guard let injector, let run = correctionRun else { return 0 }
-        guard injector.replaceBeforeCaret(utf16Length: run.utf16.count, keystrokeCount: run.count,
-                                          with: fix, in: context.focusedElement()) else { return 0 }
+        guard let run = ghostPresentation.correctionRun,
+              let target = acceptanceTarget() else { return 0 }
+        guard SuggestionAcceptor(injector: injector, context: context).replaceBeforeCaret(
+            utf16Length: run.utf16.count,
+            keystrokeCount: run.count,
+            with: fix,
+            in: target
+        ) else { return 0 }
         clearSuggestion()
         return 0
     }
@@ -1859,26 +1844,22 @@ final class CompletionCoordinator {
     // MARK: - OCR context (FR-CTX-1, gated)
 
     // Refresh the style-hint snapshot on focus-in (FR-CTX-3). Computes the (sorted) hint once off the
-    // per-keystroke path; assembledPrompt then reads the cached string. nil when not licensed/disabled/empty.
+    // per-keystroke path; assembledPrompt then reads the cached string. nil when disabled/empty.
     private func refreshStyleHintIfEnabled() {
         let budget = Self.styleHintChars(forStrength: personalizationStrength)
-        guard isLicensed, styleProfileEnabled, budget > 0, let styleProfile else {
-            styleHintLock.lock(); styleHintCache = nil; styleHintLock.unlock(); return
+        guard styleProfileEnabled, budget > 0, let styleProfile else {
+            contextAssembler.setStyleHint(nil)
+            return
         }
         let hint = styleProfile.styleHint(maxChars: budget)
-        styleHintLock.lock(); styleHintCache = hint; styleHintLock.unlock()
+        contextAssembler.setStyleHint(hint)
     }
 
     // Map the Personalization strength (0...3) to a style-hint char budget. 0 disables the hint
     // entirely; higher steps prepend more characteristic phrasing, biasing generation harder toward
     // the user's voice. Pure + testable (no AX/model). 200 (strength 2) is the .medium anchor.
     static func styleHintChars(forStrength strength: Int) -> Int {
-        switch max(0, min(3, strength)) {
-        case 0:  return 0
-        case 1:  return 100
-        case 2:  return 200
-        default: return 400
-        }
+        CompletionContextAssembler.styleHintChars(forStrength: strength)
     }
 
     // `prefix` is the user's live text-before-caret; it is what the capture is de-duplicated AGAINST
@@ -1888,42 +1869,66 @@ final class CompletionCoordinator {
                                             snapshot: EditContextTracker.FocusSnapshot? = nil) {
         guard useScreenOCR else { return }
         let maxChars = ocrContextChars
+        let capturedBundleId = context.frontmostBundleId
+        let capturedFocusSeq = snapshot?.focusSeq ?? context.focusChangeSequence
+        let capturedGeneration = currentGeneration()
 
-        // AX-FIRST: in a browser/web host, read the visible page text directly via Accessibility —
-        // exact text (no OCR errors), no Screen Recording permission, synchronous (so browsers never
-        // hit the .pending defer). Only fall back to OCR when there's no web area (native apps).
-        let axText = snapshot.map { context.pageContextText(in: $0) } ?? context.pageContextText()
-        if let ax = axText, !ax.isEmpty {
-            // Denoise (drop chrome lines) + keep the tail (nearest the caret), mirroring the OCR
-            // path's cleanup so AX and OCR text are interchangeable downstream.
-            // dropShortLines:false — AX text is exact, so keep short signature/name rows the model
-            // needs (the OCR-only chrome rule would otherwise discard them).
-            let text = dedupedCapture(
-                ScreenContextProvider.clamp(
-                    ScreenContextProvider.denoise(ax, dropShortLines: false), to: pageContextChars),
-                prefix: prefix)
-            let changed = storeOCRCache(text)
-            ocrCaptureState = .ready
-            Diag.log("pagectx: ax raw=\(ax.count) kept=\(text?.count ?? -1) changed=\(changed)")
-            Diag.logContent("pagectx: ax head=\"\(ax.prefix(200))\"")
-            flushPendingWarm()
-            if changed { maybeRefireForContext() }
+        // Arm the first-capture gate only when we have NO context yet for this focus; a re-capture while
+        // context already exists must not flip back to .pending (that would hide the warm, stale ghost).
+        contextAssembler.markCapturePendingIfEmpty()
+
+        // AX-FIRST for an actual web-area snapshot, but never walk it synchronously on main. Filtering,
+        // cache assembly, and OCR fallback all happen from the cancellable completion.
+        if let snapshot, snapshot.webArea != nil {
+            context.requestPageContextText(in: snapshot) { [weak self] ax in
+                guard let self, self.captureIsCurrent(
+                    generation: capturedGeneration,
+                    focusSeq: capturedFocusSeq,
+                    bundleId: capturedBundleId) else { return }
+                if let ax, !ax.isEmpty {
+                    let text = self.dedupedCapture(
+                        ScreenContextProvider.clamp(
+                            ScreenContextProvider.denoise(ax, dropShortLines: false),
+                            to: self.pageContextChars),
+                        prefix: prefix)
+                    let changed = self.storeOCRCache(text)
+                    self.contextAssembler.captureState = .ready
+                    Diag.log("pagectx: ax raw=\(ax.count) kept=\(text?.count ?? -1) changed=\(changed)")
+                    Diag.logContent("pagectx: ax head=\"\(ax.prefix(200))\"")
+                    self.flushPendingWarm()
+                    if changed { self.maybeRefireForContext() }
+                } else {
+                    self.requestScreenCapture(
+                        prefix: prefix,
+                        maxChars: maxChars,
+                        bundleId: capturedBundleId,
+                        focusSeq: capturedFocusSeq,
+                        generation: capturedGeneration)
+                }
+            }
             return
         }
 
-        guard let screenContext else { return }
-        // Arm the first-capture gate only when we have NO context yet for this focus; a re-capture while
-        // context already exists must not flip back to .pending (that would hide the warm, stale ghost).
-        if ocrCache == nil { ocrCaptureState = .pending }
-        // Discard a capture that lands after focus has moved to another app.
-        let capturedBundleId = context.frontmostBundleId
+        // No focus snapshot/web area: fall directly to OCR instead of a second synchronous AX walk.
+        requestScreenCapture(prefix: prefix, maxChars: maxChars, bundleId: capturedBundleId,
+                             focusSeq: capturedFocusSeq, generation: capturedGeneration)
+    }
+
+    private func requestScreenCapture(prefix: String, maxChars: Int, bundleId: String?,
+                                      focusSeq: UInt64, generation: Int) {
+        guard let screenContext else {
+            contextAssembler.captureState = .ready
+            flushPendingWarm()
+            return
+        }
         Task { [weak self] in
             let text = await screenContext.recentText(maxChars: maxChars)
             guard let self else { return }
             await MainActor.run {
-                guard self.context.frontmostBundleId == capturedBundleId else { return }
+                guard self.captureIsCurrent(
+                    generation: generation, focusSeq: focusSeq, bundleId: bundleId) else { return }
                 let changed = self.storeOCRCache(self.dedupedCapture(text, prefix: prefix))
-                self.ocrCaptureState = .ready
+                self.contextAssembler.captureState = .ready
                 Diag.log("ocr: refresh got \(text?.count ?? -1) chars changed=\(changed)")
                 // The capture this focus's KV warm was waiting on has landed (#11).
                 self.flushPendingWarm()
@@ -1933,6 +1938,29 @@ final class CompletionCoordinator {
                 if changed { self.maybeRefireForContext() }
             }
         }
+    }
+
+    private func captureIsCurrent(generation: Int, focusSeq: UInt64, bundleId: String?) -> Bool {
+        Self.captureLatchMatches(
+            capturedGeneration: generation,
+            currentGeneration: currentGeneration(),
+            capturedFocusSeq: focusSeq,
+            currentFocusSeq: context.focusChangeSequence,
+            capturedBundleId: bundleId,
+            currentBundleId: context.frontmostBundleId)
+    }
+
+    static func captureLatchMatches(capturedGeneration: Int, currentGeneration: Int,
+                                    capturedFocusSeq: UInt64, currentFocusSeq: UInt64,
+                                    capturedBundleId: String?, currentBundleId: String?) -> Bool {
+        CompletionContextAssembler.captureLatchMatches(
+            capturedGeneration: capturedGeneration,
+            currentGeneration: currentGeneration,
+            capturedFocusSeq: capturedFocusSeq,
+            currentFocusSeq: currentFocusSeq,
+            capturedBundleId: capturedBundleId,
+            currentBundleId: currentBundleId
+        )
     }
 
     // Strip the user's own document + draft from a raw capture BEFORE it is cached (#10).
@@ -1946,62 +1974,51 @@ final class CompletionCoordinator {
     // The prompt path still runs the same two filters — by then the prefix has grown past this capture,
     // and both filters are stable/idempotent, so the second pass is a cheap no-op in the steady state.
     private func dedupedCapture(_ text: String?, prefix: String) -> String? {
-        let deDoc = ScreenContextProvider.removingDocumentEcho(text, prefix: prefix)
-        return ScreenContextProvider.removingDraftEcho(deDoc, draft: prefix)
+        CompletionContextAssembler.dedupedCapture(text, prefix: prefix)
     }
 
     // Update the OCR context cache, returning whether it MEANINGFULLY changed. OCR jitter (reflowed line
     // breaks, trailing spaces) must not count as a change, or every re-capture would shift the prompt's
     // leading `Context:` tokens and force a cold prefill on the next keystroke (FR-CE-5). When unchanged
     // we keep the existing value so KV stays warm and the caller skips the re-fire.
-    // Main-thread only (every caller is), which is what lets it also latch `ocrCacheLang`.
+    // Main-thread only (every caller is), which is what lets it also latch `contextAssembler.ocrLanguage`.
     @discardableResult
     private func storeOCRCache(_ text: String?) -> Bool {
-        ocrLock.lock()
-        let changed = !Self.ocrTextEquivalent(ocrCache, text)
-        if changed { ocrCache = text }
-        ocrLock.unlock()
-        // Latch the steer language to the CAPTURE, not to each prompt assembly (#10). Detected on the
-        // caret-local tail exactly as the assembly used to do it, but ONCE per accepted capture: a
-        // borderline read re-run per fire could flip between two fires of the same burst, and that name
-        // goes into the `Text (in <Language>):` marker sitting immediately before the prefix — a changed
-        // prompt head, i.e. a full cold re-prefill, every time it flipped.
-        if changed {
+        let changed = contextAssembler.storeOCR(text) { capturedText in
             let declared = UserDefaults.standard.string(forKey: Self.personalizeLanguagesKey) ?? ""
             let languageConstraints = Self.parsePersonalizedLanguages(declared)
-            ocrCacheLang = text.map { Self.caretLocalContextTail($0) }
-                .flatMap {
-                    Self.dominantLanguage($0, minConfidence: 0.70,
-                                          languageConstraints: languageConstraints)
-                }
+            return Self.dominantLanguage(
+                Self.caretLocalContextTail(capturedText),
+                minConfidence: 0.70,
+                languageConstraints: languageConstraints
+            )
         }
-        Diag.log("context: capture steerLang=\(ocrCacheLang?.rawValue ?? "nil")")
+        Diag.log("context: capture steerLang=\(contextAssembler.ocrLanguage?.rawValue ?? "nil")")
         return changed
     }
 
     // Two OCR blocks are equivalent when they match after collapsing all whitespace/newline runs to a
     // single space and trimming — so cosmetic OCR reflow doesn't read as a content change. Pure + testable.
     static func ocrTextEquivalent(_ a: String?, _ b: String?) -> Bool {
-        normalizeOCRForCompare(a) == normalizeOCRForCompare(b)
+        CompletionContextAssembler.ocrTextEquivalent(a, b)
     }
     static func normalizeOCRForCompare(_ s: String?) -> String {
-        guard let s else { return "" }
-        return s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        CompletionContextAssembler.normalizeOCRForCompare(s)
     }
 
     // Re-fire generation for a freshly-changed on-screen context — but at most ONCE per prefix, so a
     // dynamic screen can't keep regenerating and cycling the ghost while the user is paused. The cache
     // is already updated (storeOCRCache), so the next keystroke still uses the latest context.
     private func maybeRefireForContext() {
-        guard Self.shouldRefireForContext(count: contextRefireCount, max: Self.maxContextRefires) else {
+        guard Self.shouldRefireForContext(count: contextAssembler.refireCount, max: Self.maxContextRefires) else {
             Diag.log("ocr: skip re-fire (cap reached)")
             return
         }
-        contextRefireCount += 1
+        contextAssembler.refireCount += 1
         // Flip the silent-hold flag so the upcoming generation can hold the visible ghost while its
         // tokens reproduce the prior suggestion (the dominant "regenerates the same text" case after
         // an OCR-context refresh). Cleared on stream divergence or in the gen-done handler.
-        inContextRefire = suggestionVisible && !suggestionText.isEmpty
+        generationSession.inContextRefire = suggestionVisible && !ghostPresentation.suggestionText.isEmpty
         fire()
     }
 
@@ -2010,7 +2027,7 @@ final class CompletionCoordinator {
     // typing action gets exactly one upgrade and a sustained pause gets none after the first — immune to
     // the prefix-read drift that defeated the earlier per-prefix latch.
     static func shouldRefireForContext(count: Int, max: Int) -> Bool {
-        count < max
+        CompletionContextAssembler.shouldRefire(count: count, maximum: max)
     }
 
     // Pure (testable): on a web-mail host, strip the trailing quoted-reply tail of `prefix`. Outside
@@ -2018,13 +2035,10 @@ final class CompletionCoordinator {
     // touches normal prose contexts. Used as the prompt prefix when the caret sits inside or below the
     // quoted-history block (Gmail "Show trimmed content"), preventing a ghost that just keeps quoting.
     static func prefixAfterEmailQuoteStrip(_ prefix: String?, host: String?) -> String? {
-        guard let p = prefix, ActivationPolicy.isWebMailHost(host) else { return prefix }
-        let stripped = ScreenContextProvider.stripTrailingQuotedBlock(p)
-        return stripped == p ? prefix : stripped
+        CompletionContextAssembler.prefixAfterEmailQuoteStrip(prefix, host: host)
     }
 
-    // Generalized leading-context assembly (FR-CTX-1/2/3, FR-PA-3). Prepends, IN ORDER and each gated
-    // by isLicensed + its own user toggle:
+    // Generalized leading-context assembly (FR-CTX-1/2/3, FR-PA-3). Prepends enabled sources in order:
     //   1. effectiveInstruction (FR-PA-3) — the global/per-app instruction, FIRST (highest steer).
     //   2. styleHint            (FR-CTX-3) — the user's writing-style bias.
     //   3. clipboard            (FR-CTX-2) — current pasteboard text.
@@ -2038,16 +2052,34 @@ final class CompletionCoordinator {
     // (no licence, OCR off, nothing after the caret) yields exactly `prefix` up to the budget, and an
     // ANCHORED tail window of it beyond — either way the prompt head holds still across a burst, so KV
     // reuse is preserved.
-    private func assembledPrompt(prefix: String, postCaret: String?) -> String {
+    private func tokenizerBudgetedPrompt(
+        prefix: String,
+        postCaret: String?
+    ) -> CompletionContextAssembler.PreparedPrompt {
+        let defaultBudget = promptCharBudget
+        let effectiveCap = max(8, min(engine.maxContextTokens, engine.contextWindowTokens - 256))
+        return contextAssembler.tokenizerBudgetedPrompt(
+            defaultBudget: defaultBudget,
+            effectiveTokenCap: effectiveCap
+        ) { budget in
+            assembledPrompt(prefix: prefix, postCaret: postCaret, totalChars: budget)
+        }
+    }
+
+    private func storeTokenizerValidatedBudget(_ budget: Int, for key: PromptSectionBudget.CacheKey) {
+        contextAssembler.storeTokenizerValidatedBudget(budget, for: key)
+    }
+
+    private func assembledPrompt(prefix: String, postCaret: String?, totalChars: Int? = nil) -> String {
         // Resolve each (already-gated-ready) source, then hand the gating + ordering + join to the pure
         // static below so it is unit-testable without AX/model/overlay (the leak-when-unlicensed property
         // is the security-critical invariant). Style hint is the focus-in snapshot (stable across the
         // burst); OCR is read from its warm cache.
         let instruction = instructionStore?.effectiveInstruction(bundleId: context.frontmostBundleId)
-        styleHintLock.lock(); let styleHint = styleHintCache; styleHintLock.unlock()
-        let clip = (clipboardContextEnabled && isLicensed)
+        let styleHint = contextAssembler.cachedStyleHint
+        let clip = clipboardContextEnabled
             ? clipboard?.recentText(maxChars: clipboardContextChars) : nil
-        ocrLock.lock(); let ocrRaw = ocrCache; ocrLock.unlock()
+        let ocrRaw = contextAssembler.cachedOCR
         // Strip the user's own draft (and any ghost the OCR captured after it) from the screen text so
         // it isn't duplicated with the prefix below — the draft is only known here, on the prompt path.
         // De-dup the user's own document (already in `prefix`) from the screen text first, then strip
@@ -2084,17 +2116,17 @@ final class CompletionCoordinator {
         // immediately before the prefix — the prompt head — which costs a full cold re-prefill. Still
         // gated on the OCR block actually existing, so a run with no screen context keeps the bare
         // `Text:` marker exactly as before.
-        let ctxLang = (useScreenOCR && ocr != nil) ? ocrCacheLang : nil
+        let ctxLang = (useScreenOCR && ocr != nil) ? contextAssembler.ocrLanguage : nil
 
         let assembled = Self.assemblePrompt(
-            prefix: prefix, isLicensed: isLicensed,
+            prefix: prefix,
             instruction: instruction,
             styleHint: styleHint, styleEnabled: styleProfileEnabled,
             clipboard: clip, clipboardEnabled: clipboardContextEnabled,
             ocr: ocr, ocrEnabled: useScreenOCR,
             postCaret: postCaret,
             steerLanguageName: ctxLang.flatMap(Self.englishLanguageName),
-            totalChars: promptCharBudget)
+            totalChars: totalChars ?? promptCharBudget)
         // Arm renderSuggestion's context-drift suppression ONLY when the OCR block actually SURVIVED the
         // budget. A long draft eats most of the budget and the lowest-priority OCR block is dropped — the
         // model then never sees that context at all, so hiding its completion for "drifting" from it hides
@@ -2102,7 +2134,7 @@ final class CompletionCoordinator {
         // reason (it used to be set from the pre-assembly detection, which couldn't know). Deliberately
         // asymmetric with the steer marker above, which still carries the detected name: steering toward
         // the language the user is actually writing in is harmless when the block is gone; HIDING is not.
-        generationContextLang = assembled.ocrKept ? ctxLang : nil
+        generationSession.contextLanguage = assembled.ocrKept ? ctxLang : nil
         return assembled.prompt
     }
 
@@ -2116,28 +2148,35 @@ final class CompletionCoordinator {
     private static let personalizeLanguagesKey = "shadowtype.personalize.languages"
     private static let personalizedLanguageCandidates =
         Locale.LanguageCode.isoLanguageCodes.map { NLLanguage($0.identifier) }
-
-    // Parse onboarding's free-text language list without consulting defaults. English display names and
-    // raw ISO codes are both accepted case-insensitively; unknown entries are ignored and duplicates
-    // collapse while preserving the user's order.
-    static func parsePersonalizedLanguages(
-        _ value: String,
-        candidates: [NLLanguage] = personalizedLanguageCandidates
-    ) -> [NLLanguage] {
+    private static let personalizedLanguageLookup: (
+        byCode: [String: NLLanguage],
+        byName: [String: NLLanguage]
+    ) = {
         let locale = Locale(identifier: "en_US")
         var byCode: [String: NLLanguage] = [:]
         var byName: [String: NLLanguage] = [:]
-        for language in candidates {
+        for language in personalizedLanguageCandidates {
             byCode[language.rawValue.lowercased(with: locale), default: language] = language
             if let name = englishLanguageName(language)?.lowercased(with: locale) {
                 byName[name, default: language] = language
             }
         }
+        return (byCode, byName)
+    }()
+
+    // Parse onboarding's free-text language list without consulting defaults. English display names and
+    // raw ISO codes are both accepted case-insensitively; unknown entries are ignored and duplicates
+    // collapse while preserving the user's order.
+    static func parsePersonalizedLanguages(_ value: String) -> [NLLanguage] {
+        guard value.contains(where: { !$0.isWhitespace }) else { return [] }
+        let locale = Locale(identifier: "en_US")
+        let lookup = personalizedLanguageLookup
         var seen = Set<NLLanguage>()
         return value.split(separator: ",").compactMap { rawToken in
             let token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased(with: locale)
-            guard let language = byCode[token] ?? byName[token], seen.insert(language).inserted else {
+            guard let language = lookup.byCode[token] ?? lookup.byName[token],
+                  seen.insert(language).inserted else {
                 return nil
             }
             return language
@@ -2161,11 +2200,7 @@ final class CompletionCoordinator {
     // framing the section budget is not charged for — `Context:\n`, the `\n\n` block separators and the
     // longest `\n\nText (in <Language>):\n` marker.
     static func promptBudgetBytes(forContextTokens tokens: Int) -> Int {
-        let framingReserve = 64
-        // Clamped before the Double math: the value comes from user defaults, and an absurd hand-edited
-        // one would otherwise overflow the Int conversion and trap. The engine clamps to n_ctx anyway.
-        let tokens = min(max(0, tokens), 32_768)
-        return max(256, Int(Double(tokens) * 3.5) - framingReserve)
+        CompletionContextAssembler.promptBudgetBytes(forContextTokens: tokens)
     }
 
     // MARK: - Post-caret conditioning (suffix awareness)
@@ -2175,7 +2210,7 @@ final class CompletionCoordinator {
     // paragraph follows so it doesn't duplicate or contradict it, and the first couple of sentences
     // carry that; anything more is budget taken from the caret text and from screen context. Bytes, to
     // match the allocator's unit.
-    static let postCaretContextBytes = 240
+    static let postCaretContextBytes = CompletionContextAssembler.postCaretContextBytes
 
     // Pure (testable): the `After the cursor:` context block for the text following the caret, or nil
     // when there is nothing worth telling the model.
@@ -2199,34 +2234,11 @@ final class CompletionCoordinator {
     // assemblePrompt for the other half of that guarantee.
     static func postCaretBlock(_ suffix: String?,
                                maxBytes: Int = CompletionCoordinator.postCaretContextBytes) -> String? {
-        guard let suffix else { return nil }
-        // Trailing newlines at the end of a document, or the blank line the caret sits above, are the
-        // common case and say nothing. Requiring real content also keeps the block (and therefore the
-        // prompt head) from appearing and disappearing over pure whitespace churn.
-        let trimmed = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 2 else { return nil }
-        let windowed = PromptSectionBudget.headWithinCost(trimmed, maxCost: maxBytes)
-        guard !windowed.isEmpty else { return nil }
-        return "After the cursor:\n" + windowed
+        CompletionContextAssembler.postCaretBlock(suffix, maxBytes: maxBytes)
     }
 
-    // Pure leading-context assembly + GATING (testable: no AX/model/overlay). Prepends, in order:
-    //   1. instruction (paid, FR-PA-3)  2. styleHint (paid, FR-CTX-3)  3. clipboard (paid, FR-CTX-2)
-    //   4. ocr (FREE, FR-CTX-1 — gated only by its own `ocrEnabled`, NOT by the licence)
-    //   5. postCaret (FREE — the text after the caret, see postCaretBlock; nil disables it entirely)
-    // wrapped as `Context:\n<blocks>\n\nText:\n<prefix>`, the prefix STAYING the forward-from-caret tail
-    // (FR-CE-9). The three PAID blocks are
-    // dropped whenever `isLicensed` is false (or their toggle is off / value empty), so a Free user can
-    // never leak a paid context source. Empty result (no blocks) returns exactly `prefix` (KV reuse safe).
-    // `totalChars` is the global BYTE budget for the whole prompt (context blocks + prefix). It
-    // defaults to "unbounded" so existing callers/tests keep the exact prior behavior; the live caller
-    // passes a finite budget so a noisy screen capture can't crowd out the caret text or blow the
-    // context window (#8 PromptSectionBudget). The prefix is given top fill-priority and is never
-    // dropped — the lower-priority context blocks (style first, then OCR, clipboard, instruction) trim
-    // or drop to fit — but it is itself capped at a share of the budget so it can't drop ALL of them
-    // (see prefixCap below). Surviving blocks keep their original render order.
-    // Returns the prompt plus whether the OCR block survived the budget, which the caller needs to decide
-    // if the render-time context-language suppression may be armed (see assembledPrompt).
+    // Compatibility witness for historical Free/paid prompt-gating tests. The live product never calls
+    // this overload; it uses the unlocked overload below, so licensing is absent from the runtime path.
     static func assemblePrompt(prefix: String, isLicensed: Bool,
                                instruction: String?,
                                styleHint: String?, styleEnabled: Bool,
@@ -2235,121 +2247,40 @@ final class CompletionCoordinator {
                                postCaret: String? = nil,
                                steerLanguageName: String? = nil,
                                totalChars: Int = .max) -> (prompt: String, ocrKept: Bool) {
-        // A base model's tokenizer attaches the leading space to each word (SentencePiece `▁word`), so a
-        // prompt ending in a bare space is a "dangling space" the model can't continue cleanly — it
-        // degrades into word-salad ("…castillo y que " -> "2 erme en un r es una una…", while the same
-        // text WITHOUT the trailing space continues correctly to "tiene un vestido hermoso…"). Trim
-        // trailing inline whitespace so the model predicts the next space-prefixed word; on render,
-        // reconcileLeadingSpace drops the echoed leading space against the original (untrimmed) prefix.
-        let prefix = trimmingTrailingInlineWhitespace(prefix)
+        assemblePrompt(
+            prefix: prefix,
+            instruction: isLicensed ? instruction : nil,
+            styleHint: styleHint, styleEnabled: isLicensed && styleEnabled,
+            clipboard: clipboard, clipboardEnabled: isLicensed && clipboardEnabled,
+            ocr: ocr, ocrEnabled: ocrEnabled,
+            postCaret: postCaret,
+            steerLanguageName: steerLanguageName,
+            totalChars: totalChars)
+    }
 
-        // Build the gated context sections in render order (instruction → style → clipboard → OCR →
-        // post-caret), plus the prefix at top priority so it survives a tight budget. Priorities set the FILL order
-        // (prefix first, style last); the allocator trims/drops lowest-priority blocks to fit totalChars.
-        var sections: [PromptSection] = []
-        // `atomic` marks a block the allocator must take WHOLE or drop (minChars == its full cost), kept
-        // from the `.preserveStart` end. Two different kinds of block need that shape:
-        //   • DIRECTIVES — the user's instruction and the style hint — whose MEANING LIVES IN THEIR
-        //     WORDING. Trimming those doesn't degrade them, it changes them: "Always reply in formal
-        //     Spanish, never use contractions" cut to its tail is the different instruction "never use
-        //     contractions", and the style hint cut anywhere loses the explanatory label that makes its
-        //     word list interpretable at all, leaving a bare semicolon list the model reads as content to
-        //     copy. `.preserveStart` is the matching end (the head carries the directive's subject) —
-        //     with the all-or-nothing minChars it never actually trims, but `.preserveEnd` here would be
-        //     wrong the moment either number moves.
-        //   • The POST-CARET block, for a KV reason rather than a meaning one: it is pre-windowed to a
-        //     fixed cost before it gets here, so letting the allocator re-cut it to whatever the growing
-        //     prefix leaves over would shrink it by a few bytes per keystroke — and it sits in FRONT of
-        //     the prefix, so that is a mutating prompt head and a cold re-prefill every fire. Whole or
-        //     absent means the head can only change once, when the budget crosses. `.preserveStart` is
-        //     also the right end there (the text NEAREST the caret is the part that matters).
-        // The prose blocks (clipboard, OCR) keep `.preserveEnd`/minChars 0: their tail is the part
-        // nearest the caret and a fragment of it is still useful context.
-        func addContext(_ s: String?, name: String = "ctx", priority: Int, atomic: Bool = false) {
-            guard let s, !s.isEmpty else { return }
-            // maxChars is a BYTE budget (PromptSectionBudget costs in UTF-8 bytes); each section's own
-            // max is its full byte length so it's only trimmed when the TOTAL budget binds.
-            let cost = PromptSectionBudget.cost(s)
-            sections.append(PromptSection(name: name, content: s, priority: priority,
-                                          minChars: atomic ? cost : 0, maxChars: cost,
-                                          truncation: atomic ? .preserveStart : .preserveEnd))
-        }
-        // Priority is the FILL order — the reverse of the DROP order — and is independent of the render
-        // order below (PromptSectionBudget.allocate returns survivors in their original array order), so
-        // these numbers can be reasoned about on usefulness alone. Style is now the FIRST block dropped,
-        // below screen context: a vocabulary hint nudges word choice, while the screen text is what the
-        // next word is actually ABOUT. At its old 60 it outranked both clipboard and OCR and starved the
-        // far more informative context whenever the budget bound.
-        if isLicensed { addContext(instruction, priority: 80, atomic: true) }      // FR-PA-3 (paid)
-        if isLicensed && styleEnabled { addContext(styleHint, priority: 10, atomic: true) } // FR-CTX-3 (paid)
-        if isLicensed && clipboardEnabled { addContext(clipboard, priority: 40) }  // FR-CTX-2 (paid)
-        if ocrEnabled { addContext(ocr, name: "ocr", priority: 20) }               // FR-CTX-1 (FREE)
-        // Post-caret text, LAST so it renders immediately before the `Text:` marker — the model reads
-        // "here is what follows the cursor", then the live text to continue, and the adjacency is what
-        // makes the relationship legible to a base model. Appending it at the END of the context region
-        // also leaves every earlier block's bytes untouched, so a fire where it appears/disappears still
-        // shares a KV prefix with one where it didn't, up to this point.
-        //
-        // Priority 30 — below the prefix (which is never starved: 1000) and below the paid instruction
-        // and clipboard, but ABOVE screen context (20) and the style hint (10). Ranking it at the very
-        // bottom would have made it dead weight in practice: the OCR block declares its whole length as
-        // maxChars, so under a binding budget it consumes everything the higher priorities left and any
-        // block below it is dropped. This one is capped at postCaretContextBytes, ~7% of the default
-        // budget, so it cannot meaningfully crowd out anything above it either way.
-        addContext(postCaretBlock(postCaret), name: "postCaret", priority: 30, atomic: true)
-        // The prefix (kept nearest-the-caret tail) — top priority, so it still wins under contention, but
-        // CAPPED so it can't take the whole budget. It used to declare its own full length as maxChars:
-        // the allocator fills highest-priority first, so any draft longer than the budget consumed 100% of
-        // it, every context block then trimmed to "" and was dropped, and the caller silently got the BARE
-        // prefix — instruction, style, clipboard and OCR vanished in any document past the budget, with no
-        // log and nothing visible to the user. 65% leaves the context blocks reserved room while keeping
-        // the caret text dominant; the prefix still keeps its tail (nearest the caret) when trimmed.
-        // ...but ONLY when there is context to reserve room for. With no blocks (the Free default: no
-        // licence, OCR off) a 65% cap would shrink the caret window for nothing — wasting a third of the
-        // budget AND starting the sliding truncation below a third earlier than the engine's own cap would.
-        let prefixCap = sections.isEmpty ? totalChars : max(1, totalChars / 100 * 65)
-        // Anchored so the kept window's START holds still across a typing burst. A plain tail cut slides one
-        // byte per keystroke, which diverges the prompt at its first token and costs a full cold re-prefill
-        // every fire (see PromptSectionBudget.anchoredTail). Pre-windowed here, so the section declares its
-        // own already-fitting length and the allocator never re-cuts it unanchored.
-        let windowedPrefix = PromptSectionBudget.anchoredTail(prefix, maxCost: prefixCap)
-        // Allocate the context blocks against the RESERVED prefix cap, not the prefix's live cost — and
-        // hence in a separate pass, with the prefix kept out of `sections` entirely.
-        //
-        // This is the whole ballgame for KV reuse. anchoredTail pins the kept window's START, but its
-        // LENGTH still grows by one byte per keystroke (the window start holds while the text extends).
-        // With the prefix in the same allocation at priority 1000 it was filled FIRST, so `remaining`
-        // shrank by that same byte every fire, and the OCR block — which declares its full length as
-        // maxChars and sits in FRONT of the prefix — got cut one byte differently each time. Measured:
-        // 120 distinct prompt heads across 120 keystrokes, i.e. a full cold prefill on every single fire,
-        // silently undoing the anchoring. Budgeting the blocks against the fixed reservation makes their
-        // bytes independent of how much of the prefix window is currently filled.
-        // Reserve for the prefix what it actually occupies, rounded UP to the anchor step: constant
-        // between re-anchors (so the blocks' bytes hold still), but still small when the draft is short,
-        // so a short draft does not starve the context of two thirds of the budget for nothing.
-        let prefixReserve = PromptSectionBudget.quantizedReservation(
-            cost: PromptSectionBudget.cost(windowedPrefix), maxCost: prefixCap)
-        let contextBudget = sections.isEmpty ? 0 : max(0, totalChars - prefixReserve)
-        let allocated = PromptSectionBudget.allocate(sections, totalChars: contextBudget)
-        let outPrefix = windowedPrefix
-        let blocks = allocated.map(\.content)
-        let ocrKept = allocated.contains { $0.name == "ocr" }
-
-        guard !blocks.isEmpty else { return (outPrefix, ocrKept) }
-        // Document-shaped framing: a base (pretrained) model follows the `Header:\n…` pattern from its
-        // corpus, so labelling the blocks as `Context:` demotes them to reference material and the
-        // `Text:` marker tells the model the prefix is the live text to CONTINUE conditioned on that
-        // context — instead of reading the whole thing as one flat document whose literal tail it
-        // continues (which made "Lighter apple" -> "pie"). Plain words only (no chat/special tokens),
-        // and the front stays stable across a typing burst, so the FR-CE-5 KV warm path is intact.
-        // Empty-blocks case above still returns the BARE prefix (KV-reuse identity preserved).
-        // Language steer: when the context has a confident dominant language, fold its name into the
-        // marker (`Text (in Catalan):`) adjacent to the prefix — the strongest cheap lever a base
-        // continuation model honors to match the surrounding conversation. nil (default) keeps the bare
-        // `Text:` marker, byte-identical to the pre-steer output. The name derives from the cached
-        // context, so it's stable across a burst (KV warm path preserved).
-        let textMarker = steerLanguageName.map { "\n\nText (in \($0)):\n" } ?? "\n\nText:\n"
-        return ("Context:\n" + blocks.joined(separator: "\n\n") + textMarker + outPrefix, ocrKept)
+    // Pure unlocked leading-context assembly. Kept as a compatibility wrapper for existing callers.
+    static func assemblePrompt(prefix: String,
+                               instruction: String?,
+                               styleHint: String?, styleEnabled: Bool,
+                               clipboard: String?, clipboardEnabled: Bool,
+                               ocr: String?, ocrEnabled: Bool,
+                               postCaret: String? = nil,
+                               steerLanguageName: String? = nil,
+                               totalChars: Int = .max) -> (prompt: String, ocrKept: Bool) {
+        CompletionContextAssembler.assemblePrompt(
+            prefix: prefix,
+            instruction: instruction,
+            styleHint: styleHint,
+            styleEnabled: styleEnabled,
+            clipboard: clipboard,
+            clipboardEnabled: clipboardEnabled,
+            ocr: ocr,
+            ocrEnabled: ocrEnabled,
+            postCaret: postCaret,
+            steerLanguageName: steerLanguageName,
+            totalChars: totalChars,
+            trimmingPrefix: { trimmingTrailingInlineWhitespace($0) }
+        )
     }
 
     // MARK: - Shell-command framing (terminal shell-command mode)
@@ -2417,11 +2348,7 @@ final class CompletionCoordinator {
     // shellCommandAfterSigil trims both ends, but a typed `git ` must complete to `status`, not
     // ` status`, and the guard must see the space in `rm -rf ` + `/`.
     static func shellTypedCommand(_ prefix: String) -> String {
-        let line = shellCurrentLine(prefix)
-        guard let cmd = shellCommandAfterSigil(line) else { return line }
-        // Chrome only (`~/proj $ `) → no typed command yet.
-        guard !cmd.isEmpty, let r = line.range(of: cmd, options: .backwards) else { return "" }
-        return String(line[r.lowerBound...])
+        CompletionActivationEvaluator.shellTypedCommand(prefix)
     }
 
     // Pure: pull recent COMMAND text (not output) from the visible buffer — the lines that carry a shell
@@ -2494,28 +2421,7 @@ final class CompletionCoordinator {
     // Pure: redact obvious secrets from a command line before it goes to the model OR is surfaced as a
     // history ghost. Conservative regex-free shape matching on common secret-bearing tokens.
     static func redactingSecrets(_ line: String) -> String {
-        var tokens = line.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
-        for i in tokens.indices {
-            let t = tokens[i]
-            // KEY=value where KEY looks sensitive, or any *_TOKEN / *_SECRET / *_KEY / password.
-            if let eq = t.firstIndex(of: "=") {
-                let key = String(t[..<eq]).uppercased()
-                let sensitive = ["TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD", "PWD", "API", "AUTH"]
-                if key.hasPrefix("AWS_") || sensitive.contains(where: { key.contains($0) }) {
-                    tokens[i] = String(t[..<eq]) + "=•••"
-                    continue
-                }
-            }
-            // --password VALUE / --token VALUE → redact the FOLLOWING token.
-            let flag = t.lowercased()
-            if (flag == "--password" || flag == "--token" || flag == "-p" || flag == "--secret"
-                || flag == "--api-key") && i + 1 < tokens.count {
-                tokens[i + 1] = "•••"
-            }
-            // Bearer <value>
-            if t == "Bearer", i + 1 < tokens.count { tokens[i + 1] = "•••" }
-        }
-        return tokens.joined(separator: " ")
+        CompletionActivationEvaluator.redactingSecrets(line)
     }
 
     // Remove HTML tags and Markdown emphasis the base model emits from its web-corpus training, so the
@@ -2660,9 +2566,7 @@ final class CompletionCoordinator {
     // no-trailing-space case ("Hello.") never reaches this — isMeaningfulBoundary already rejects it.
     // Decimals ("3.14 ") end on a digit, so they are not blocked.
     static func endsCompleteStatement(_ prefix: String) -> Bool {
-        guard let last = prefix.last, last.isWhitespace,
-              let lastNonSpace = prefix.reversed().first(where: { !$0.isWhitespace }) else { return false }
-        return lastNonSpace == "." || lastNonSpace == "!" || lastNonSpace == "?"
+        CompletionActivationEvaluator.endsCompleteStatement(prefix)
     }
 
     // True when the suggestion is confidently in a DIFFERENT language than the prefix — the cross-language
@@ -2681,7 +2585,7 @@ final class CompletionCoordinator {
     }
 
     // The prefix half of the drift read, split out so the caller can compute it ONCE per generation
-    // instead of once per streamed render tick (#9) — `activePrefix` cannot change while the model is
+    // instead of once per streamed render tick (#9) — `generationSession.activePrefix` cannot change while the model is
     // streaming. nil = too short or not confident enough, i.e. the guard must not fire.
     static func driftPrefixLanguage(_ prefix: String,
                                     minPrefixChars: Int = 40, minConfidence: Double = 0.80,
@@ -2721,7 +2625,7 @@ final class CompletionCoordinator {
         return sl != contextLang
     }
 
-    // Pure render policy for the two language backstops. `generationIsHealed` is deliberately not a
+    // Pure render policy for the two language backstops. `generationSession.isHealed` is deliberately not a
     // gate: healing only exempts prefix-relative text transforms. `checkPrefixDup == false` identifies
     // the stale accept-remainder re-render, where both language comparisons must stay skipped.
     static func languageRejectionReason(checkPrefixDup: Bool, generationIsHealed _: Bool,
@@ -2855,7 +2759,7 @@ final class CompletionCoordinator {
         guard prefix.count >= 12,
               let lang = Self.dominantLanguage(
                 prefix, minConfidence: 0.50,
-                languageConstraints: generationLanguageConstraints
+                languageConstraints: generationSession.languageConstraints
               ) else {
             return nil
         }
@@ -2932,32 +2836,21 @@ final class CompletionCoordinator {
 
     // Last whitespace-delimited token of `prefix` (FR-CE-6 typo check). Empty if it ends in space.
     static func lastWord(of prefix: String) -> String {
-        var idx = prefix.endIndex
-        var word = ""
-        while idx > prefix.startIndex {
-            let prev = prefix.index(before: idx)
-            let ch = prefix[prev]
-            if ch.isWhitespace { break }
-            word.insert(ch, at: word.startIndex)
-            idx = prev
-        }
-        return word
+        CompletionActivationEvaluator.lastWord(of: prefix)
     }
 
     // MARK: - Generation token helpers
 
     @discardableResult
     private func bumpGeneration() -> Int {
-        genLock.lock(); defer { genLock.unlock() }
-        generation += 1
-        // A new generation owns the ghost from here on: whatever is still on screen belongs to the
-        // superseded one, so its render-reject latch (see rejectRender) no longer protects it.
-        generationCommitted = false
-        return generation
+        generationSession.bump()
     }
 
     private func isCurrent(_ gen: Int) -> Bool {
-        genLock.lock(); defer { genLock.unlock() }
-        return gen == generation
+        generationSession.isCurrent(gen)
+    }
+
+    private func currentGeneration() -> Int {
+        generationSession.current()
     }
 }

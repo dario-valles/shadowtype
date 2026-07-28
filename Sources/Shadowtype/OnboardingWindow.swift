@@ -53,7 +53,9 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
         // Same accessory-app activation fix as Settings: promote to .regular so the window is
         // active and its controls accept input, then demote on close (windowWillClose). The promotion
         // activates asynchronously, so re-assert key on the next runloop or text fields stay unfocusable.
-        AppActivation.shared.promoteAndActivate()
+        if let window {
+            AppActivation.shared.promoteAndActivate(for: window)
+        }
         window?.makeKeyAndOrderFront(nil)
         DispatchQueue.main.async { [weak self] in
             NSApp.activate(ignoringOtherApps: true)
@@ -62,7 +64,9 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        AppActivation.shared.windowClosed()
+        if let closedWindow = notification.object as? NSWindow {
+            AppActivation.shared.windowClosed(closedWindow)
+        }
         // Closing on the final ("All set") step counts as completing the flow; a mid-flow close keeps
         // the persisted step so the next onboarding launch resumes there instead of restarting.
         if !UserDefaults.standard.bool(forKey: Self.didCompleteKey),
@@ -203,6 +207,10 @@ private struct OnboardingRootView: View {
         .onReceive(permTick) { _ in if step == .permissions { perms.refresh() } }
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didBecomeActiveNotification)) { _ in perms.refresh() }
+        .onChange(of: requiredGranted) {
+            NotificationCenter.default.post(
+                name: .shadowtypeRequiredPermissionsMayHaveChanged, object: nil)
+        }
         .onChange(of: step) {
             UserDefaults.standard.set(step.rawValue, forKey: OnboardingWindowController.stepKey)
         }
@@ -246,8 +254,15 @@ private struct OnboardingRootView: View {
             Spacer()
 
             Button(step.nextLabel) {
-                if step == .done { onFinish() }
-                else { withAnimation(.easeOut(duration: 0.28)) { go(1) } }
+                if step == .done {
+                    onFinish()
+                } else {
+                    if step == .permissions {
+                        NotificationCenter.default.post(
+                            name: .shadowtypeRequiredPermissionsMayHaveChanged, object: nil)
+                    }
+                    withAnimation(.easeOut(duration: 0.28)) { go(1) }
+                }
             }
             .buttonStyle(OBPrimaryButton(large: true))
             .disabled(nextDisabled)
@@ -909,11 +924,14 @@ private struct OBModelStep: View {
     // Switch the card to a new model (only allowed when not mid-download — the list disables taps then).
     private func select(_ entry: ModelCatalogEntry) {
         selectedID = entry.id
-        progress = isInstalled(entry) ? 1 : 0
-        phase = isInstalled(entry) ? .installed : .idle
+        let alreadyInstalled = isInstalled(entry)
+        progress = alreadyInstalled ? 1 : 0
+        phase = alreadyInstalled ? .installed : .idle
         // The previous model's verdict says nothing about this file — clearing it makes the status line
         // fall back to the plain "Installed ✓" instead of carrying a stale checksum claim across rows.
         verification = nil
+        OnboardingModelActivation.activateIfInstalled(
+            entry, isInstalled: alreadyInstalled, activate: activate)
     }
 
     private func startDownload() {
@@ -953,6 +971,19 @@ private struct OBModelStep: View {
         UserDefaults.standard.set(entry.id, forKey: ModelManager.selectedModelDefaultsKey)
         NotificationCenter.default.post(name: .shadowtypeSelectModel, object: nil,
                                         userInfo: ["entry": entry])
+    }
+}
+
+enum OnboardingModelActivation {
+    @discardableResult
+    static func activateIfInstalled(
+        _ entry: ModelCatalogEntry,
+        isInstalled: Bool,
+        activate: (ModelCatalogEntry) -> Void
+    ) -> Bool {
+        guard isInstalled else { return false }
+        activate(entry)
+        return true
     }
 }
 

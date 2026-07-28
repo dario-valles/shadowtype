@@ -6,22 +6,44 @@ import Darwin
 
 final class LocalHTTPParserTests: XCTestCase {
 
-    // Build a socketpair (UDS, stream), send the bytes through the write end, close it, return
-    // the read fd. We use socketpair instead of pipe so that send(2)/recv(2) — which the parser
-    // uses — succeed. (pipe fds reject recv with ENOTSOCK errno 38.) Test must close the read fd.
     private func pipeWith(_ bytes: String) -> Int32 {
+        pipeWith(Data(bytes.utf8))
+    }
+
+    // Build a socketpair (UDS, stream), send all bytes through the write end, close it, and
+    // return the read fd. Tests must close the returned descriptor.
+    private func pipeWith(_ data: Data) -> Int32 {
         var fds: [Int32] = [0, 0]
         let rc = fds.withUnsafeMutableBufferPointer { buf -> Int32 in
             socketpair(AF_UNIX, SOCK_STREAM, 0, buf.baseAddress)
         }
         XCTAssertEqual(rc, 0, "socketpair failed errno=\(errno)")
         let writeEnd = fds[1]
-        let data = Array(bytes.utf8)
-        _ = data.withUnsafeBufferPointer { buf in
-            send(writeEnd, buf.baseAddress, buf.count, 0)
+        var offset = 0
+        while offset < data.count {
+            let written = data.withUnsafeBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return 0 }
+                return send(writeEnd, base.advanced(by: offset), data.count - offset, 0)
+            }
+            XCTAssertGreaterThan(written, 0, "send failed errno=\(errno)")
+            guard written > 0 else { break }
+            offset += written
         }
         close(writeEnd)
         return fds[0]
+    }
+
+    private func assertMalformed(_ request: String,
+                                 file: StaticString = #filePath,
+                                 line: UInt = #line) {
+        let fd = pipeWith(request)
+        defer { close(fd) }
+        XCTAssertThrowsError(try LocalHTTPParser.read(from: fd), file: file, line: line) { error in
+            guard case LocalHTTPError.malformedRequest = error else {
+                XCTFail("expected malformedRequest, got \(error)", file: file, line: line)
+                return
+            }
+        }
     }
 
     func testParsesGetRequestWithoutBody() throws {
@@ -76,18 +98,215 @@ final class LocalHTTPParserTests: XCTestCase {
     }
 
     func testHeadersTooLargeThrows() {
-        // Sized just over the parser's default 8 KiB cap, but small enough to fit in a single
-        // socketpair send buffer (default ~8KiB on macOS but typically grows on first write). The
-        // parser checks the accumulated buffer length BEFORE recv'ing the next chunk, so on the
-        // second iteration after the initial chunk it trips the cap. We use a much smaller cap
-        // by passing maxHeaderBytes explicitly so the test stays under socket buffer limits.
-        let head = "GET / HTTP/1.1\r\n" + String(repeating: "X-Junk: pad\r\n", count: 100)
+        // Include a terminator beyond the limit. The old test omitted it and therefore did not
+        // cover the bug where one final recv was accepted even though it crossed the cap.
+        let head = "GET / HTTP/1.1\r\nX-Junk: " + String(repeating: "a", count: 300) + "\r\n\r\n"
         let fd = pipeWith(head); defer { close(fd) }
         XCTAssertThrowsError(try LocalHTTPParser.read(from: fd, maxHeaderBytes: 256)) { err in
             guard case LocalHTTPError.headersTooLarge = err else {
                 XCTFail("expected headersTooLarge, got \(err)")
                 return
             }
+        }
+    }
+
+    func testHeaderAtExactLimitIsAcceptedAndOneByteOverIsRejected() throws {
+        let prefix = "GET / HTTP/1.1\r\nX: "
+        let suffix = "\r\n\r\n"
+        let limit = 128
+        let exact = prefix + String(repeating: "a",
+                                   count: limit - prefix.utf8.count - suffix.utf8.count) + suffix
+        XCTAssertEqual(exact.utf8.count, limit)
+
+        let exactFD = pipeWith(exact)
+        defer { close(exactFD) }
+        XCTAssertNotNil(try LocalHTTPParser.read(from: exactFD, maxHeaderBytes: limit))
+
+        let overFD = pipeWith(prefix + String(repeating: "a",
+                                             count: limit - prefix.utf8.count - suffix.utf8.count + 1)
+                              + suffix)
+        defer { close(overFD) }
+        XCTAssertThrowsError(try LocalHTTPParser.read(from: overFD, maxHeaderBytes: limit)) { error in
+            guard case LocalHTTPError.headersTooLarge = error else {
+                XCTFail("expected headersTooLarge, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testRejectsInvalidNegativeAndOverflowingContentLength() {
+        for value in ["", "abc", "-1", "+1", "1x", "184467440737095516160"] {
+            assertMalformed("POST / HTTP/1.1\r\nContent-Length: \(value)\r\n\r\n")
+        }
+    }
+
+    func testRejectsDuplicateContentLengthEvenWhenValuesMatch() {
+        assertMalformed("POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\na")
+        assertMalformed("POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nab")
+    }
+
+    func testRejectsDuplicateSecuritySensitiveHeaders() {
+        for name in ["Host", "Origin", "Authorization"] {
+            assertMalformed("GET / HTTP/1.1\r\n\(name): first\r\n\(name): second\r\n\r\n")
+        }
+    }
+
+    func testRejectsTransferEncodingAndTransferEncodingContentLengthConflict() {
+        assertMalformed("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+        assertMalformed("POST / HTTP/1.1\r\nTransfer-Encoding: identity\r\nContent-Length: 0\r\n\r\n")
+    }
+
+    func testBodyAtExactLimitIsAccepted() throws {
+        let body = "abcd"
+        let fd = pipeWith("POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\n\(body)")
+        defer { close(fd) }
+        let request = try LocalHTTPParser.read(from: fd, maxBodyBytes: 4)
+        XCTAssertEqual(request?.body, Data(body.utf8))
+    }
+
+    func testDeclaredBodyOverLimitIsRejected() {
+        let fd = pipeWith("POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nabcde")
+        defer { close(fd) }
+        XCTAssertThrowsError(try LocalHTTPParser.read(from: fd, maxBodyBytes: 4)) { error in
+            guard case LocalHTTPError.bodyTooLarge = error else {
+                XCTFail("expected bodyTooLarge, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testTruncatedBodyIsRejected() {
+        let fd = pipeWith("POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nabc")
+        defer { close(fd) }
+        XCTAssertThrowsError(try LocalHTTPParser.read(from: fd)) { error in
+            guard case LocalHTTPError.clientClosed = error else {
+                XCTFail("expected clientClosed, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testExcessBodyBytesAreRejected() {
+        assertMalformed("POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\nabcd")
+        assertMalformed("GET / HTTP/1.1\r\n\r\nunexpected")
+    }
+
+    func testRejectsMalformedRequestLines() {
+        for requestLine in [
+            "GET",
+            "GET /",
+            "GET / HTTP/1.1 extra",
+            "GET  HTTP/1.1",
+            "GET\t/ HTTP/1.1",
+            "G(ET / HTTP/1.1",
+            "GET / HTTP/1.0",
+        ] {
+            assertMalformed("\(requestLine)\r\nHost: localhost\r\n\r\n")
+        }
+    }
+
+    func testRejectsMalformedHeadersAndObsFold() {
+        for header in [
+            "Missing-Colon",
+            ": value",
+            "Bad Name: value",
+            "Host : localhost",
+            "Bad(Name: value",
+            " continuation",
+            "\tcontinuation",
+        ] {
+            assertMalformed("GET / HTTP/1.1\r\n\(header)\r\n\r\n")
+        }
+    }
+
+    func testRejectsAllHeaderControlCharacters() {
+        for byte in UInt8(0)...UInt8(31) {
+            var data = Data("GET / HTTP/1.1\r\nX-Test: before".utf8)
+            data.append(byte)
+            data.append(Data("after\r\n\r\n".utf8))
+            let fd = pipeWith(data)
+            XCTAssertThrowsError(try LocalHTTPParser.read(from: fd),
+                                 "control byte \(byte) must be rejected") { error in
+                guard case LocalHTTPError.malformedRequest = error else {
+                    XCTFail("expected malformedRequest for byte \(byte), got \(error)")
+                    return
+                }
+            }
+            close(fd)
+        }
+
+        var delete = Data("GET / HTTP/1.1\r\nX-Test: before".utf8)
+        delete.append(127)
+        delete.append(Data("after\r\n\r\n".utf8))
+        let fd = pipeWith(delete)
+        defer { close(fd) }
+        XCTAssertThrowsError(try LocalHTTPParser.read(from: fd))
+    }
+
+    func testAbsoluteHeaderAndBodyDeadlinesExpire() {
+        var headerFDs: [Int32] = [0, 0]
+        XCTAssertEqual(headerFDs.withUnsafeMutableBufferPointer {
+            socketpair(AF_UNIX, SOCK_STREAM, 0, $0.baseAddress)
+        }, 0)
+        defer {
+            close(headerFDs[0])
+            close(headerFDs[1])
+        }
+        XCTAssertThrowsError(try LocalHTTPParser.read(
+            from: headerFDs[0],
+            headerDeadline: DispatchTime.now() + .milliseconds(20)
+        )) { error in
+            guard case LocalHTTPError.deadlineExceeded = error else {
+                XCTFail("expected deadlineExceeded, got \(error)")
+                return
+            }
+        }
+
+        var bodyFDs: [Int32] = [0, 0]
+        XCTAssertEqual(bodyFDs.withUnsafeMutableBufferPointer {
+            socketpair(AF_UNIX, SOCK_STREAM, 0, $0.baseAddress)
+        }, 0)
+        defer {
+            close(bodyFDs[0])
+            close(bodyFDs[1])
+        }
+        let partial = Data("POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\na".utf8)
+        _ = partial.withUnsafeBytes {
+            send(bodyFDs[1], $0.baseAddress, partial.count, 0)
+        }
+        XCTAssertThrowsError(try LocalHTTPParser.read(
+            from: bodyFDs[0],
+            bodyDeadline: DispatchTime.now() + .milliseconds(20)
+        )) { error in
+            guard case LocalHTTPError.deadlineExceeded = error else {
+                XCTFail("expected deadlineExceeded, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testFuzzStyleRandomAndTruncatedInputsNeverCrash() {
+        var state: UInt64 = 0x6a09e667f3bcc909
+        func nextByte() -> UInt8 {
+            state ^= state << 13
+            state ^= state >> 7
+            state ^= state << 17
+            return UInt8(truncatingIfNeeded: state)
+        }
+
+        for _ in 0..<500 {
+            let length = Int(nextByte())
+            let data = Data((0..<length).map { _ in nextByte() })
+            let fd = pipeWith(data)
+            _ = try? LocalHTTPParser.read(from: fd, maxHeaderBytes: 128, maxBodyBytes: 128)
+            close(fd)
+        }
+
+        let valid = Data("POST /v1/completions HTTP/1.1\r\nContent-Length: 4\r\n\r\ntest".utf8)
+        for length in 0..<valid.count {
+            let fd = pipeWith(valid.prefix(length))
+            _ = try? LocalHTTPParser.read(from: fd, maxHeaderBytes: 128, maxBodyBytes: 128)
+            close(fd)
         }
     }
 }

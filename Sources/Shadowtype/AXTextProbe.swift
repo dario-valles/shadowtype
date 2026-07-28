@@ -9,6 +9,92 @@ import Cocoa
 import ApplicationServices
 
 enum AXTextProbe {
+    struct ReadResult {
+        let error: AXError
+        let value: CFTypeRef?
+    }
+
+    struct Access {
+        let value: (AXUIElement, String) -> ReadResult
+        let parameterized: (AXUIElement, String, CFTypeRef) -> ReadResult
+
+        static let live = Access(
+            value: { element, attribute in
+                var value: CFTypeRef?
+                let error = AXUIElementCopyAttributeValue(
+                    element, attribute as CFString, &value)
+                return ReadResult(error: error, value: value)
+            },
+            parameterized: { element, attribute, parameter in
+                var value: CFTypeRef?
+                let error = AXUIElementCopyParameterizedAttributeValue(
+                    element, attribute as CFString, parameter, &value)
+                return ReadResult(error: error, value: value)
+            })
+    }
+
+    // Per-fire memoization for the shared roots of every web-marker chain. A FocusSnapshot owns one
+    // session per candidate element, so prefix/font/bounds/line-position fetch the selected range,
+    // caret marker and document start at most once.
+    final class MarkerSession {
+        let element: AXUIElement
+        private let access: Access
+        private var selectedRangeRead: ReadResult?
+        private var caretMarkerRead: ReadResult?
+        private var documentStartRead: ReadResult?
+
+        init(element: AXUIElement, access: Access = .live) {
+            self.element = element
+            self.access = access
+        }
+
+        func selectedRange() -> CFTypeRef? {
+            if selectedRangeRead == nil {
+                selectedRangeRead = access.value(element, selectedTextMarkerRange)
+            }
+            return selectedRangeRead?.error == .success ? selectedRangeRead?.value : nil
+        }
+
+        func caretMarker() -> CFTypeRef? {
+            if caretMarkerRead == nil {
+                guard let range = selectedRange() else {
+                    caretMarkerRead = ReadResult(error: .noValue, value: nil)
+                    return nil
+                }
+                let primary = access.parameterized(element, startTextMarkerForRange, range)
+                caretMarkerRead = primary.error == .success && primary.value != nil
+                    ? primary
+                    : access.parameterized(element, "_" + startTextMarkerForRange, range)
+            }
+            return caretMarkerRead?.error == .success ? caretMarkerRead?.value : nil
+        }
+
+        func documentStart() -> CFTypeRef? {
+            if documentStartRead == nil {
+                documentStartRead = access.value(element, startTextMarker)
+            }
+            return documentStartRead?.error == .success ? documentStartRead?.value : nil
+        }
+
+        func value(_ attribute: String) -> ReadResult {
+            access.value(element, attribute)
+        }
+
+        func parameterized(_ attribute: String, _ parameter: CFTypeRef) -> ReadResult {
+            access.parameterized(element, attribute, parameter)
+        }
+
+        func parameterizedValue(_ attribute: String, _ parameter: CFTypeRef) -> CFTypeRef? {
+            let read = parameterized(attribute, parameter)
+            return read.error == .success ? read.value : nil
+        }
+
+        func markerRange(start: CFTypeRef, end: CFTypeRef) -> CFTypeRef? {
+            parameterizedValue(
+                textMarkerRangeForUnorderedTextMarkers, [start, end] as CFArray)
+        }
+    }
+
     // Private parameterized/plain attributes used by WebKit & Chromium accessibility.
     static let selectedTextMarkerRange = "AXSelectedTextMarkerRange"
     static let startTextMarker = "AXStartTextMarker"
@@ -39,12 +125,12 @@ enum AXTextProbe {
 
     // The string from the start of the document to the caret (start of the selected marker range).
     // Returns nil unless the element genuinely speaks the text-marker protocol AND yields a string.
-    static func webPrefix(of element: AXUIElement) -> String? {
-        guard let selRange = copyValue(element, selectedTextMarkerRange),
-              let caretMarker = startMarker(element, of: selRange),
-              let docStart = copyValue(element, startTextMarker),
-              let prefixRange = makeMarkerRange(element, start: docStart, end: caretMarker),
-              let str = copyParam(element, stringForTextMarkerRange, prefixRange) as? String
+    static func webPrefix(of element: AXUIElement, session provided: MarkerSession? = nil) -> String? {
+        let session = provided ?? MarkerSession(element: element)
+        guard let caretMarker = session.caretMarker(),
+              let docStart = session.documentStart(),
+              let prefixRange = session.markerRange(start: docStart, end: caretMarker),
+              let str = session.parameterizedValue(stringForTextMarkerRange, prefixRange) as? String
         else { return nil }
         return str
     }
@@ -67,16 +153,18 @@ enum AXTextProbe {
     // accessor is absent, AND there's no index API/kAXValue). Derive the caret marker from the caret's
     // on-screen point instead, then read document-start→caret. All four attributes used here are present
     // on Mail's web area per a live AX attribute dump. nil if any step is unsupported/empty.
-    static func webPrefixViaPosition(of element: AXUIElement) -> String? {
-        guard let caretRect = webCaretBounds(of: element),
-              let docStart = copyValue(element, startTextMarker) else { return nil }
+    static func webPrefixViaPosition(of element: AXUIElement,
+                                     session provided: MarkerSession? = nil) -> String? {
+        let session = provided ?? MarkerSession(element: element)
+        guard let caretRect = webCaretBounds(of: element, session: session),
+              let docStart = session.documentStart() else { return nil }
         // A point inside the caret line: caret X, vertical middle of its line box (top-left AX coords —
         // self-consistent with the bounds we just read, so the flip convention doesn't matter).
         var pt = CGPoint(x: caretRect.minX, y: caretRect.midY)
         guard let pv = AXValueCreate(.cgPoint, &pt),
-              let caretMarker = copyParam(element, textMarkerForPosition, pv),
-              let prefixRange = makeMarkerRange(element, start: docStart, end: caretMarker),
-              let str = copyParam(element, stringForTextMarkerRange, prefixRange) as? String
+              let caretMarker = session.parameterizedValue(textMarkerForPosition, pv),
+              let prefixRange = session.markerRange(start: docStart, end: caretMarker),
+              let str = session.parameterizedValue(stringForTextMarkerRange, prefixRange) as? String
         else { return nil }
         return str
     }
@@ -137,12 +225,13 @@ enum AXTextProbe {
     // character. Chromium exposes font via AXAttributedStringForTextMarkerRange but NOT via the
     // range-based kAXAttributedStringForRange that native fields use — so the native caretFont path
     // can't see it and the ghost fell back to a too-small estimate. nil unless a real font is present.
-    static func webFont(of element: AXUIElement) -> NSFont? {
-        guard let selRange = copyValue(element, selectedTextMarkerRange),
-              let caretMarker = startMarker(element, of: selRange),
-              let docStart = copyValue(element, startTextMarker),
-              let prefixRange = makeMarkerRange(element, start: docStart, end: caretMarker),
-              let attr = copyParam(element, attributedStringForTextMarkerRange, prefixRange) as? NSAttributedString,
+    static func webFont(of element: AXUIElement, session provided: MarkerSession? = nil) -> NSFont? {
+        let session = provided ?? MarkerSession(element: element)
+        guard let caretMarker = session.caretMarker(),
+              let docStart = session.documentStart(),
+              let prefixRange = session.markerRange(start: docStart, end: caretMarker),
+              let attr = session.parameterizedValue(
+                  attributedStringForTextMarkerRange, prefixRange) as? NSAttributedString,
               attr.length > 0 else { return nil }
         return attr.attribute(.font, at: attr.length - 1, effectiveRange: nil) as? NSFont
     }
@@ -158,28 +247,30 @@ enum AXTextProbe {
 
     // Bounds of the zero-length caret marker range, in AX top-left global coords. The caret is a
     // ZERO-WIDTH rect (FR-OV-3 gotcha) — callers must NOT reject it via CGRect.isEmpty.
-    static func webCaretBounds(of element: AXUIElement) -> CGRect? {
-        guard let selRange = copyValue(element, selectedTextMarkerRange) else { return nil }
+    static func webCaretBounds(of element: AXUIElement,
+                               session provided: MarkerSession? = nil) -> CGRect? {
+        let session = provided ?? MarkerSession(element: element)
+        guard let selRange = session.selectedRange() else { return nil }
         // (1) Bounds of the selection's own (caret) range — the clean case (Safari, many WebKit fields).
         // A caret is zero-WIDTH but has the line height; reject a fully degenerate (0,y,0x0) rect, which
         // Chromium/contenteditable (Gmail, Slack) returns here, and fall through to the marker fallbacks.
-        if let r = markerRangeBounds(element, range: selRange) { return r }
+        if let r = markerRangeBounds(session, range: selRange) { return r }
 
         // The caret marker is the START of the selection range; both fallbacks below hang off it.
-        guard let caretMarker = startMarker(element, of: selRange) else { return nil }
+        guard let caretMarker = session.caretMarker() else { return nil }
 
         // (2) Some Chromium builds answer bounds only for an EXPLICIT zero-length range built at the
         // caret marker, not for the raw selection range — try that.
-        if let zero = makeMarkerRange(element, start: caretMarker, end: caretMarker),
-           let r = markerRangeBounds(element, range: zero) { return r }
+        if let zero = session.markerRange(start: caretMarker, end: caretMarker),
+           let r = markerRangeBounds(session, range: zero) { return r }
 
         // (3) Last resort: the glyph rect of the character immediately BEFORE the caret always has a
         // real height even when the empty-caret rect collapses to 0×0 (the Gmail case). Anchor the
         // caret at that glyph's trailing edge (maxX) so the ghost seats inline at the caret instead of
         // the field's top-left frame estimate.
-        if let prevMarker = copyParam(element, previousTextMarker, caretMarker),
-           let prevRange = makeMarkerRange(element, start: prevMarker, end: caretMarker),
-           let glyph = markerRangeBounds(element, range: prevRange) {
+        if let prevMarker = session.parameterizedValue(previousTextMarker, caretMarker),
+           let prevRange = session.markerRange(start: prevMarker, end: caretMarker),
+           let glyph = markerRangeBounds(session, range: prevRange) {
             return CGRect(x: glyph.maxX, y: glyph.minY, width: 0, height: glyph.size.height)
         }
         return nil
@@ -188,11 +279,9 @@ enum AXTextProbe {
     // Bounds of a text-marker range as an AX top-left CGRect, accepting only a real rect (finite origin
     // AND positive height — a caret/glyph always has the line height). Returns nil for the degenerate
     // (0,y,0x0) that contenteditable hands back, so callers can try the next fallback.
-    private static func markerRangeBounds(_ element: AXUIElement, range: CFTypeRef) -> CGRect? {
-        var boundsRef: CFTypeRef?
-        let err = AXUIElementCopyParameterizedAttributeValue(
-            element, boundsForTextMarkerRange as CFString, range, &boundsRef)
-        guard err == .success, let bRef = boundsRef,
+    private static func markerRangeBounds(_ session: MarkerSession, range: CFTypeRef) -> CGRect? {
+        let read = session.parameterized(boundsForTextMarkerRange, range)
+        guard read.error == .success, let bRef = read.value,
               CFGetTypeID(bRef) == AXValueGetTypeID() else { return nil }
         var rect = CGRect.zero
         guard AXValueGetValue(bRef as! AXValue, .cgRect, &rect),
@@ -205,6 +294,13 @@ enum AXTextProbe {
     // preserving non-marker surfaces), while `.lineEnd`/`.midLine` are KNOWN answers the caller trusts —
     // a successful marker read must never be conflated with "unavailable".
     enum CaretLineProbe { case lineEnd, midLine, unavailable }
+    enum NextMarkerAvailability { case available, documentEnd, unavailable }
+
+    static func nextMarkerAvailability(error: AXError, hasValue: Bool) -> NextMarkerAvailability {
+        if error == .success { return hasValue ? .available : .documentEnd }
+        if error == .noValue { return .documentEnd }
+        return .unavailable
+    }
 
     // The text from a caret to the end of its visual line. End-of-line iff empty, a line break, or only
     // trailing whitespace before the break; any other character ⇒ mid-line (the ghost would overlap it).
@@ -221,22 +317,36 @@ enum AXTextProbe {
     // line REMAINDER after the caret (caret → visual-line end), falling back to a single next-marker hop.
     // Returns `.unavailable` only when the marker protocol truly can't answer, so the caller never
     // suppresses on a surface it genuinely can't read (and never fires mid-line when it CAN read).
-    static func webCaretLinePosition(of element: AXUIElement) -> CaretLineProbe {
-        guard let selRange = copyValue(element, selectedTextMarkerRange),
-              let caretMarker = startMarker(element, of: selRange) else { return .unavailable }
+    static func webCaretLinePosition(of element: AXUIElement,
+                                     session provided: MarkerSession? = nil) -> CaretLineProbe {
+        let session = provided ?? MarkerSession(element: element)
+        guard let caretMarker = session.caretMarker() else { return .unavailable }
         // (1) Preferred: remainder of the current VISUAL line after the caret (handles soft-wrap).
-        if let lineEnd = lineEndMarker(element, from: caretMarker),
-           let range = makeMarkerRange(element, start: caretMarker, end: lineEnd),
-           let s = copyParam(element, stringForTextMarkerRange, range) as? String {
-            if Diag.isEnabled { Diag.log("webLine: rem=\"\(s.prefix(40))\" via=line") }
+        if let lineEnd = lineEndMarker(session, from: caretMarker),
+           let range = session.markerRange(start: caretMarker, end: lineEnd),
+           let s = session.parameterizedValue(stringForTextMarkerRange, range) as? String {
+            if Diag.isEnabled {
+                Diag.log("webLine: chars=\(s.utf16.count) empty=\(s.isEmpty) via=line")
+            }
             return classifyLineRemainder(s)
         }
         // (2) Fallback: single next-marker hop (the original behavior) — still a DEFINITE answer.
         // No marker after the caret → caret sits at the very end of the document → end of line.
-        guard let nextMarker = copyParam(element, nextTextMarker, caretMarker) else { return .lineEnd }
-        if let range = makeMarkerRange(element, start: caretMarker, end: nextMarker),
-           let s = copyParam(element, stringForTextMarkerRange, range) as? String {
-            if Diag.isEnabled { Diag.log("webLine: rem=\"\(s.prefix(40))\" via=next") }
+        let nextRead = session.parameterized(nextTextMarker, caretMarker)
+        switch nextMarkerAvailability(error: nextRead.error, hasValue: nextRead.value != nil) {
+        case .documentEnd:
+            return .lineEnd
+        case .unavailable:
+            return .unavailable
+        case .available:
+            break
+        }
+        guard let nextMarker = nextRead.value else { return .unavailable }
+        if let range = session.markerRange(start: caretMarker, end: nextMarker),
+           let s = session.parameterizedValue(stringForTextMarkerRange, range) as? String {
+            if Diag.isEnabled {
+                Diag.log("webLine: chars=\(s.utf16.count) empty=\(s.isEmpty) via=next")
+            }
             return classifyLineRemainder(s)
         }
         // Had a caret marker but couldn't read forward → protocol half-present; don't suppress.
@@ -245,11 +355,12 @@ enum AXTextProbe {
 
     // The caret → end-of-visual-line marker, via the rightLine SPI (caret to line end) then the
     // full-line SPI; nil if neither is supported. Each tries the public name then the underscore SPI.
-    private static func lineEndMarker(_ element: AXUIElement, from caret: CFTypeRef) -> CFTypeRef? {
+    private static func lineEndMarker(_ session: MarkerSession, from caret: CFTypeRef) -> CFTypeRef? {
         for name in [rightLineTextMarkerRangeForTextMarker, lineTextMarkerRangeForTextMarker] {
-            if let lineRange = copyParam(element, name, caret) ?? copyParam(element, "_" + name, caret),
-               let end = copyParam(element, endTextMarkerForTextMarkerRange, lineRange)
-                      ?? copyParam(element, "_" + endTextMarkerForTextMarkerRange, lineRange) {
+            if let lineRange = session.parameterizedValue(name, caret)
+                    ?? session.parameterizedValue("_" + name, caret),
+               let end = session.parameterizedValue(endTextMarkerForTextMarkerRange, lineRange)
+                    ?? session.parameterizedValue("_" + endTextMarkerForTextMarkerRange, lineRange) {
                 return end
             }
         }
@@ -414,51 +525,216 @@ enum AXTextProbe {
         return best
     }
 
-    // Full visible text of a web area (the whole page), capped to the recent tail. The messages nearest
-    // the composer carry the reply language and continuation context. Used as exact, permission-free,
-    // synchronous context — strictly better fidelity than OCR where a web area exists. Best-effort
-    // with three fallbacks; nil if none yields text.
-    static func webAreaFullText(of webArea: AXUIElement, maxChars: Int = 20_000) -> String? {
-        // (1) The element's own full text-marker range (the clean Chromium/WebKit way).
-        if let range = copyParam(webArea, textMarkerRangeForUIElement, webArea),
-           let s = copyParam(webArea, stringForTextMarkerRange, range) as? String, !s.isEmpty {
-            return recentText(s, maxChars: maxChars)
+    struct PageContextKey: Hashable {
+        let focusSequence: UInt64
+        let webArea: AXUIElement
+
+        static func == (lhs: PageContextKey, rhs: PageContextKey) -> Bool {
+            lhs.focusSequence == rhs.focusSequence
+                && CFEqual(lhs.webArea, rhs.webArea)
         }
-        // (2) Document start→end markers.
-        if let docStart = copyValue(webArea, startTextMarker),
-           let docEnd = copyValue(webArea, endTextMarker),
-           let range = makeMarkerRange(webArea, start: docStart, end: docEnd),
-           let s = copyParam(webArea, stringForTextMarkerRange, range) as? String, !s.isEmpty {
-            return recentText(s, maxChars: maxChars)
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(focusSequence)
+            hasher.combine(CFHash(webArea))
         }
-        // (3) Fallback: bounded tail-first walk gathering descendant text values.
-        return gatherText(webArea, maxChars: maxChars)
+    }
+
+    final class PageTextCache<Key: Hashable> {
+        private struct Entry {
+            let text: String?
+            let completedAt: TimeInterval
+        }
+
+        private let queue: DispatchQueue
+        private let ttl: TimeInterval
+        private let lock = NSLock()
+        private var entries: [Key: Entry] = [:]
+        private var pendingKey: Key?
+        private var pendingToken: UUID?
+        private var pendingWork: DispatchWorkItem?
+        private var pendingCompletions: [(String?) -> Void] = []
+
+        init(queue: DispatchQueue = DispatchQueue(
+            label: "com.shadowtype.ax-page-context", qos: .utility),
+             ttl: TimeInterval = 1.0) {
+            self.queue = queue
+            self.ttl = ttl
+        }
+
+        @discardableResult
+        func request(
+            key: Key,
+            now: TimeInterval = ProcessInfo.processInfo.systemUptime,
+            load: @escaping (_ isCancelled: @escaping () -> Bool) -> String?,
+            completion: ((String?) -> Void)? = nil
+        ) -> String? {
+            lock.lock()
+            let cached = entries[key]
+            if let cached, now - cached.completedAt < ttl {
+                lock.unlock()
+                if let completion {
+                    DispatchQueue.main.async { completion(cached.text) }
+                }
+                return cached.text
+            }
+            if pendingKey == key {
+                if let completion { pendingCompletions.append(completion) }
+                lock.unlock()
+                return cached?.text
+            }
+
+            pendingWork?.cancel()
+            let token = UUID()
+            pendingKey = key
+            pendingToken = token
+            pendingCompletions = completion.map { [$0] } ?? []
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                let text = load { [weak self] in
+                    guard let self else { return true }
+                    self.lock.lock()
+                    defer { self.lock.unlock() }
+                    return self.pendingToken != token
+                }
+                self.lock.lock()
+                let stillCurrent = self.pendingToken == token
+                if stillCurrent {
+                    self.entries[key] = Entry(
+                        text: text,
+                        completedAt: ProcessInfo.processInfo.systemUptime)
+                    self.pendingKey = nil
+                    self.pendingToken = nil
+                    self.pendingWork = nil
+                }
+                let completions = stillCurrent ? self.pendingCompletions : []
+                if stillCurrent { self.pendingCompletions = [] }
+                self.lock.unlock()
+                guard stillCurrent, !completions.isEmpty else { return }
+                DispatchQueue.main.async {
+                    completions.forEach { $0(text) }
+                }
+            }
+            pendingWork = work
+            lock.unlock()
+            queue.async(execute: work)
+            return cached?.text
+        }
+    }
+
+    private static let pageTextCache = PageTextCache<PageContextKey>()
+
+    // Never reads the web area's whole marker range: that range contains off-screen history. This
+    // returns only a recent cached result and schedules a visible-descendant walk on the AX utility
+    // queue. Repeated requests for one focus/web-area pair are coalesced and cached for one second;
+    // switching focus or web area cancels the obsolete walk.
+    static func webAreaFullText(
+        of webArea: AXUIElement,
+        focusSequence: UInt64 = 0,
+        maxChars: Int = 20_000,
+        completion: ((String?) -> Void)? = nil
+    ) -> String? {
+        let key = PageContextKey(
+            focusSequence: focusSequence,
+            webArea: webArea)
+        let displayBounds = activeDisplayBounds()
+        return pageTextCache.request(
+            key: key,
+            load: { isCancelled in
+                gatherVisibleText(
+                    webArea,
+                    maxChars: maxChars,
+                    displayBounds: displayBounds,
+                    isCancelled: isCancelled)
+            },
+            completion: completion)
     }
 
     static func recentText(_ text: String, maxChars: Int) -> String {
         String(text.suffix(maxChars))
     }
 
-    // Bounded tail-first walk collecting kAXValue strings from descendants (AXStaticText etc.).
-    // Composer-adjacent text carries the reply language and continuation context; the character and
-    // visit caps keep the AX walk bounded.
-    private static func gatherText(_ root: AXUIElement, maxChars: Int, visitCap: Int = 4000) -> String? {
+    // Bounded tail-first walk collecting values only from nodes AX explicitly calls visible, or whose
+    // AXFrame intersects an active display. Unknown-frame descendants reached through ordinary
+    // AXChildren are traversed but never captured, preventing an off-screen document subtree from
+    // leaking into page context. The cancellation check runs between every pair of AX IPC calls.
+    static func gatherVisibleText(
+        _ root: AXUIElement,
+        maxChars: Int,
+        visitCap: Int = 300,
+        displayBounds: [CGRect],
+        access: Access = .live,
+        isCancelled: () -> Bool
+    ) -> String? {
+        struct Candidate {
+            let element: AXUIElement
+            let axProvedVisible: Bool
+        }
+
         var chunks: [String] = []
-        var frontier = children(of: root)
+        let rootVisible = elementArray(
+            access.value(root, kAXVisibleChildrenAttribute as String))
+        let initial = rootVisible
+            ?? elementArray(access.value(root, kAXChildrenAttribute as String))
+            ?? []
+        var frontier = initial.map {
+            Candidate(element: $0, axProvedVisible: rootVisible != nil)
+        }
         var visited = 0
         var collected = 0
-        while !frontier.isEmpty, collected < maxChars, visited < visitCap {
-            let node = frontier.removeLast()
+        while !frontier.isEmpty, collected < maxChars, visited < visitCap, !isCancelled() {
+            let candidate = frontier.removeLast()
             visited += 1
-            if let v = stringValue(node), !v.isEmpty {
+            let frame = elementFrame(candidate.element, access: access)
+            let frameIsVisible = frame.map { nodeFrame in
+                displayBounds.contains(where: { displayFrame in
+                    displayFrame.intersects(nodeFrame)
+                })
+            } ?? false
+            let visible = candidate.axProvedVisible || frameIsVisible
+            if visible, !isCancelled(),
+               let v = stringValue(candidate.element, access: access), !v.isEmpty {
                 chunks.append(v)
                 collected += v.count + 1
             }
-            frontier.append(contentsOf: children(of: node))
+            guard !isCancelled() else { break }
+            let visibleChildren = elementArray(
+                access.value(candidate.element, kAXVisibleChildrenAttribute as String))
+            let descendants = visibleChildren
+                ?? elementArray(access.value(
+                    candidate.element, kAXChildrenAttribute as String))
+                ?? []
+            frontier.append(contentsOf: descendants.map {
+                Candidate(element: $0, axProvedVisible: visibleChildren != nil)
+            })
         }
         let trimmed = chunks.reversed().joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : recentText(trimmed, maxChars: maxChars)
+    }
+
+    private static func elementArray(_ result: ReadResult) -> [AXUIElement]? {
+        guard result.error == .success else { return nil }
+        return result.value as? [AXUIElement]
+    }
+
+    private static func elementFrame(_ element: AXUIElement, access: Access) -> CGRect? {
+        let result = access.value(element, "AXFrame")
+        guard result.error == .success, let value = result.value,
+              CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var rect = CGRect.zero
+        guard AXValueGetValue(value as! AXValue, .cgRect, &rect),
+              rect.origin.x.isFinite, rect.origin.y.isFinite,
+              rect.width > 0, rect.height > 0 else { return nil }
+        return rect
+    }
+
+    private static func activeDisplayBounds() -> [CGRect] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var displays = Array(repeating: CGDirectDisplayID(), count: Int(count))
+        guard CGGetActiveDisplayList(count, &displays, &count) == .success else { return [] }
+        return displays.prefix(Int(count)).map(CGDisplayBounds)
     }
 
     private static func role(of element: AXUIElement) -> String? {
@@ -474,10 +750,9 @@ enum AXTextProbe {
         return (r as! AXUIElement)
     }
 
-    private static func stringValue(_ element: AXUIElement) -> String? {
-        var v: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &v) == .success,
-              let s = v as? String else { return nil }
+    private static func stringValue(_ element: AXUIElement, access: Access = .live) -> String? {
+        let result = access.value(element, kAXValueAttribute as String)
+        guard result.error == .success, let s = result.value as? String else { return nil }
         return s
     }
 

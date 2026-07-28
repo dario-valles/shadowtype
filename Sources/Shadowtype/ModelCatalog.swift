@@ -5,13 +5,33 @@
 // this list — every entry is free, with a RAM warning when `ramOK(for:physicalBytes:)`
 // is false, and a live model swap on selection.
 //
-// Honesty about checksums: `sha256` is OPTIONAL. A pinned hash is only ever set for an LFS object we
-// have actually downloaded and verified ourselves (the existing default model); for the larger entries
-// we ship `nil` rather than inventing a hash we cannot stand behind. `nil` no longer means "unchecked":
-// ModelManager falls back to the SHA-256 Hugging Face reports for the LFS object (`X-Linked-Etag`) and
-// only drops to a GGUF-magic sanity check when that header is absent — and it reports which of the
-// three happened via `lastVerification`, so the UI never overclaims.
+// Honesty about checksums: `sha256` is OPTIONAL. A pinned hash is only ever set for an LFS object whose
+// digest was release-audited independently of the download response (currently only the default model).
+// For the larger entries we ship `nil` rather than inventing a hash we cannot stand behind. The
+// first-class `catalogIntegrity` state and `catalogIntegrityLabel` make that absence explicit to UI/API
+// callers. A same-response Hugging Face `X-Linked-Etag` can detect corruption in transit, but is not an
+// independent trust anchor against an upstream replacement.
 import Foundation
+
+/// Release-time trust attached to a curated catalog entry. This describes the catalog metadata, not
+/// whether a particular local file has already passed ModelManager's download-time checks.
+enum ModelCatalogIntegrity: String, Hashable {
+    /// The release embeds an independently audited digest for this exact GGUF.
+    case releasePinnedSHA256
+    /// The release has no independent digest for this GGUF. Server-reported checksums are useful for
+    /// transfer integrity but do not turn this state into a release pin.
+    case unverified
+
+    /// Stable disclosure copy for model pickers, APIs, logs, and accessibility descriptions.
+    var label: String {
+        switch self {
+        case .releasePinnedSHA256:
+            return "Release-pinned SHA-256"
+        case .unverified:
+            return "UNVERIFIED — no release-pinned SHA-256"
+        }
+    }
+}
 
 /// FR-LM-1: one selectable local model. `Identifiable` (stable `id`) so SwiftUI/AppKit lists can key on
 /// it; `Hashable` so it can back a menu/selection. Every model is free.
@@ -24,10 +44,17 @@ struct ModelCatalogEntry: Identifiable, Hashable {
     let fileName: String
     /// HTTPS `resolve` URL of the GGUF LFS object on Hugging Face.
     let url: URL
-    /// Lowercase hex SHA-256 of the LFS object, or nil when no hash is pinned yet — in which case
-    /// ModelManager verifies against the server-reported `X-Linked-Etag` instead. We only ever pin
-    /// hashes we have verified ourselves; a pin always WINS over the header (see verificationPlan).
+    /// Lowercase hex SHA-256 of the LFS object, or nil when this release has no independently audited
+    /// hash. ModelManager may still check a server-reported `X-Linked-Etag` for transfer integrity,
+    /// but that value is supplied alongside the download and is not a release trust anchor.
     let sha256: String?
+    /// Explicit release-time integrity state for UI/API consumers. Do not infer user-facing trust from
+    /// whether a server happened to include a checksum response header.
+    var catalogIntegrity: ModelCatalogIntegrity {
+        sha256 == nil ? .unverified : .releasePinnedSHA256
+    }
+    /// Ready-to-display disclosure. Unpinned catalog entries deliberately include "UNVERIFIED".
+    var catalogIntegrityLabel: String { catalogIntegrity.label }
     /// Approximate resident memory (GiB) the loaded model needs; drives the RAM gate (PRD §6).
     let approxRAMGB: Double
     /// Approximate on-disk download size (GB, 1e9). Shown next to the name in the model picker.
@@ -58,8 +85,10 @@ enum ModelCatalog {
     /// *Base* (pretrained, NOT instruct) GGUFs so they continue text under the raw-prefix prompt path
     /// (no chat template) instead of chatting — same rationale as the Gemma 3 base default; the Gemma 4
     /// entries fall back to instruct fed raw-prefix because no base GGUF exists for them at all.
-    /// All non-default `sha256` are `nil` until pinned at release
-    /// — we do not hallucinate hashes. `downloadGB` is the verified LFS Content-Length. Ordered
+    /// All non-default `sha256` are `nil` until independently audited and pinned in a release
+    /// — we do not hallucinate hashes or trust the download server to authenticate itself. Their
+    /// `catalogIntegrity` is therefore explicitly `.unverified`. `downloadGB` is the observed LFS
+    /// Content-Length, not a security claim. Ordered
     /// small→large by `approxRAMGB` so RAM-fit selection (`recommended`) reads naturally.
     static let entries: [ModelCatalogEntry] = [
         // The shipping free default. Hash + URL mirror ModelManager.default* exactly (gemma-3-1b-pt
