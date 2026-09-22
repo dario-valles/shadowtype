@@ -84,9 +84,9 @@ final class ModelCatalogTests: XCTestCase {
     func testScreenshotModelsPresent() {
         // Every model shown in the target picker must be in the catalog.
         let want = [
-            "gemma-3-1b-pt-q4_k_m", "qwen3-1.7b-base-q4_k_m", "qwen3-4b-base-q4_k_m",
+            "gemma-3-1b-pt-q4_k_m", "qwen3.5-2b-base-q4_k_m", "qwen3.5-4b-base-q4_k_m",
             "gemma-4-e2b-it-qat-q4_0", "gemma-4-e4b-it-qat-q4_0", "gemma-4-12b-it-qat-q4_0",
-            "qwen3-8b-base-q4_k_m", "gemma-4-26b-a4b-it-qat-q4_0", "qwen3-30b-a3b-base-q4_k_m",
+            "qwen3.5-9b-base-q4_k_m", "gemma-4-26b-a4b-it-qat-q4_0", "qwen3.5-35b-a3b-base-q4_k_m",
         ]
         let ids = Set(ModelCatalog.entries.map { $0.id })
         for id in want { XCTAssertTrue(ids.contains(id), "missing catalog entry \(id)") }
@@ -133,6 +133,30 @@ final class ModelCatalogTests: XCTestCase {
     func testLlama31IsNotInTheCatalog() {
         XCTAssertFalse(ModelCatalog.entries.contains { $0.id.contains("llama") },
                        "llama-3.1-8b-instruct was deliberately removed; do not re-add it")
+    }
+
+    /// Issue #9 part 2: the four Qwen 3 Base entries were replaced 1:1 by Qwen 3.5 Base. This pins the
+    /// swap in both directions — the new ids exist, the old ones are gone — and re-asserts the two
+    /// rules the Qwen rows carry: BASE (never instruct, or the ghost silently disappears on dangling
+    /// prefixes) and sourced from the same ungated mradermacher GGUF repos the catalog already trusts.
+    func testQwenEntriesAreTheQwen35BaseFamily() {
+        let qwen = ModelCatalog.entries.filter { $0.id.hasPrefix("qwen") }
+        XCTAssertEqual(qwen.map(\.id), [
+            "qwen3.5-2b-base-q4_k_m", "qwen3.5-4b-base-q4_k_m",
+            "qwen3.5-9b-base-q4_k_m", "qwen3.5-35b-a3b-base-q4_k_m",
+        ], "the Qwen rows must be the Qwen 3.5 Base family, small→large")
+        for entry in qwen {
+            XCTAssertFalse(entry.isInstruct,
+                           "\(entry.id): a Qwen Base GGUF exists at every tier — never ship the instruct one")
+            XCTAssertTrue(entry.fileName.contains("-Base."),
+                          "\(entry.id): \(entry.fileName) is not a -Base GGUF")
+            XCTAssertEqual(entry.url.host, "huggingface.co")
+            XCTAssertTrue(entry.url.path.hasPrefix("/mradermacher/"),
+                          "\(entry.id): unexpected publisher: \(entry.url.path)")
+            XCTAssertNil(entry.sha256, "\(entry.id): no Qwen digest has been release-audited")
+        }
+        XCTAssertFalse(ModelCatalog.entries.contains { $0.id.hasPrefix("qwen3-") },
+                       "the Qwen 3 entries were retired for Qwen 3.5; do not re-add them")
     }
 
     // MARK: - RAM gate (FR-LM-2, PRD §6)
@@ -207,23 +231,31 @@ final class ModelCatalogTests: XCTestCase {
 
     /// WAS `testRecommendedPicksWithinRAM`, which asserted the recommendation on a 64 GB Mac IS the
     /// LARGEST catalog entry. That assertion LOCKED IN the wrong objective: `recommended()` is the
-    /// pre-selected FIRST-RUN download, and the largest entry (qwen3-30b-a3b, 18.6 GB down / ~20 GB
+    /// pre-selected FIRST-RUN download, and the largest entry (qwen3.5-35b-a3b, 21.2 GB down / ~22.8 GB
     /// resident) cannot produce a first token inside the coordinator's ~400 ms deadline on a ~1500-token
     /// prompt — the ghost is silently dropped and the product reads as broken. New expectation: even a
     /// 64 GB Mac is recommended the 4B class; the big entries stay manually selectable.
     func testRecommendedIsCappedAtTheFourBClassEvenOnHugeMachines() {
         for gigs: UInt64 in [16, 24, 32, 64, 128] {
             let rec = ModelCatalog.recommended(physicalBytes: machine(gigs))
-            XCTAssertEqual(rec.id, "qwen3-4b-base-q4_k_m", "\(gigs)GB recommended \(rec.id)")
+            XCTAssertEqual(rec.id, "qwen3.5-4b-base-q4_k_m", "\(gigs)GB recommended \(rec.id)")
             XCTAssertTrue(ModelCatalog.ramOK(for: rec, physicalBytes: machine(gigs)))
         }
         let largest = ModelCatalog.entries.max(by: { $0.approxRAMGB < $1.approxRAMGB })!
         XCTAssertNotEqual(ModelCatalog.recommended(physicalBytes: machine(64)).id, largest.id,
                           "the recommendation must not be 'largest that fits'")
+        // `recommendedCapRAMGB` is DERIVED from the 4B-class entry, not an independent constant. A
+        // catalog pass that resizes the 4B entry (Qwen 3 4B was 3.5 GB; Qwen 3.5 4B is 3.8 GB) and
+        // leaves the cap behind silently demotes the first-run pick to the 2B. Pin the coupling.
+        let fourB = ModelCatalog.entries.first { $0.id == "qwen3.5-4b-base-q4_k_m" }!
+        XCTAssertGreaterThanOrEqual(
+            ModelCatalog.recommendedCapRAMGB(physicalBytes: machine(16)), fourB.approxRAMGB,
+            "the >=16 GB cap must still admit the 4B-class entry it is sized around"
+        )
     }
 
     /// The "product reads as broken" regression, pinned STRUCTURALLY so it survives a catalog reshuffle
-    /// that renames or replaces `qwen3-4b-base-q4_k_m`: on a 32 GB Mac the first-run pick must stay in
+    /// that renames or replaces `qwen3.5-4b-base-q4_k_m`: on a 32 GB Mac the first-run pick must stay in
     /// the small class, because anything heavier misses the ~400 ms first-token deadline and the ghost
     /// never appears at all. Bounded by `recommendedCapRAMGB`, not by a hardcoded id.
     func testRecommendedOnAThirtyTwoGBMacStaysInTheFastClass() {
@@ -232,12 +264,17 @@ final class ModelCatalogTests: XCTestCase {
         XCTAssertLessThanOrEqual(rec.approxRAMGB, cap,
                                  "32GB pick \(rec.id) (\(rec.approxRAMGB) GB) exceeds the deadline cap")
         XCTAssertLessThanOrEqual(rec.approxRAMGB, 4.0, "32GB pick must stay in the ~4B class")
-        // The failure this encodes: an 18.6 GB 30B MoE fits 32 GB of RAM and was picked by the old
-        // largest-that-fits rule, then showed no ghost.
-        let heaviest = ModelCatalog.entries.max(by: { $0.approxRAMGB < $1.approxRAMGB })!
-        XCTAssertTrue(ModelCatalog.ramOK(for: heaviest, physicalBytes: machine(32)),
-                      "precondition: the heaviest entry does fit 32 GB — that is why the cap exists")
-        XCTAssertNotEqual(rec.id, heaviest.id)
+        // The failure this encodes: a big MoE fits 32 GB of RAM and was picked by the old
+        // largest-that-fits rule, then showed no ghost. Phrased as "the heaviest entry that FITS"
+        // rather than "the heaviest entry", because the heaviest entry itself moved out of a 32 GB
+        // budget when Qwen 3 30B-A3B (20.0 GB) became Qwen 3.5 35B-A3B (22.8 GB, > the 24 GB budget).
+        // The regression is unchanged: a ~16 GB MoE still fits and would still be picked.
+        let heaviestThatFits = ModelCatalog.entries
+            .filter { ModelCatalog.ramOK(for: $0, physicalBytes: machine(32)) }
+            .max(by: { $0.approxRAMGB < $1.approxRAMGB })!
+        XCTAssertGreaterThan(heaviestThatFits.approxRAMGB, 10.0,
+                             "precondition: an entry far over the cap still fits 32 GB — hence the cap")
+        XCTAssertNotEqual(rec.id, heaviestThatFits.id)
         // A base model, so it continues raw-prefix text instead of emitting end-of-turn (bug 3).
         XCTAssertFalse(rec.isInstruct)
     }
@@ -274,13 +311,13 @@ final class ModelCatalogTests: XCTestCase {
     }
 
     func testRecommendedPrefersBaseOverLargerInstruct() {
-        // WAS: 17 GB expected qwen3-8b-base (6.8), beating the now-removed Llama-3.1-8B-Instruct (7.5).
-        // With the first-token-deadline cap the pick is the 4B base instead — still a BASE model, which
-        // is what this test is about: instruct models emit end-of-turn on dangling prefixes and drop
-        // the ghost, so the recommender must never hand a first-run user one.
+        // WAS: 17 GB expected the Qwen 8B base (6.8), beating the now-removed Llama-3.1-8B-Instruct
+        // (7.5). With the first-token-deadline cap the pick is the 4B base instead — still a BASE
+        // model, which is what this test is about: instruct models emit end-of-turn on dangling
+        // prefixes and drop the ghost, so the recommender must never hand a first-run user one.
         let rec = ModelCatalog.recommended(physicalBytes: machine(17))
         XCTAssertFalse(rec.isInstruct)
-        XCTAssertEqual(rec.id, "qwen3-4b-base-q4_k_m")
+        XCTAssertEqual(rec.id, "qwen3.5-4b-base-q4_k_m")
     }
 
     func testRecommendedPickIsStillRamSafe() {
@@ -362,16 +399,19 @@ final class ModelCatalogTests: XCTestCase {
 
     // MARK: - Network smoke test (OPT-IN: set SHADOWTYPE_NET_TESTS=1)
 
-    /// Verifies each Gemma 4 QAT resolve URL actually exists and its Content-Length matches the pinned
+    /// Verifies EVERY catalog resolve URL actually exists and its Content-Length matches the pinned
     /// `downloadGB` (within 5%). This is the last guard before pinning sha256 hashes at release — a
     /// typo in Google's irregular filenames (`gemma-4-E2B_q4_0-it.gguf` vs `...-12b-it-qat-q4_0.gguf`)
-    /// surfaces here instead of as a broken in-app download. Skipped by default to keep `swift test`
-    /// hermetic; run with `SHADOWTYPE_NET_TESTS=1 swift test --filter testGemma4QATURLsResolve`.
-    func testGemma4QATURLsResolve() throws {
+    /// or in a hand-entered mradermacher path surfaces here instead of as a broken in-app download.
+    /// Was Gemma-4-only; widened when the Qwen 3.5 swap (issue #9) added four more hand-typed repo
+    /// paths and download sizes that nothing else in the suite could check. Skipped by default to keep
+    /// `swift test` hermetic; run with
+    /// `SHADOWTYPE_NET_TESTS=1 swift test --filter testCatalogURLsResolveAtTheirPinnedSizes`.
+    func testCatalogURLsResolveAtTheirPinnedSizes() throws {
         guard ProcessInfo.processInfo.environment["SHADOWTYPE_NET_TESTS"] == "1" else {
             throw XCTSkip("network test — set SHADOWTYPE_NET_TESTS=1 to run")
         }
-        for entry in ModelCatalog.entries where gemma4QATIDs.contains(entry.id) {
+        for entry in ModelCatalog.entries {
             var req = URLRequest(url: entry.url)
             req.httpMethod = "HEAD"
             req.timeoutInterval = 30
