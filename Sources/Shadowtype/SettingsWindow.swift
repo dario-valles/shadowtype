@@ -594,6 +594,27 @@ private struct ModelsPane: View {
                 }
             }
 
+            // Downloads no live catalog entry names any more — what retiring a catalog entry
+            // strands. Nothing else in this pane can see them: `installed` is keyed on live entries,
+            // so before this section they were invisible AND unreachable, and the only way to find
+            // them was Finder. Listed with an explicit Delete; they are never reclaimed
+            // automatically (see ModelManager.deleteDownloadedModelFile for why).
+            if !model.orphanedDownloads.isEmpty {
+                Section {
+                    ForEach(model.orphanedDownloads) { item in orphanRow(item) }
+                } header: {
+                    HStack {
+                        Text("Unused downloads")
+                        Spacer()
+                        Text(ModelsSettingsModel.formatBytes(model.orphanedBytes))
+                            .font(.caption).foregroundStyle(.secondary)
+                            .textCase(nil)
+                    }
+                } footer: {
+                    Text("Models downloaded from an earlier version of the catalog. They are no longer offered and can no longer be loaded, so they only take up disk space. Deleting one removes the file and its saved download state; nothing else is touched.")
+                }
+            }
+
             // M3 BYOM — Imported models section (Pro). Lists any user-imported GGUFs plus the
             // "Import .gguf…" button. Symlinked into models/imported/ — the user's original file
             // is never copied or modified.
@@ -664,6 +685,26 @@ private struct ModelsPane: View {
                 Text("This removes the import from Shadowtype. Your original .gguf file on disk is not deleted.")
             }
         }
+        // Deleting a DOWNLOAD (a real multi-GB file), as opposed to removing a BYOM symlink above.
+        // Always confirmed, and the message states exactly how much is freed.
+        .confirmationDialog(
+            "Delete \u{201C}\(model.deleteCandidate?.displayName ?? "download")\u{201D}?",
+            isPresented: Binding(get: { model.deleteCandidate != nil },
+                                 set: { if !$0 { model.deleteCandidate = nil } }),
+            titleVisibility: .visible,
+            presenting: model.deleteCandidate
+        ) { item in
+            Button("Delete", role: .destructive) {
+                model.confirmDeleteDownload(item, selectedID: selectedID)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { item in
+            if item.file.isOrphaned {
+                Text("Frees \(ModelsSettingsModel.formatBytes(item.file.bytes)). This model is no longer in the catalog, so Shadowtype cannot load it — deleting it only reclaims the disk space.")
+            } else {
+                Text("Frees \(ModelsSettingsModel.formatBytes(item.file.bytes)). You can download it again from this list at any time.")
+            }
+        }
     }
 
     // The catalog entry we auto-select after removing the ACTIVE imported model: the one this Mac is
@@ -712,6 +753,12 @@ private struct ModelsPane: View {
                 Button("Switch to") { model.apply(to: entry.id, selectedID: $selectedID) }
                     .controlSize(.small)
                     .disabled(model.downloading != nil)   // no mid-download switch race
+                // Deliberately absent on the ACTIVE row above: the engine may still have that file
+                // mapped, and deleting it would kill suggestions with no visible cause. Switching
+                // model first is the supported path.
+                Button("Delete") { model.requestDelete(entry: entry) }
+                    .controlSize(.small)
+                    .disabled(model.downloading != nil)
             } else {
                 Text(gb(entry.downloadGB)).font(.caption.monospaced()).foregroundStyle(.secondary)
                 Button("Download") { model.apply(to: entry.id, selectedID: $selectedID) }
@@ -736,6 +783,37 @@ private struct ModelsPane: View {
     }
 
     private func gb(_ v: Double) -> String { String(format: "%.1f GB", v) }
+
+    @ViewBuilder private func orphanRow(_ item: ModelsSettingsModel.DownloadDeletion) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "archivebox")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                // The FILE name, not a prettified label: there is no catalog entry left to name it,
+                // and this is what the user would see in Finder.
+                Text(item.displayName)
+                    .fontWeight(.medium)
+                    .lineLimit(1).truncationMode(.middle)
+                Text(orphanDetail(item))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Delete") { model.requestDelete(orphan: item) }
+                .controlSize(.small)
+                .disabled(model.downloading != nil)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func orphanDetail(_ item: ModelsSettingsModel.DownloadDeletion) -> String {
+        var s = ModelsSettingsModel.formatBytes(item.file.bytes)
+        if item.file.isPartialOnly {
+            s += " · unfinished download"
+        } else if item.file.fileNames.count > 1 {
+            s += " · plus saved download state"
+        }
+        return s
+    }
 
     // --- M3 BYOM: import UI + plumbing -------------------------------------------------------
 
