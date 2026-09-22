@@ -236,7 +236,11 @@ final class EditContextTracker {
         }
         if Diag.isEnabled {
             let descended = preDescended ?? AXTextProbe.descendToEditable(element)
-            Diag.log("prefix: nil role=\(roleSubrole(element)) web=\(AXTextProbe.webPrefixFailureStep(of: element)) idx=[\(AXTextProbe.indexCapabilities(of: element))] descend=\(descended.map { roleSubrole($0) } ?? "none") domainKnown=\(frontmostDomainHost() != nil)")
+            // `manualAX` is the AXManualAccessibility verdict for the frontmost app (see
+            // ElectronAccessibility). On a Chromium-backed host `unsupported` means we have no way to
+            // wake its AX tree, so every read here is expected to fail and the fix is not ours — it
+            // distinguishes that from a host that simply speaks a read path we don't cover yet.
+            Diag.log("prefix: nil role=\(roleSubrole(element)) web=\(AXTextProbe.webPrefixFailureStep(of: element)) idx=[\(AXTextProbe.indexCapabilities(of: element))] descend=\(descended.map { roleSubrole($0) } ?? "none") domainKnown=\(frontmostDomainHost() != nil) manualAX=\(frontmostManualAccessibilitySupport().diagLabel)")
             // One-shot per focus session: dump the full AX attribute surface of the focused element, its
             // descended node, and its ancestors — the supported-attribute lists reveal which read path a
             // hollow-proxy web area (modern Mail) actually implements. Gated so it logs once, not per key.
@@ -316,6 +320,16 @@ final class EditContextTracker {
             node = parent(of: n)
             hop += 1
         }
+    }
+
+    /// The AXManualAccessibility verdict recorded for the frontmost app (diagnostics only). The pid is
+    /// read fresh rather than cached: this runs only on the Diag-gated miss path, which already pays
+    /// for far heavier AX probes, and it keeps the verdict keyed to the app actually in front.
+    private func frontmostManualAccessibilitySupport() -> ElectronAccessibility.Support {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
+            return .unknown
+        }
+        return electronA11y.support(pid: pid)
     }
 
     // Role/subrole of an element as "role/subrole" for diagnostics only (mirrors the role read in
