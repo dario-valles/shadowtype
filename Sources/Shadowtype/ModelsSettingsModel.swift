@@ -10,6 +10,12 @@ final class ModelsSettingsModel: ObservableObject {
     @Published private(set) var engineLoaded = true
     @Published private(set) var engineLoadError: String?
     @Published var removeCandidate: ImportedModelEntry?
+    /// Every GGUF actually on disk, live or orphaned — see `ModelManager.downloadedModelFiles()`.
+    /// `installed` answers "does this catalog entry have its file?"; this answers "what is on disk?",
+    /// which is the only way an orphan can be seen at all.
+    @Published private(set) var downloadedFiles: [ModelManager.DownloadedModelFile] = []
+    /// The download awaiting delete confirmation. Deletion is ALWAYS confirmed — never implicit.
+    @Published var deleteCandidate: DownloadDeletion?
     @Published private(set) var freeDisk = ""
     @Published private(set) var importedEntries: [ImportedModelEntry] = []
     @Published private(set) var importError: String?
@@ -37,6 +43,69 @@ final class ModelsSettingsModel: ObservableObject {
         self.manager = manager
         self.importedModelStore = importedModelStore
         self.physicalBytes = physicalBytes
+    }
+
+    /// A download the user has asked to delete, carrying the display name the dialog needs. A live
+    /// catalog entry shows its catalog name; an orphan has no entry left, so it shows its file name
+    /// — which is also what the user would see in Finder.
+    struct DownloadDeletion: Identifiable, Equatable {
+        let file: ModelManager.DownloadedModelFile
+        let displayName: String
+        /// Set when this is a live catalog entry, so the pane can restore the row afterwards.
+        let entryID: String?
+        var id: String { file.id }
+    }
+
+    /// Downloads no live catalog entry names. These are what a catalog retirement strands: no row
+    /// points at them, the engine never loads them, and before they were listed here nothing in the
+    /// app could show or remove them.
+    var orphanedDownloads: [DownloadDeletion] {
+        downloadedFiles
+            .filter(\.isOrphaned)
+            .map { DownloadDeletion(file: $0, displayName: $0.id, entryID: nil) }
+    }
+
+    /// Total bytes recoverable by deleting every orphan — the number that makes the section worth
+    /// looking at.
+    var orphanedBytes: Int64 {
+        downloadedFiles.filter(\.isOrphaned).reduce(0) { $0 + $1.bytes }
+    }
+
+    func downloadedFile(for entry: ModelCatalogEntry) -> ModelManager.DownloadedModelFile? {
+        downloadedFiles.first { $0.id == entry.fileName }
+    }
+
+    /// Ask to delete a live catalog entry's download. The caller is responsible for not offering this
+    /// on the active model; `confirmDeleteDownload` re-checks anyway.
+    func requestDelete(entry: ModelCatalogEntry) {
+        guard let file = downloadedFile(for: entry) else { return }
+        deleteCandidate = DownloadDeletion(file: file, displayName: entry.name, entryID: entry.id)
+    }
+
+    func requestDelete(orphan: DownloadDeletion) {
+        deleteCandidate = orphan
+    }
+
+    /// Perform the confirmed deletion. Refuses to delete the file backing the ACTIVE model: the
+    /// engine may still have it mapped, and the user would be left with suggestions silently dead
+    /// and no obvious cause. Switching model first is the supported path, which the UI enforces by
+    /// not offering Delete on the active row.
+    func confirmDeleteDownload(_ deletion: DownloadDeletion, selectedID: String) {
+        if let entryID = deletion.entryID, entryID == selectedID {
+            deleteCandidate = nil
+            return
+        }
+        manager.deleteDownloadedModelFile(id: deletion.file.id)
+        deleteCandidate = nil
+        rescan()
+    }
+
+    /// Human size for a download row. Uses the same 1e9 "GB" convention as the catalog's
+    /// `downloadGB`, so a row cannot appear to disagree with the size advertised next to Download.
+    static func formatBytes(_ bytes: Int64) -> String {
+        let gb = Double(bytes) / 1e9
+        if gb >= 0.1 { return String(format: "%.1f GB", gb) }
+        return String(format: "%.0f MB", Double(bytes) / 1e6)
     }
 
     var removalFallbackEntry: ModelCatalogEntry {
@@ -87,6 +156,7 @@ final class ModelsSettingsModel: ObservableObject {
             present.insert(entry.id)
         }
         installed = present
+        downloadedFiles = manager.downloadedModelFiles()
         freeDisk = Self.computeFreeDisk()
     }
 

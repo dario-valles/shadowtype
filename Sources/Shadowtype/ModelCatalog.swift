@@ -81,7 +81,7 @@ enum ModelCatalog {
     /// The selectable models — every entry is FREE (`paidOnly:false`). The first entry is the shipping
     /// default (its known, verified hash is kept); the rest are real, reputable GGUFs from trusted
     /// sources — community Q4_K_M re-quants (mradermacher) and Google's own QAT `q4_0` builds. Each
-    /// entry records its actual format in `quant`; do not assume Q4_K_M. Qwen3 entries use the
+    /// entry records its actual format in `quant`; do not assume Q4_K_M. Qwen entries use the
     /// *Base* (pretrained, NOT instruct) GGUFs so they continue text under the raw-prefix prompt path
     /// (no chat template) instead of chatting — same rationale as the Gemma 3 base default; the Gemma 4
     /// entries fall back to instruct fed raw-prefix because no base GGUF exists for them at all.
@@ -104,29 +104,57 @@ enum ModelCatalog {
             paidOnly: false,
             quant: "Q4_K_M"
         ),
-        // Qwen 3 1.7B BASE (pretrained) Q4_K_M, from mradermacher's ungated GGUF repo.
+        // ---------------------------------------------------------------------------------------
+        // QWEN 3.5 BASE FAMILY (replaced the Qwen 3 entries; issue #9 part 2).
+        // The four Qwen 3 Base entries (1.7B / 4B / 8B / 30B-A3B) were retired 1:1 for their Qwen 3.5
+        // Base equivalents (2B / 4B / 9B / 35B-A3B) — same publisher (mradermacher's ungated GGUF
+        // re-quants), same Apache-2.0 license, same BASE-not-instruct rule, better code-completion and
+        // reasoning quality per byte.
+        //
+        // ENGINE COMPATIBILITY (checked, because this is exactly what sank the ternary-quant proposal
+        // in the same issue): these GGUFs declare `general.architecture = qwen35` / `qwen35moe`, which
+        // are UPSTREAM ggml architectures — LLM_ARCH_QWEN35 / LLM_ARCH_QWEN35MOE landed in llama.cpp on
+        // 2026-02-10 (#19468, with shape fixes in #19730 and #20126). The pinned build,
+        // scripts/build-llama.sh LLAMA_TAG=b10156 (91f8c9c5fb, 2026-07-27), is well past all of them and
+        // carries both arch ids, so no fork is needed. Re-verify this if the pin is ever moved BACK.
+        //
+        // KV NOTE: Qwen 3.5 is a hybrid — `full_attention_interval: 4`, so only every 4th layer keeps a
+        // real KV cache and the rest are linear/recurrent-state layers. Actual KV at n_ctx=4096 is far
+        // under the catalog's flat 10% `kvCacheFraction`, which therefore stays conservative here.
+        //
+        // NOT ADDED — Qwen3.5-0.8B-Base: a real Q4_K_M GGUF exists (529,297,536 B), but its footprint
+        // lands BELOW the shipping default, and `entries[0]` is load-bearing: ModelManager's
+        // `ensureDefaultModel()` is literally `ensureModel(entries[0])`, and both
+        // ModelsSettingsModel.selectedEntry and LocalAPIRoutes.activeModelEntry fall back to it. The
+        // small-model slot is deliberately the hash-PINNED Gemma 3 1B, not an unverified entry.
+        // NOT ADDED — Qwen3.5-27B-Base: the upstream repo is gated (HTTP 401), so no ungated GGUF
+        // re-quant is reachable; an entry would 401 mid-download.
+        // ---------------------------------------------------------------------------------------
+        // Qwen 3.5 2B BASE (pretrained) Q4_K_M, from mradermacher's ungated GGUF repo.
+        // Replaces qwen3-1.7b-base-q4_k_m.
         ModelCatalogEntry(
-            id: "qwen3-1.7b-base-q4_k_m",
-            name: "Qwen 3 1.7B",
-            fileName: "Qwen3-1.7B-Base.Q4_K_M.gguf",
+            id: "qwen3.5-2b-base-q4_k_m",
+            name: "Qwen 3.5 2B",
+            fileName: "Qwen3.5-2B-Base.Q4_K_M.gguf",
             url: URL(string:
-                "https://huggingface.co/mradermacher/Qwen3-1.7B-Base-GGUF/resolve/main/Qwen3-1.7B-Base.Q4_K_M.gguf")!,
+                "https://huggingface.co/mradermacher/Qwen3.5-2B-Base-GGUF/resolve/main/Qwen3.5-2B-Base.Q4_K_M.gguf")!,
             sha256: nil,
-            approxRAMGB: 2.0,
-            downloadGB: 1.1,   // verified Content-Length
+            approxRAMGB: 2.3,
+            downloadGB: 1.27,  // verified Content-Length 1,274,396,800 B
             paidOnly: false,
             quant: "Q4_K_M"
         ),
-        // Qwen 3 4B BASE (pretrained) Q4_K_M, mradermacher.
+        // Qwen 3.5 4B BASE (pretrained) Q4_K_M, mradermacher. Replaces qwen3-4b-base-q4_k_m, and is
+        // still the entry `recommendedCapRAMGB` is sized around — see that cap's note.
         ModelCatalogEntry(
-            id: "qwen3-4b-base-q4_k_m",
-            name: "Qwen 3 4B",
-            fileName: "Qwen3-4B-Base.Q4_K_M.gguf",
+            id: "qwen3.5-4b-base-q4_k_m",
+            name: "Qwen 3.5 4B",
+            fileName: "Qwen3.5-4B-Base.Q4_K_M.gguf",
             url: URL(string:
-                "https://huggingface.co/mradermacher/Qwen3-4B-Base-GGUF/resolve/main/Qwen3-4B-Base.Q4_K_M.gguf")!,
+                "https://huggingface.co/mradermacher/Qwen3.5-4B-Base-GGUF/resolve/main/Qwen3.5-4B-Base.Q4_K_M.gguf")!,
             sha256: nil,
-            approxRAMGB: 3.5,
-            downloadGB: 2.5,   // verified Content-Length (2.49 GB)
+            approxRAMGB: 3.8,
+            downloadGB: 2.71,  // verified Content-Length 2,708,804,608 B
             paidOnly: false,
             quant: "Q4_K_M"
         ),
@@ -177,16 +205,16 @@ enum ModelCatalog {
             quant: "Q4_0",
             isInstruct: true
         ),
-        // Qwen 3 8B BASE (pretrained) Q4_K_M, mradermacher.
+        // Qwen 3.5 9B BASE (pretrained) Q4_K_M, mradermacher. Replaces qwen3-8b-base-q4_k_m.
         ModelCatalogEntry(
-            id: "qwen3-8b-base-q4_k_m",
-            name: "Qwen 3 8B",
-            fileName: "Qwen3-8B-Base.Q4_K_M.gguf",
+            id: "qwen3.5-9b-base-q4_k_m",
+            name: "Qwen 3.5 9B",
+            fileName: "Qwen3.5-9B-Base.Q4_K_M.gguf",
             url: URL(string:
-                "https://huggingface.co/mradermacher/Qwen3-8B-Base-GGUF/resolve/main/Qwen3-8B-Base.Q4_K_M.gguf")!,
+                "https://huggingface.co/mradermacher/Qwen3.5-9B-Base-GGUF/resolve/main/Qwen3.5-9B-Base.Q4_K_M.gguf")!,
             sha256: nil,
-            approxRAMGB: 6.8,
-            downloadGB: 5.0,   // verified Content-Length (5.02 GB)
+            approxRAMGB: 7.6,
+            downloadGB: 5.63,  // verified Content-Length 5,629,109,312 B
             paidOnly: false,
             quant: "Q4_K_M"
         ),
@@ -195,9 +223,9 @@ enum ModelCatalog {
         // knowledge cutoff, the only non-Apache/permissive license in an otherwise clean catalog, and
         // the only instruct entry that broke the base-variant-for-raw-continuation rule by choice (the
         // Gemma 4 entries are instruct only because no base GGUF exists for them; a Llama 3.1 8B base
-        // does exist). Its approxRAMGB (7.5) also sat ABOVE qwen3-8b-base's 6.8 despite a SMALLER
-        // download, so it sorted last and `recommended` skipped it as instruct — it could only ever be
-        // reached by a mis-click.
+        // does exist). Its approxRAMGB (7.5) also sat ABOVE the Qwen 8B/9B base entry's despite a
+        // SMALLER download, so it sorted last and `recommended` skipped it as instruct — it could only
+        // ever be reached by a mis-click.
         //
         // Gemma 4 12B — Google's OFFICIAL QAT Q4_0 GGUF (released 2026-06-03). Dense, encoder-free
         // multimodal; bridges the gap between E4B (~6 GB) and the 26B MoE (~16 GB) that the catalog
@@ -232,19 +260,21 @@ enum ModelCatalog {
             quant: "Q4_0",
             isInstruct: true
         ),
-        // Qwen 3 30B-A3B BASE (pretrained) — sparse MoE (~30B total / ~3B active), mradermacher.
-        // Largest entry; RAM-gated into "Other models" except on high-RAM Macs. Never recommended
-        // (see `recommendedCapRAMGB`) — it exists for the local API / manual power-user pick, where
-        // there is no 400 ms ghost deadline to miss.
+        // Qwen 3.5 35B-A3B BASE (pretrained) — sparse MoE (~35B total / ~3B active: 256 experts,
+        // 8 per token), mradermacher. Replaces qwen3-30b-a3b-base-q4_k_m. Largest entry; RAM-gated into
+        // "Other models" except on high-RAM Macs. Never recommended (see `recommendedCapRAMGB`) — it
+        // exists for the local API / manual power-user pick, where there is no 400 ms ghost deadline to
+        // miss. Note it is ~2.6 GB LARGER on disk than the Qwen 3 30B-A3B it replaces, so the machines
+        // that can hold it are a strictly smaller set; the RAM gate handles that automatically.
         ModelCatalogEntry(
-            id: "qwen3-30b-a3b-base-q4_k_m",
-            name: "Qwen 3 30B A3B",
-            fileName: "Qwen3-30B-A3B-Base.Q4_K_M.gguf",
+            id: "qwen3.5-35b-a3b-base-q4_k_m",
+            name: "Qwen 3.5 35B A3B",
+            fileName: "Qwen3.5-35B-A3B-Base.Q4_K_M.gguf",
             url: URL(string:
-                "https://huggingface.co/mradermacher/Qwen3-30B-A3B-Base-GGUF/resolve/main/Qwen3-30B-A3B-Base.Q4_K_M.gguf")!,
+                "https://huggingface.co/mradermacher/Qwen3.5-35B-A3B-Base-GGUF/resolve/main/Qwen3.5-35B-A3B-Base.Q4_K_M.gguf")!,
             sha256: nil,
-            approxRAMGB: 20.0,
-            downloadGB: 18.6,  // verified Content-Length (18.55 GB)
+            approxRAMGB: 22.8,
+            downloadGB: 21.17, // verified Content-Length 21,169,117,568 B
             paidOnly: false,
             quant: "Q4_K_M"
         ),
@@ -260,8 +290,11 @@ enum ModelCatalog {
     /// Fraction of `approxRAMGB` to add for the F16 KV cache at the engine's n_ctx = 4096
     /// (InferenceEngine.contextSize). KV bytes are 2 · n_layer · n_kv_head · head_dim · 2 at F16, which
     /// tracks model size closely enough for a gate: measured ≈0.11 GB for Gemma-3-1B (1.5 GB weights)
-    /// and ≈0.60 GB for Qwen3-8B (6.8 GB weights) — both ≈8%. 10% is the conservative round number.
+    /// and ≈0.60 GB for the 8B-class Qwen 3 base (6.8 GB weights) that the Qwen 3.5 9B replaced — both
+    /// ≈8%. 10% is the conservative round number.
     /// Deliberately a ratio and not a per-model table: this is a warning threshold, not an allocator.
+    /// The Qwen 3.5 entries are hybrid-attention (only every 4th layer keeps a KV cache), so their real
+    /// KV is well under 10% — the fraction errs on the safe side for them, which is the right direction.
     private static let kvCacheFraction = 0.10
 
     /// FR-LM-2 (PRD §6): a model is RAM-OK only if its WEIGHTS PLUS KV CACHE fit the machine's budget,
@@ -290,11 +323,18 @@ enum ModelCatalog {
     /// The large entries stay in the catalog and stay manually selectable — someone driving the local
     /// API off a 30B has no ghost deadline to miss.
     ///
-    /// >= 16 GB: the 4B class (qwen3-4b-base, 3.5 GB). Below that: the ~1.5 GB class (Gemma 3 1B) —
+    /// >= 16 GB: the 4B class (qwen3.5-4b-base, 3.8 GB). Below that: the ~1.5 GB class (Gemma 3 1B) —
     /// an 8 GB Mac is already sharing unified memory with the browser or editor being typed into, and
     /// a swapping model misses the deadline just as surely as a slow one.
+    ///
+    /// The >=16 GB number is DERIVED FROM the 4B-class entry's `approxRAMGB`, not an independent
+    /// constant: it was 3.5 while the 4B entry was Qwen 3 4B Base (3.5), and moved to 3.8 with the
+    /// Qwen 3.5 4B Base swap (issue #9). If a future catalog pass resizes or replaces the 4B entry,
+    /// move this with it — leaving it behind does not "tighten" the cap, it silently demotes the
+    /// first-run pick a whole size class (to the 2B), which is a quality regression, not a latency win.
+    /// `testRecommendedIsCappedAtTheFourBClassEvenOnHugeMachines` pins the coupling.
     static func recommendedCapRAMGB(physicalBytes: UInt64) -> Double {
-        Double(physicalBytes) >= 16e9 ? 3.5 : 1.5
+        Double(physicalBytes) >= 16e9 ? 3.8 : 1.5
     }
 
     /// FR-LM-3: the best default for this machine — the largest entry that both fits in RAM and stays
@@ -312,8 +352,8 @@ enum ModelCatalog {
         // reliably; instruct models emit end-of-turn on dangling/complete-looking prefixes and silently
         // drop the ghost (bug 3 — proven unfixable at the sampling layer). Picking the biggest-that-fits
         // regardless of kind steered high-RAM Macs onto instruct models (e.g. the removed
-        // Llama-3.1-8B-Instruct over the near-identical-size Qwen3-8B-Base), trading ghost-correctness
-        // for a fraction of a GB.
+        // Llama-3.1-8B-Instruct over the near-identical-size Qwen 8B/9B base entry), trading
+        // ghost-correctness for a fraction of a GB.
         if let bestBase = fitting.filter({ !$0.isInstruct }).max(by: { $0.approxRAMGB < $1.approxRAMGB }) {
             return bestBase
         }

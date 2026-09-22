@@ -58,7 +58,7 @@
     "mainEntity": [
       { "@type": "Question", "name": "What is local AI autocomplete?", "acceptedAnswer": { "@type": "Answer", "text": "Local AI autocomplete uses a real language model that runs entirely on your own Mac to predict and complete your next words inline, as ghost text. Unlike cloud autocomplete, no keystrokes ever leave the device — inference happens on your Apple Silicon chip via llama.cpp and Metal, so it works offline and sends nothing to a server." } },
       { "@type": "Question", "name": "Does local AI autocomplete need an internet connection?", "acceptedAnswer": { "@type": "Answer", "text": "No. Once the model is downloaded, Shadowtype runs 100% on-device. There is no cloud inference call, so completions work on a plane, behind a firewall, or fully offline — and they keep working with no account and no subscription server to phone home to." } },
-      { "@type": "Question", "name": "Which models does Shadowtype run locally?", "acceptedAnswer": { "@type": "Answer", "text": "Shadowtype ships a catalog of free GGUF models including Qwen3 Base (sharp fill-in-the-middle continuation), Gemma 3, and MoE / small-MoE variants — and you can drop in your own GGUF too. They run with llama.cpp accelerated by Metal on Apple Silicon. Lighter models give the fastest ghost text; larger ones give richer completions. You pick the trade-off." } },
+      { "@type": "Question", "name": "Which models does Shadowtype run locally?", "acceptedAnswer": { "@type": "Answer", "text": "Shadowtype ships a catalog of free GGUF models including Qwen3.5 Base (sharp fill-in-the-middle continuation), Gemma 3 and 4, and MoE / small-MoE variants — and you can drop in your own GGUF too. They run with llama.cpp accelerated by Metal on Apple Silicon. Lighter models give the fastest ghost text; larger ones give richer completions. You pick the trade-off." } },
       { "@type": "Question", "name": "Is local AI autocomplete private?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Because inference is on-device, your text is never transmitted for completion. Shadowtype ships with zero telemetry and no analytics backend, requires no account, and works offline — so private autocomplete is the default, not a setting you have to find." } }
     ]
   }
@@ -119,7 +119,7 @@
           <article class="step">
             <span class="step__n">2</span>
             <h3>llama.cpp + Metal runs the LLM</h3>
-            <p>A GGUF model from the built-in catalog (Qwen3 Base, Gemma 3, MoE variants — or bring your own) runs through llama.cpp with Metal acceleration on your Apple Silicon GPU. No API call, no round-trip latency.</p>
+            <p>A GGUF model from the built-in catalog (Qwen3.5 Base, Gemma 3 and 4, MoE variants — or bring your own) runs through llama.cpp with Metal acceleration on your Apple Silicon GPU. No API call, no round-trip latency.</p>
           </article>
           <article class="step">
             <span class="step__n">3</span>
@@ -160,7 +160,7 @@
           <article class="feature">
             <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="m9 12 2 2 4-4"/></svg></div>
             <h3>Your model, your trade-off</h3>
-            <p>Pick from a catalog of free GGUF models — Qwen3 Base, Gemma 3, MoE and small-MoE variants — or drop in your own. Choose a small model for instant ghost text or a larger one for richer completions. Swap any time.</p>
+            <p>Pick from a catalog of free GGUF models — Qwen3.5 Base, Gemma 3 and 4, MoE and small-MoE variants — or drop in your own. Choose a small model for instant ghost text or a larger one for richer completions. Swap any time.</p>
           </article>
           <article class="feature">
             <div class="feature__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16M4 12h10M4 19h16"/></svg></div>
@@ -192,7 +192,7 @@
         <div class="faq">
           <details><summary>What is local AI autocomplete?</summary><div class="faq__a">It&rsquo;s autocomplete powered by a real language model that runs entirely on your own Mac, predicting your next words inline as ghost text. Unlike cloud autocomplete, no keystrokes leave the device — inference happens on your Apple Silicon chip via llama.cpp and Metal, so it&rsquo;s fast, private, and works offline.</div></details>
           <details><summary>Does it need internet?</summary><div class="faq__a">No. After the model downloads once, Shadowtype runs 100% on-device with no cloud inference call. Completions work on a plane, behind a firewall, or fully offline — and there&rsquo;s no account or subscription server to phone home to.</div></details>
-          <details><summary>Which models does it run?</summary><div class="faq__a">A catalog of free GGUF models you choose from — Qwen3 Base (sharp fill-in-the-middle), Gemma 3, MoE and small-MoE variants — all running through llama.cpp with Metal acceleration. You can also drop in your own GGUF via the BYOM picker. Lighter models give the fastest ghost text; larger ones give richer completions — pick the trade-off that fits your Mac.</div></details>
+          <details><summary>Which models does it run?</summary><div class="faq__a">A catalog of free GGUF models you choose from — Qwen3.5 Base (sharp fill-in-the-middle), Gemma 3 and 4, MoE and small-MoE variants — all running through llama.cpp with Metal acceleration. You can also drop in your own GGUF via the BYOM picker. Lighter models give the fastest ghost text; larger ones give richer completions — pick the trade-off that fits your Mac.</div></details>
           <details><summary>Can my own scripts and editors use the same local model?</summary><div class="faq__a">Yes. Shadowtype exposes an OpenAI-compatible HTTP endpoint on <code>127.0.0.1</code> with no key required, so your terminal, editor plugins, and agents can call <code>/v1/chat/completions</code> against the same on-device model. There&rsquo;s also a built-in MCP server for Claude Code and other MCP clients. Everything is bound to localhost — nothing leaves your Mac.</div></details>
           <details><summary>Is it private?</summary><div class="faq__a">Yes. Because inference is on-device, your text is never transmitted for completion. Shadowtype ships with zero telemetry and no analytics backend, needs no account, and works offline — so privacy is the default, not a setting to hunt for.</div></details>
         </div>

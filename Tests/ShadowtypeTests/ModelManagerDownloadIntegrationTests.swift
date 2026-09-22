@@ -312,6 +312,154 @@ final class ModelManagerDownloadIntegrationTests: XCTestCase {
         }
     }
 
+    // MARK: - Downloaded-file inventory + explicit delete
+
+    /// The grouping rule decides what a single Delete takes with it, so it is pinned directly:
+    /// a GGUF owns its sidecars, and nothing else in the directory is ever claimed.
+    func testGGUFGroupKeyClaimsSidecarsAndNothingElse() {
+        let base = "Qwen3-4B-Base.Q4_K_M.gguf"
+        let digest = String(repeating: "a", count: 8)
+        for name in [base,
+                     base + ".part",
+                     base + ".verified.json",
+                     "\(base).\(digest).resume",
+                     "\(base).\(digest).resume.meta",
+                     "\(base).\(digest).range.json"] {
+            XCTAssertEqual(ModelManager.ggufGroupKey(for: name), base,
+                           "\(name) should belong to \(base)")
+        }
+        // Not ours: no GGUF anywhere in the name, or a bare extension with no stem.
+        for name in ["notes.txt", "imported", ".gguf", ".gguf.part", "model.bin", "README"] {
+            XCTAssertNil(ModelManager.ggufGroupKey(for: name), "\(name) must not be claimed")
+        }
+    }
+
+    /// A retired catalog entry's download is the whole point of the inventory: nothing names it, so
+    /// `installed` cannot see it. It has to come back flagged as an orphan, with its sidecars folded
+    /// into one deletable group and their bytes counted.
+    func testDownloadedModelFilesFlagsRetiredDownloadsAsOrphans() throws {
+        let retired = "Qwen3-4B-Base.Q4_K_M.gguf"          // retired in the Qwen 3.5 swap
+        let live = ModelCatalog.entries[0].fileName         // still in the catalog
+        try write(retired, bytes: 2048)
+        try write(retired + ".verified.json", bytes: 16)
+        try write("\(retired).abcd1234.resume", bytes: 32)
+        try write(live, bytes: 1024)
+
+        let files = makeManager().downloadedModelFiles()
+
+        let orphan = try XCTUnwrap(files.first { $0.id == retired })
+        XCTAssertTrue(orphan.isOrphaned)
+        XCTAssertFalse(orphan.isPartialOnly)
+        XCTAssertEqual(orphan.bytes, 2048 + 16 + 32, "sidecar bytes count toward what is reclaimed")
+        XCTAssertEqual(Set(orphan.fileNames),
+                       [retired, retired + ".verified.json", "\(retired).abcd1234.resume"])
+
+        let kept = try XCTUnwrap(files.first { $0.id == live })
+        XCTAssertFalse(kept.isOrphaned, "a live catalog entry's download is not an orphan")
+    }
+
+    /// An abandoned `.part` with no finished GGUF beside it can still be many GB, so it is surfaced
+    /// rather than silently ignored — and marked so the row can say what it is.
+    func testDownloadedModelFilesSurfacesPartialOnlyDownloads() throws {
+        let stem = "Qwen3-30B-A3B-Base.Q4_K_M.gguf"
+        try write(stem + ".part", bytes: 4096)
+
+        let file = try XCTUnwrap(makeManager().downloadedModelFiles().first { $0.id == stem })
+        XCTAssertTrue(file.isPartialOnly)
+        XCTAssertTrue(file.isOrphaned)
+        XCTAssertEqual(file.bytes, 4096)
+        XCTAssertEqual(file.fileNames, [stem + ".part"], "no GGUF exists, so only the sidecar lists")
+    }
+
+    /// BYOM imports are symlinks under `models/imported/` pointing at the user's own files. A
+    /// recursive scan would list them and offer to delete them, so the scan must stay shallow.
+    func testDownloadedModelFilesIgnoresImportedSymlinksAndForeignFiles() throws {
+        let importsDir = tempDirectory.appendingPathComponent("imported", isDirectory: true)
+        try FileManager.default.createDirectory(at: importsDir, withIntermediateDirectories: true)
+        let original = tempDirectory.appendingPathComponent("the-users-own.gguf")
+        try Data(repeating: 7, count: 64).write(to: original)
+        try FileManager.default.createSymbolicLink(
+            at: importsDir.appendingPathComponent("linked.gguf"), withDestinationURL: original)
+        try write("notes.txt", bytes: 8)
+
+        let ids = makeManager().downloadedModelFiles().map(\.id)
+        XCTAssertFalse(ids.contains("linked.gguf"), "imports/ must never be scanned")
+        XCTAssertFalse(ids.contains("notes.txt"), "non-GGUF files are not ours to offer for deletion")
+        XCTAssertTrue(ids.contains("the-users-own.gguf"), "a real GGUF at the top level is listed")
+    }
+
+    /// Delete takes the GGUF and its sidecars, and stops exactly there — a same-prefix neighbour is
+    /// a different model and must survive.
+    func testDeleteDownloadedModelFileRemovesTheGroupAndLeavesNeighbours() throws {
+        let target = "Qwen3-4B-Base.Q4_K_M.gguf"
+        let neighbour = "Qwen3-4B-Base.Q4_K_M-v2.gguf"   // shares a prefix, different model
+        try write(target, bytes: 128)
+        try write(target + ".part", bytes: 16)
+        try write("\(target).abcd1234.resume.meta", bytes: 8)
+        try write(neighbour, bytes: 64)
+
+        let removed = makeManager().deleteDownloadedModelFile(id: target)
+
+        XCTAssertEqual(Set(removed),
+                       [target, target + ".part", "\(target).abcd1234.resume.meta"])
+        XCTAssertFalse(exists(target))
+        XCTAssertFalse(exists(target + ".part"))
+        XCTAssertTrue(exists(neighbour), "a same-prefix neighbour is a different model")
+    }
+
+    /// The id must name a GGUF. A sidecar id would otherwise match every file in its group and
+    /// delete a model the caller never named.
+    func testDeleteDownloadedModelFileRefusesANonGGUFID() throws {
+        let target = "Qwen3-4B-Base.Q4_K_M.gguf"
+        try write(target, bytes: 128)
+        try write(target + ".part", bytes: 16)
+
+        XCTAssertEqual(makeManager().deleteDownloadedModelFile(id: target + ".part"), [])
+        XCTAssertEqual(makeManager().deleteDownloadedModelFile(id: "Qwen3-4B-Base.Q4_K_M"), [])
+        XCTAssertEqual(makeManager().deleteDownloadedModelFile(id: ""), [])
+        XCTAssertTrue(exists(target), "a refused delete must not touch anything")
+        XCTAssertTrue(exists(target + ".part"))
+    }
+
+    /// Deleting the file behind the ACTIVE model would leave the engine pointing at nothing and
+    /// suggestions dead with no visible cause. The UI does not offer it; the model refuses it too.
+    @MainActor
+    func testConfirmDeleteRefusesTheActiveModelButAllowsAnyOther() throws {
+        let active = ModelCatalog.entries[0]
+        let other = ModelCatalog.entries[1]
+        try write(active.fileName, bytes: 128)
+        try write(other.fileName, bytes: 256)
+
+        let settings = ModelsSettingsModel(manager: makeManager())
+        settings.rescan()
+
+        let activeFile = try XCTUnwrap(settings.downloadedFile(for: active))
+        settings.confirmDeleteDownload(
+            .init(file: activeFile, displayName: active.name, entryID: active.id),
+            selectedID: active.id)
+        XCTAssertTrue(exists(active.fileName), "the active model's file must survive")
+
+        let otherFile = try XCTUnwrap(settings.downloadedFile(for: other))
+        settings.confirmDeleteDownload(
+            .init(file: otherFile, displayName: other.name, entryID: other.id),
+            selectedID: active.id)
+        XCTAssertFalse(exists(other.fileName), "a non-active download deletes normally")
+    }
+
+    // MARK: - inventory helpers
+
+    @discardableResult
+    private func write(_ name: String, bytes: Int) throws -> URL {
+        let url = tempDirectory.appendingPathComponent(name)
+        try Data(repeating: 0x41, count: bytes).write(to: url)
+        return url
+    }
+
+    private func exists(_ name: String) -> Bool {
+        FileManager.default.fileExists(
+            atPath: tempDirectory.appendingPathComponent(name).path)
+    }
+
     private func makeManager(
         onVerificationEvent: ((ModelManager.VerificationEvent) -> Void)? = nil
     ) -> ModelManager {

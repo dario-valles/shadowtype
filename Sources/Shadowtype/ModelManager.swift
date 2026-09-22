@@ -169,6 +169,119 @@ final class ModelManager {
         return modelsDirectory().appendingPathComponent(entry.fileName)
     }
 
+    // MARK: - Downloaded-file inventory (visible reclaim, never silent deletion)
+
+    /// One deletable unit on disk: a GGUF plus every sidecar this class writes beside it — `.part`
+    /// staging, `.verified.json` receipt, and the digest-suffixed `.resume` / `.resume.meta` /
+    /// `.range.json` resume state. Grouped so a single Delete cannot leave stale resume state behind
+    /// to confuse a later re-download of the same name.
+    struct DownloadedModelFile: Identifiable, Equatable {
+        /// The GGUF's file name. Stable across rescans and the id `deleteDownloadedModelFile` takes.
+        let id: String
+        /// Every file in the group, GGUF first (when present) then sidecars, all directly in the
+        /// models directory.
+        let fileNames: [String]
+        /// Total bytes across the group.
+        let bytes: Int64
+        /// True when no LIVE `ModelCatalog` entry names this GGUF — nothing in the app can load it
+        /// any more. Retiring a catalog entry is what produces these, and before this inventory
+        /// existed they were invisible: `ModelsSettingsModel.rescan()` only probes live entries.
+        let isOrphaned: Bool
+        /// True when the GGUF itself is absent and only sidecars survive — an abandoned partial
+        /// download. Worth surfacing separately because a `.part` can be many GB.
+        let isPartialOnly: Bool
+    }
+
+    /// The GGUF a file belongs to: itself for `<name>.gguf`, or `<name>.gguf` for any
+    /// `<name>.gguf.<sidecar>`. nil for anything that is neither, so a file some other tool left in
+    /// the directory is never grouped and never offered for deletion.
+    ///
+    /// Pure and static so the grouping rule — the part that decides what a Delete will take with it
+    /// — is unit-testable without touching the filesystem.
+    static func ggufGroupKey(for fileName: String) -> String? {
+        if fileName.hasSuffix(".gguf") && fileName.count > ".gguf".count { return fileName }
+        guard let sep = fileName.range(of: ".gguf.") else { return nil }
+        let base = String(fileName[fileName.startIndex..<sep.lowerBound])
+        return base.isEmpty ? nil : base + ".gguf"
+    }
+
+    /// Inventory the models directory so the Settings pane can show what is actually on disk and
+    /// offer an explicit per-file Delete.
+    ///
+    /// NON-RECURSIVE on purpose: BYOM imports are symlinks under `models/imported/`, and a recursive
+    /// walk would list — and then offer to delete — links pointing into the user's own files. The
+    /// regular-file check drops symlinks for the same reason.
+    func downloadedModelFiles() -> [DownloadedModelFile] {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: modelsDirectory(), includingPropertiesForKeys: keys,
+            options: [.skipsSubdirectoryDescendants]
+        ) else { return [] }
+
+        let live = Set(ModelCatalog.entries.map(\.fileName))
+        var groups: [String: (names: [String], bytes: Int64, hasGGUF: Bool)] = [:]
+
+        for url in contents {
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            guard values?.isRegularFile == true else { continue }
+            let name = url.lastPathComponent
+            guard let base = Self.ggufGroupKey(for: name) else { continue }
+            var group = groups[base] ?? (names: [], bytes: 0, hasGGUF: false)
+            group.names.append(name)
+            group.bytes += Int64(values?.fileSize ?? 0)
+            if name == base { group.hasGGUF = true }
+            groups[base] = group
+        }
+
+        return groups.map { base, group in
+            let sidecars = group.names.filter { $0 != base }.sorted()
+            return DownloadedModelFile(
+                id: base,
+                fileNames: (group.hasGGUF ? [base] : []) + sidecars,
+                bytes: group.bytes,
+                isOrphaned: !live.contains(base),
+                isPartialOnly: !group.hasGGUF
+            )
+        }.sorted { $0.id < $1.id }
+    }
+
+    /// Delete one group from `downloadedModelFiles()` — the GGUF and every sidecar beside it.
+    ///
+    /// There is deliberately NO automatic caller. An earlier revision of this file reclaimed retired
+    /// downloads at launch; deleting multi-GB user files as a side effect of a catalog refresh gives
+    /// the user no notice and no undo, so deletion is only ever driven by an explicit click. Keep it
+    /// that way: if a future catalog pass strands files, surface them, do not sweep them.
+    ///
+    /// The group is re-derived from disk rather than trusted from the caller's snapshot, so a stale
+    /// list cannot widen what gets removed. Only files in our own models directory whose group key is
+    /// exactly `id` are touched; a failure to delete one file is reported by omission, never thrown,
+    /// because a file we cannot remove is simply the status quo.
+    @discardableResult
+    func deleteDownloadedModelFile(id: String) -> [String] {
+        // `id` has to be a GGUF name, not a sidecar and not an arbitrary string — otherwise a caller
+        // passing "x" would match every "x.gguf.*" it never meant to name.
+        guard Self.ggufGroupKey(for: id) == id else { return [] }
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: modelsDirectory(), includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsSubdirectoryDescendants]
+        ) else { return [] }
+
+        var removed: [String] = []
+        for url in contents {
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+            else { continue }
+            let name = url.lastPathComponent
+            guard Self.ggufGroupKey(for: name) == id else { continue }
+            do {
+                try FileManager.default.removeItem(at: url)
+                removed.append(name)
+            } catch {
+                // Status quo; never surfaced as a failure the user has to act on.
+            }
+        }
+        return removed.sorted()
+    }
+
     /// FR-LM-1/2: download (resumable) + SHA-verify any catalog entry, reusing the same download/hash
     /// code as the default model. Returns early if the file is already present. A pinned `entry.sha256`
     /// wins; otherwise the SHA-256 Hugging Face reports for the LFS object (`X-Linked-Etag`, read off
