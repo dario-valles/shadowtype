@@ -2,8 +2,8 @@
 set -euo pipefail
 
 LLAMA_REPOSITORY="https://github.com/ggml-org/llama.cpp.git"
-LLAMA_TAG="b10156"
-LLAMA_COMMIT="91f8c9c5fb038c086e13e9cd823c29b33b07ba54"
+LLAMA_TAG="b11466"
+LLAMA_COMMIT="36a73916ee0cb3b457f356066afabd47cce68884"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PREFIX="$REPO_ROOT/vendor/llama"

@@ -115,7 +115,7 @@ enum ModelCatalog {
         // in the same issue): these GGUFs declare `general.architecture = qwen35` / `qwen35moe`, which
         // are UPSTREAM ggml architectures — LLM_ARCH_QWEN35 / LLM_ARCH_QWEN35MOE landed in llama.cpp on
         // 2026-02-10 (#19468, with shape fixes in #19730 and #20126). The pinned build,
-        // scripts/build-llama.sh LLAMA_TAG=b10156 (91f8c9c5fb, 2026-07-27), is well past all of them and
+        // scripts/build-llama.sh LLAMA_TAG=b11466 (36a73916ee, 2026-10-07), is well past all of them and
         // carries both arch ids, so no fork is needed. Re-verify this if the pin is ever moved BACK.
         //
         // KV NOTE: Qwen 3.5 is a hybrid — `full_attention_interval: 4`, so only every 4th layer keeps a

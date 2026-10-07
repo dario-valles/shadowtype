@@ -662,8 +662,10 @@ final class InferenceEngine: InferenceEngineProtocol {
                 llama_sampler_chain_add(smpl, llama_sampler_init_top_k(params.topK))
             }
             // Repetition penalty (skip when == 1.0, the neutral value, to save a candidate scan).
+            // n_vocab only sizes llama.cpp's backend-sampling path; the CPU chain here ignores it.
             if params.repeatPenalty != 1.0 || params.repeatPenaltyLastN > 0 {
                 llama_sampler_chain_add(smpl, llama_sampler_init_penalties(
+                    llama_vocab_n_tokens(vocab),
                     params.repeatPenaltyLastN, params.repeatPenalty, 0.0, 0.0))
             }
             // top_p (skip when >= 1.0 since it would keep everything anyway).

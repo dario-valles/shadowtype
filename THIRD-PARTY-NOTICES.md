@@ -12,8 +12,8 @@ are reproduced below, as required.
 
 `libllama`, `libggml`, `libggml-base`, and the compiled-in CPU, BLAS, and Metal
 backends come from [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp).
-Shadowtype pins upstream tag `b10156`, commit
-`91f8c9c5fb038c086e13e9cd823c29b33b07ba54`, and builds it from source with
+Shadowtype pins upstream tag `b11466`, commit
+`36a73916ee0cb3b457f356066afabd47cce68884`, and builds it from source with
 OpenMP disabled.
 
 ```text
