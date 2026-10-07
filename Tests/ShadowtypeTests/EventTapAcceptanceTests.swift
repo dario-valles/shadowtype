@@ -48,4 +48,34 @@ final class EventTapAcceptanceTests: XCTestCase {
         XCTAssertEqual(wordAccepts, 0)
         XCTAssertEqual(lineAccepts, 1)
     }
+
+    // Right Arrow (end-of-line, no modifier) takes one word by default, the whole line in "all" mode.
+    func testRightArrowAcceptModeSelectsWordOrLine() {
+        var scheduled: [() -> Void] = []
+        let tap = TabSwallowTap { scheduled.append($0) }
+        tap.setSuggestionVisible(true)
+        tap.setCaretAtLineEnd(true)
+
+        var wordAccepts = 0
+        var lineAccepts = 0
+        tap.onAccept = { wordAccepts += 1 }
+        tap.onAcceptLine = { lineAccepts += 1 }
+
+        XCTAssertTrue(tap.handleKeyDown(keycode: TabSwallowTap.rightArrowKeycode, flags: []))
+        scheduled.removeFirst()()
+        XCTAssertEqual(wordAccepts, 1)
+        XCTAssertEqual(lineAccepts, 0)
+
+        tap.setRightArrowAcceptsAll(true)
+        XCTAssertTrue(tap.handleKeyDown(keycode: TabSwallowTap.rightArrowKeycode, flags: []))
+        scheduled.removeFirst()()
+        XCTAssertEqual(wordAccepts, 1)
+        XCTAssertEqual(lineAccepts, 1)
+
+        // Accept-all mode never widens the gate: modifiers and a disabled toggle still pass through.
+        XCTAssertFalse(tap.handleKeyDown(keycode: TabSwallowTap.rightArrowKeycode, flags: .maskShift))
+        tap.setRightArrowEnabled(false)
+        XCTAssertFalse(tap.handleKeyDown(keycode: TabSwallowTap.rightArrowKeycode, flags: []))
+        XCTAssertTrue(scheduled.isEmpty)
+    }
 }

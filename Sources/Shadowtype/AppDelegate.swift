@@ -535,6 +535,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let enabled = AppSettingsStore.shared.resolve(\.rightArrowAccept,
                                                      forBundleId: bundleId, globalDefault: globalOn)
         tabSwallow.setRightArrowEnabled(enabled)
+        // Shortcuts → "Right Arrow accepts" (default: next word); "all" makes it an unmodified accept-all.
+        tabSwallow.setRightArrowAcceptsAll(
+            UserDefaults.standard.string(forKey: "shadowtype.rightArrowAcceptMode") == "all")
     }
 
     // Mirror the Settings @AppStorage toggles into the coordinator. Called at launch and on every
