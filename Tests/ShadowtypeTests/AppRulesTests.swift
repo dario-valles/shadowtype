@@ -300,6 +300,29 @@ final class AppRulesTests: XCTestCase {
         XCTAssertNil(BuiltInAppOverrides.override(forBundleId: nil))
     }
 
+    // Sensitive apps (credentials, crypto wallets) are off by default, under the right category.
+    func testSensitiveAppsAreBuiltInOff() {
+        for id in ["com.apple.Passwords", "com.apple.keychainaccess", "com.hicknhacksoftware.MacPass",
+                   "com.bitwarden.desktop", "com.dashlane.Dashlane", "com.lastpass.LastPass",
+                   "me.proton.pass.electron"] {
+            XCTAssertEqual(BuiltInAppOverrides.override(forBundleId: id)?.category, .passwordManager, id)
+        }
+        for id in ["com.ledger.live", "io.trezor.TrezorSuite", "com.electron.exodus"] {
+            XCTAssertEqual(BuiltInAppOverrides.override(forBundleId: id)?.category, .cryptoWallet, id)
+        }
+        let rules = AppRules(storeURL: tempURL())
+        XCTAssertFalse(rules.isEnabled(bundleId: "com.apple.keychainaccess", domain: nil))
+        XCTAssertFalse(rules.isEnabled(bundleId: "com.ledger.live", domain: nil))
+    }
+
+    // Like every built-in, a wallet's default-off is soft: an explicit user enable wins and persists.
+    func testUserCanReEnableBuiltInWallet() {
+        let url = tempURL()
+        let rules = AppRules(storeURL: url)
+        rules.setEnabled(true, bundleId: "io.trezor.TrezorSuite")
+        XCTAssertTrue(AppRules(storeURL: url).isEnabled(bundleId: "io.trezor.TrezorSuite", domain: nil))
+    }
+
     // The built-in default must not silence a domain rule path (domains have no overrides).
     func testBuiltInDoesNotAffectDomains() {
         let rules = AppRules(storeURL: tempURL())

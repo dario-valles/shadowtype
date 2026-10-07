@@ -14,6 +14,7 @@ import Foundation
 
 enum OverrideCategory: String {
     case passwordManager   // credential fields — useless/risky to complete
+    case cryptoWallet      // seed phrases, addresses, amounts — never worth a guess
     case ide               // has its own autocomplete (IntelliSense/Copilot)
     case system            // no meaningful free-text composition surface
     case terminal          // draws its own text / shell has completion
@@ -21,6 +22,7 @@ enum OverrideCategory: String {
     var label: String {
         switch self {
         case .passwordManager: return "Password manager"
+        case .cryptoWallet:    return "Crypto wallet"
         case .ide:             return "Code editor"
         case .system:          return "System app"
         case .terminal:        return "Terminal"
@@ -48,6 +50,8 @@ enum BuiltInAppOverrides {
             "com.agilebits.onepassword7",   // 1Password 7 (older signing id)
             "com.bitwarden.desktop",
             "com.apple.Passwords",          // macOS 15 Passwords app
+            "com.apple.keychainaccess",     // Keychain Access
+            "com.hicknhacksoftware.MacPass",
             "org.keepassxc.keepassxc",
             "com.dashlane.Dashlane",
             "com.lastpass.LastPass",
@@ -55,6 +59,18 @@ enum BuiltInAppOverrides {
             "in.sinew.Enpass-Desktop",
         ] {
             t[id] = BuiltInOverride(category: .passwordManager, completionsOff: true, reason: pwReason)
+        }
+
+        // Crypto wallets — seed-phrase recovery, addresses and amounts. Secure fields are already blocked,
+        // but a recovery phrase is often typed into plain fields, and a "helpful" guess at an address or
+        // amount is the last thing anyone wants here.
+        let walletReason = "Built-in: crypto wallets don't need text completion."
+        for id in [
+            "com.ledger.live",              // Ledger Live
+            "io.trezor.TrezorSuite",        // Trezor Suite
+            "com.electron.exodus",          // Exodus
+        ] {
+            t[id] = BuiltInOverride(category: .cryptoWallet, completionsOff: true, reason: walletReason)
         }
 
         // IDEs / code editors with their own completion. (VS Code / Cursor / Windsurf are handled by
