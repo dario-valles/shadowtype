@@ -27,6 +27,10 @@ final class WordMeter {
         var wordsAllTime: Int = 0     // cumulative accepted words
         var shownAllTime: Int = 0     // cumulative inline completions shown to the user
         var acceptedAllTime: Int = 0  // cumulative completions the user accepted ≥1 word of
+        // Cumulative keystrokes saved by accepted ghost text (see keystrokesSaved(accepting:)). Optional
+        // so a meter.json written before this field existed still decodes, and nil until the first
+        // accept so that file's HMAC payload is unchanged — upgrading must never reset the user's stats.
+        var keystrokesSavedAllTime: Int?
         var hmac: String              // base64 HMAC-SHA256 over the canonical payload of the above
     }
 
@@ -102,6 +106,29 @@ final class WordMeter {
         rolloverIfNeededLocked()
         record.acceptedAllTime += 1
         scheduleFlush()   // the synchronous increment() that follows an accept also flushes this
+    }
+
+    /// Add the keystrokes one accepted chunk of ghost text saved (see `keystrokesSaved(accepting:)`).
+    /// Cosmetic stat: coalesced off-main write, like the shown/accepted counters.
+    func recordKeystrokesSaved(_ keystrokes: Int) {
+        guard keystrokes > 0 else { return }
+        lock.lock(); defer { lock.unlock() }
+        record.keystrokesSavedAllTime = (record.keystrokesSavedAllTime ?? 0) + keystrokes
+        scheduleFlush()
+    }
+
+    /// Cumulative keystrokes saved since install (0 until the first counted accept).
+    func allTimeKeystrokesSaved() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return record.keystrokesSavedAllTime ?? 0
+    }
+
+    /// Keystrokes saved by accepting `text`: one per character the user no longer had to type, minus
+    /// the single key press (Tab / → / ⌥Tab) that accepted it, floored at 0. A deliberate undercount —
+    /// Shift for capitals and multi-key characters are not credited — so the figure is never inflated.
+    /// No typing speed is involved: Shadowtype measures what was inserted, not how fast the user types.
+    static func keystrokesSaved(accepting text: String) -> Int {
+        max(0, text.count - 1)
     }
 
     /// Cumulative accepted words since install (the "all-time accepted" figure).
@@ -214,9 +241,12 @@ final class WordMeter {
 
     // MARK: - HMAC
 
-    // Canonical payload over the authenticated fields (everything except `hmac`).
+    // Canonical payload over the authenticated fields (everything except `hmac`). Fields added later
+    // are appended only once set, so a record written before they existed verifies unchanged.
     private static func payload(for r: Record) -> Data {
-        Data("\(r.date)|\(r.count)|\(r.installUUID)|\(r.lastSeenMaxDate)|\(r.wordsAllTime)|\(r.shownAllTime)|\(r.acceptedAllTime)".utf8)
+        var s = "\(r.date)|\(r.count)|\(r.installUUID)|\(r.lastSeenMaxDate)|\(r.wordsAllTime)|\(r.shownAllTime)|\(r.acceptedAllTime)"
+        if let keystrokes = r.keystrokesSavedAllTime { s += "|k\(keystrokes)" }
+        return Data(s.utf8)
     }
 
     private static func mac(for r: Record, secret: Data) -> String {

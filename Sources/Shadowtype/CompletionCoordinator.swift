@@ -1326,6 +1326,7 @@ final class CompletionCoordinator {
         let injected = inject(word, into: target)
         guard injected else { return 0 }
         countAcceptanceOnce()
+        wordMeter?.recordKeystrokesSaved(WordMeter.keystrokesSaved(accepting: word))
 
         // Accepting commits the user to this suggestion: supersede any still-in-flight generation
         // first, so a late streamed token can't overwrite the advanced remainder with the full
@@ -1364,6 +1365,7 @@ final class CompletionCoordinator {
         guard !line.isEmpty else { return 0 }
         guard inject(line, into: target) else { return 0 }
         countAcceptanceOnce()
+        wordMeter?.recordKeystrokesSaved(WordMeter.keystrokesSaved(accepting: line))
         // Supersede any in-flight generation before clearing, so a late token can't re-show the
         // just-accepted line (which a stray Tab could then re-inject).
         bumpGeneration()
