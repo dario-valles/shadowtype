@@ -1663,6 +1663,7 @@ private struct StatisticsPane: View {
     @State private var todayWords = 0
     @State private var allTimeWords = 0
     @State private var acceptance: Double? = nil
+    @State private var keystrokesSaved = 0
     private let tick = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -1672,9 +1673,10 @@ private struct StatisticsPane: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 2), spacing: 12) {
                     statCard("\(todayWords)", "Words accepted today", OBTheme.accent)
                     statCard(allTimeWords > 0 ? "\(allTimeWords)" : "—", "All-time accepted", .primary)
-                    // "Est. time saved" stays "—": unlike the other cards it isn't a measured count, and
-                    // fabricating a savings figure would sit badly next to the "not analytics" promise.
-                    statCard("—", "Est. time saved", .green)
+                    // Keystrokes, not time: converting to time would need a typing speed Shadowtype doesn't
+                    // measure, and an assumed WPM would be a fabricated figure next to the "not analytics"
+                    // promise. Keystrokes saved is counted from what accepts actually inserted.
+                    statCard(keystrokesSaved > 0 ? "\(keystrokesSaved)" : "—", "Keystrokes saved", .green)
                     statCard(acceptance.map { String(format: "%.0f%%", $0 * 100) } ?? "—", "Acceptance rate", OBTheme.accent)
                 }
                 .padding(.vertical, 4)
@@ -1683,7 +1685,7 @@ private struct StatisticsPane: View {
             }
 
             Section {
-                Text("Acceptance rate is the share of shown suggestions you accepted — the best single signal of how useful suggestions feel. If it's low, try a calmer Aggressiveness in General. All statistics are stored locally and never transmitted; this is a private dashboard, not analytics. Per-app breakdowns arrive in a later build.")
+                Text("Acceptance rate is the share of shown suggestions you accepted — the best single signal of how useful suggestions feel. If it's low, try a calmer Aggressiveness in General. Keystrokes saved counts the characters accepted suggestions typed for you, minus the one key press used to accept each. All statistics are stored locally and never transmitted; this is a private dashboard, not analytics. Per-app breakdowns arrive in a later build.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -1697,6 +1699,7 @@ private struct StatisticsPane: View {
         todayWords = WordMeter.shared.todayCount()
         allTimeWords = WordMeter.shared.allTimeWordCount()
         acceptance = WordMeter.shared.acceptanceRate()
+        keystrokesSaved = WordMeter.shared.allTimeKeystrokesSaved()
     }
 
     private func statCard(_ value: String, _ label: String, _ tint: Color) -> some View {
