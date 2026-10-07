@@ -231,9 +231,12 @@ enum ModelCatalog {
         // NOT ADDED — Gemma 4 E4B Base (mradermacher `gemma-4-E4B.Q4_K_M.gguf`, 5.34 GB): it loads, but
         // on ModelContinuationEvalTests it continued WORSE than the E2B Base row (off-topic and broken
         // Catalan — "et dicem que" — on both b10156 and b11466, so not a runtime regression). The quant
-        // dates from 2026-04-07, before llama.cpp's Gemma 4 converter fixes (#22753, #26882), which is
-        // the likeliest cause. Revisit with a GGUF re-converted from `google/gemma-4-E4B`; until then
-        // the E4B instruct row stays the only E4B. Same story for 26B-A4B Base (16.8 GB, same April
+        // dates from 2026-04-07, before llama.cpp's Gemma 4 converter fixes (#22753, #26882), and that
+        // quant IS the problem: ggml-org's own `gemma-4-E4B-Q8_0.gguf` (ggml-org/gemma-4-E4B-GGUF,
+        // 2026-07-16) continues the same prompts coherently, Catalan included. That Q8_0 is no catalog
+        // row either (8.03 GB, ~5 s cold first token on 1500 tokens). The fix is a Q4_K_M quantized from
+        // ggml-org's BF16 there and hosted somewhere stable; until then the E4B instruct row stays the
+        // only E4B. Same story for 26B-A4B Base (16.8 GB, same April
         // batch, and too slow for the ghost deadline anyway).
         // NOT ADDED — LFM2.5-2.6B-Base (Liquid, 2026-08): fast and clean in English/Spanish, but its
         // Catalan drifted into nonsense on the eval set, Catalan is not among its listed languages,
