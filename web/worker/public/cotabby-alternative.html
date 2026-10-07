@@ -57,7 +57,7 @@
     "@type": "FAQPage",
     "mainEntity": [
       { "@type": "Question", "name": "Is Cotabby free?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Cotabby is genuinely free and open source (AGPL-3.0), runs on-device, needs no account, and lets you import custom GGUF models. Shadowtype is also free and open source — this page is for people who want a more finished, notarized release." } },
-      { "@type": "Question", "name": "Why use Shadowtype if Cotabby is free?", "acceptedAnswer": { "@type": "Answer", "text": "For polish and stability — both are free and open source. Cotabby is currently a beta (v0.4.x). Shadowtype is a stable, notarized release with a homegrown auto-updater, a curated tuned-model catalog, built-in personalization and selection rewrite, and no daily cap." } },
+      { "@type": "Question", "name": "Why use Shadowtype if Cotabby is free?", "acceptedAnswer": { "@type": "Answer", "text": "For polish and stability — both are free and open source. Cotabby is currently a beta (v0.4.x). Shadowtype is a stable, notarized release with a homegrown auto-updater, a curated model catalog, built-in personalization and selection rewrite, and no daily cap." } },
       { "@type": "Question", "name": "Will I keep the on-device, offline experience?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Like Cotabby, Shadowtype runs a local LLM with llama.cpp and Metal on Apple Silicon, works fully offline, needs no account, and sends zero telemetry. Tab-to-accept and system-wide completion work the same way." } },
       { "@type": "Question", "name": "Does Shadowtype need Screen Recording like Cotabby?", "acceptedAnswer": { "@type": "Answer", "text": "No. Cotabby requires Accessibility, Input Monitoring and Screen Recording. Shadowtype's screen-aware context is optional — completion works on Accessibility and Input Monitoring alone, and you only grant Screen Recording if you want OCR context." } },
       { "@type": "Question", "name": "Can my own scripts and editors use Shadowtype's local model?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Shadowtype runs an OpenAI-compatible HTTP endpoint on 127.0.0.1 with no key, so terminals, editor plugins, and AI agents can call /v1/chat/completions against the same on-device model. It also ships a built-in MCP server for Claude Code and other MCP clients, plus a BYOM picker for any GGUF. Cotabby does not offer a local API or MCP server." } }
@@ -89,7 +89,7 @@
         <div class="section-head">
           <span class="eyebrow">Cotabby alternative</span>
           <h1>The best Cotabby alternative<br><span class="accent">for Mac.</span></h1>
-          <p class="lead">Cotabby is a genuinely good <strong>free, open-source beta</strong> — a local LLM predicts your next words as ghost text in any field, and <kbd>Tab</kbd> accepts. If you love importing your own GGUF models and don&rsquo;t mind beta software, keep using it. But if you&rsquo;d rather run a <strong>finished, notarized tool</strong> — also free and open source, with no daily cap and optional screen recording — Shadowtype is built for you.</p>
+          <p class="lead">Cotabby is a genuinely good <strong>free, open-source beta</strong> — a local LLM predicts your next words as ghost text in any field, and <kbd>Tab</kbd> accepts. If you don&rsquo;t mind beta software, keep using it. But if you&rsquo;d rather run a <strong>finished, notarized tool</strong> — also free and open source, with no daily cap and optional screen recording — Shadowtype is built for you.</p>
         </div>
         <div class="hero__cta">
           <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases/latest/download/Shadowtype.dmg">Download Shadowtype free</a>
@@ -124,11 +124,11 @@
               <tr><td>System-wide inline ghost-text completion</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
               <tr><td>On-device LLM · offline · no account</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
               <tr><td>Tab-to-accept · zero telemetry</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
-              <tr><td>Open source (AGPL-3.0)</td><td class="col-us no">Source-available roadmap</td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
-              <tr><td>Import your own custom GGUF model</td><td class="col-us">Curated catalog</td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
+              <tr><td>Open source</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes · MIT</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes · AGPL-3.0</span></td></tr>
+              <tr><td>Import your own custom GGUF model</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
               <tr><td>Apple Foundation Models engine</td><td class="col-us no">llama.cpp + Metal</td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Optional</span></td></tr>
               <tr><td>Release maturity</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Stable · notarized</span></td><td class="no">Beta (v0.4.x)</td></tr>
-              <tr><td>Support</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Dedicated email</span></td><td class="no">GitHub issues</td></tr>
+              <tr><td>Support</td><td class="col-us">GitHub issues</td><td>GitHub issues</td></tr>
               <tr><td>Per-app instructions &amp; personalization</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Length presets only</td></tr>
               <tr><td>Selection rewrite (⌥⌘K, on-device)</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">Completion only</td></tr>
               <tr><td>Local API + MCP server (OpenAI-compatible)</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td><td class="no">No</td></tr>
@@ -138,7 +138,7 @@
             </tbody>
           </table>
         </div>
-        <p class="rewrite__meta" style="margin-top:1rem">Figures reflect each project&rsquo;s public repo and docs as of June 2026. Cotabby is a genuinely good open-source project — if free and tinkerable is what you want, it&rsquo;s the right choice. This page is about which trade-offs fit you.</p>
+        <p class="rewrite__meta" style="margin-top:1rem">Figures reflect each project&rsquo;s public repo and docs as of June 2026. Cotabby is a genuinely good open-source project — if tinkering with a beta is what you want, it&rsquo;s the right choice. This page is about which trade-offs fit you.</p>
       </div>
     </section>
 
@@ -178,7 +178,7 @@
         <div class="section-head center"><span class="eyebrow">Questions</span><h2>Switching from Cotabby — FAQ</h2></div>
         <div class="faq">
           <details><summary>Is Cotabby free?</summary><div class="faq__a">Yes — genuinely. Cotabby is free and open source (AGPL-3.0), runs on-device with llama.cpp or Apple&rsquo;s Foundation Models, needs no account, and lets you import custom GGUF models. Shadowtype is also free and open source — it&rsquo;s for people who want a more finished, notarized release.</div></details>
-          <details><summary>They&rsquo;re both free — why pick Shadowtype?</summary><div class="faq__a">For polish and stability. Cotabby is a beta (v0.4.x). Shadowtype is a stable, notarized release with a homegrown auto-updater, a curated tuned-model catalog, built-in personalization and selection rewrite, and no daily cap — also free and open source.</div></details>
+          <details><summary>They&rsquo;re both free — why pick Shadowtype?</summary><div class="faq__a">For polish and stability. Cotabby is a beta (v0.4.x). Shadowtype is a stable, notarized release with a homegrown auto-updater, a curated model catalog, built-in personalization and selection rewrite, and no daily cap — also free and open source.</div></details>
           <details><summary>Will I keep the on-device, offline experience?</summary><div class="faq__a">Yes. Like Cotabby, Shadowtype runs a local LLM with llama.cpp and Metal on Apple Silicon, works fully offline, needs no account, and sends zero telemetry. Tab-to-accept and system-wide completion behave the same — you&rsquo;re trading beta tinkering for a finished build, not giving up local-first.</div></details>
           <details><summary>Does Shadowtype need Screen Recording like Cotabby?</summary><div class="faq__a">No. Cotabby requires Accessibility, Input Monitoring and Screen Recording. Shadowtype&rsquo;s screen-aware context is optional — completion works on Accessibility and Input Monitoring alone, and you only grant Screen Recording if you want OCR context. One fewer mandatory permission.</div></details>
           <details><summary>Can my own scripts, editors, and agents use the same local model?</summary><div class="faq__a">Yes. Shadowtype exposes an OpenAI-compatible HTTP endpoint on <code>127.0.0.1</code> with no key required, so your terminal, editor plugins, and AI agents can call <code>/v1/chat/completions</code> against the same on-device model. A built-in MCP server plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF you drop in. Everything is bound to localhost — nothing leaves your Mac. Cotabby doesn&rsquo;t offer a local API or MCP server.</div></details>
@@ -191,13 +191,13 @@
         <div class="cta-band">
           <span class="eyebrow" style="justify-content:center">Ready when you are</span>
           <h2>Keep what you love about Cotabby — add polish and support.</h2>
-          <p>Download Shadowtype free, accept your first word with <kbd>Tab</kbd>, and upgrade once when you&rsquo;re ready.</p>
+          <p>Download Shadowtype free and accept your first word with <kbd>Tab</kbd>.</p>
           <div class="hero__cta">
             <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases/latest/download/Shadowtype.dmg">Download for macOS</a>
             <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
           </div>
-          <ul class="risk-reversal" style="justify-content:center" aria-label="Purchase reassurance">
-            <li>Stable &amp; notarized</li><li>Dedicated support</li><li>No account</li><li>Zero telemetry</li><li>Open source</li>
+          <ul class="risk-reversal" style="justify-content:center" aria-label="Why you'll like it">
+            <li>Stable &amp; notarized</li><li>Free forever</li><li>No account</li><li>Zero telemetry</li><li>Open source</li>
           </ul>
         </div>
       </div>
