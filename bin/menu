@@ -6,11 +6,14 @@
 #   • runs local preflight checks (Developer ID identity, gh CLI installed + authenticated, notary config),
 #   • collects the version bump + release notes, then hands off to scripts/release.sh,
 #   • bumps + (optionally) commits the counter ONLY after a successful release,
-#   • can promote the current beta build to stable with NO rebuild (flip the GitHub prerelease flag),
 #   • has a Setup submenu for one-time config: notary profile, Homebrew tap.
 #
 # Releases publish to GitHub Releases (tag v<VERSION>, beta = --prerelease). The in-app updater reads
-# the latest.json asset from the release and self-updates — no Worker, no Ed25519 manifest, no R2.
+# the Ed25519-signed latest.json asset from the release and self-updates — no Worker, no R2.
+#
+# There is deliberately no "promote beta → stable": the signed manifest carries "channel":"beta", so
+# flipping GitHub's prerelease flag would make stable clients reject the update while the site's
+# /releases/latest DMG link served the beta. Cut a stable release instead (see RELEASING.md).
 #
 # Per-machine config (notary profile / Homebrew tap) lives in release/release.config (gitignored,
 # written by the Setup submenu). The shared build counter (release/state.env) is committed.
@@ -163,31 +166,6 @@ cut_release() {
   fi
 }
 
-# ---- promote beta → stable (no rebuild) -------------------------------------------------------
-# A release is published once at tag v<VERSION>. Promoting it just flips the GitHub prerelease flag
-# off, so the stable channel (which reads the repo's `latest` release) starts serving that build.
-promote() {
-  if ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
-    echo "${RED}gh CLI not installed/authenticated — can't promote.${RST}"; return 1
-  fi
-  echo "Latest prerelease (beta) on ${BOLD}$GITHUB_REPO${RST}:"
-  local tag
-  tag=$(gh release list --repo "$GITHUB_REPO" --limit 30 --json tagName,isPrerelease \
-        --jq 'map(select(.isPrerelease)) | .[0].tagName' 2>/dev/null)
-  if [[ -z $tag || $tag == "null" ]]; then
-    echo "${RED}No prerelease found — nothing to promote.${RST}"; return 1
-  fi
-  echo "  $tag"
-  echo
-  echo "This flips $tag from prerelease → stable on GitHub (no rebuild, no notarize)."
-  confirm "Promote $tag → stable?" || return 1
-  if gh release edit "$tag" --repo "$GITHUB_REPO" --prerelease=false --latest; then
-    echo "${GRN}✓ Promoted $tag → stable.${RST}"
-  else
-    echo "${RED}Promote failed (gh).${RST}"
-  fi
-}
-
 # ---- setup & diagnostics ----------------------------------------------------------------------
 setup_config() {
   echo "${BOLD}Configure release environment${RST} ${DIM}(saved to release/release.config, gitignored)${RST}"
@@ -264,16 +242,14 @@ while true; do
   header
   echo "  1) Cut ${BOLD}BETA${RST} release      ${DIM}(rebuild · notarize · publish → GitHub prerelease)${RST}"
   echo "  2) Cut ${BOLD}STABLE${RST} release    ${DIM}(rebuild · notarize · publish → GitHub release)${RST}"
-  echo "  3) Promote current beta → stable  ${DIM}(no rebuild · flip prerelease flag)${RST}"
-  echo "  4) Setup & diagnostics ▸"
-  echo "  5) Quit"
+  echo "  3) Setup & diagnostics ▸"
+  echo "  4) Quit"
   echo
   read -r -p "${BLU}›${RST} " c
   case $c in
     1) cut_release beta;   pause ;;
     2) cut_release stable; pause ;;
-    3) promote;            pause ;;
-    4) setup_menu ;;
-    5 | q | Q | "") echo "bye"; exit 0 ;;
+    3) setup_menu ;;
+    4 | q | Q | "") echo "bye"; exit 0 ;;
   esac
 done
