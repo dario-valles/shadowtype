@@ -31,7 +31,7 @@ function injectSeo(slug: string) {
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
   <meta property="og:image:type" content="image/png" />
-  <meta property="og:image:alt" content="${ogTitle} — 100% on-device, one-time, no subscription." />
+  <meta property="og:image:alt" content="${ogTitle} — 100% on-device, free, no subscription." />
   <meta name="twitter:title" content="${ogTitle}" />
   <meta name="twitter:description" content="${ogDesc}" />
   <meta name="twitter:image" content="${img}" />

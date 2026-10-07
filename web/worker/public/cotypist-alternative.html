@@ -58,7 +58,7 @@
     "mainEntity": [
       { "@type": "Question", "name": "Will I lose the on-device experience if I switch from Cotypist?", "acceptedAnswer": { "@type": "Answer", "text": "No. Shadowtype runs a local LLM on Apple Silicon and works fully offline with no account — the same private, on-device ghost-text autocomplete you get from Cotypist. You keep Tab-to-accept and system-wide completion; you just stop paying monthly." } },
       { "@type": "Question", "name": "Is there a free Cotypist alternative?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Shadowtype is free and open source — system-wide completion, Tab-to-accept, and every feature, with no cap and no account. Cotabby is another free, open-source community option worth a look. Most people leaving Cotypist's subscription land on Shadowtype." } },
-      { "@type": "Question", "name": "Do I need to cancel my Cotypist subscription first?", "acceptedAnswer": { "@type": "Answer", "text": "No. Shadowtype is a separate app — install it and try the free tier alongside Cotypist, then cancel Cotypist in your account whenever you're ready. There's nothing to migrate; your text never left your Mac in either app." } },
+      { "@type": "Question", "name": "Do I need to cancel my Cotypist subscription first?", "acceptedAnswer": { "@type": "Answer", "text": "No. Shadowtype is a separate app — install it and try it alongside Cotypist, then cancel Cotypist in your account whenever you're ready. There's nothing to migrate; your text never left your Mac in either app." } },
       { "@type": "Question", "name": "Does Shadowtype work in the same apps as Cotypist?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Shadowtype provides system-wide ghost-text completion in any standard macOS text field — Mail, Notes, Slack, browsers, editors — the same surfaces Cotypist covers. Both require macOS 14+ on Apple Silicon." } },
       { "@type": "Question", "name": "Can my own scripts and editors use Shadowtype's local model?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Shadowtype runs an OpenAI-compatible HTTP endpoint on 127.0.0.1 with no key, so terminals, editor plugins, and AI agents can call /v1/chat/completions against the same on-device model. It also ships a built-in MCP server for Claude Code and other MCP clients, plus a BYOM picker for any GGUF. Cotypist does not offer a local API or MCP server." } }
     ]
@@ -159,13 +159,13 @@
               <tr><td>Per-app instructions &amp; personalization</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Included</span></td><td><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Yes</span></td></tr>
               <tr><td>Telemetry / analytics backend</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>None</span></td><td class="no">On by default (opt-out)</td></tr>
               <tr><td>Macs you can use</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Unlimited</span></td><td class="no">1 → 3</td></tr>
-              <tr><td>Free tier</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>100 words/day</span></td><td>100 words/day</td></tr>
+              <tr><td>Free tier</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Everything · no cap</span></td><td class="no">100 words/day</td></tr>
               <tr><td>Pricing model</td><td class="col-us"><span class="cell yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>Free &amp; open source</span></td><td class="badge-sub">$6–9 / month</td></tr>
               <tr><td>Requirements</td><td class="col-us">macOS 14+ · Apple Silicon</td><td>macOS 14+ · Apple Silicon</td></tr>
             </tbody>
           </table>
         </div>
-        <p class="rewrite__meta" style="margin-top:1rem">Figures reflect each product&rsquo;s public pricing and docs as of June 2026. Want the full breakdown? See <a href="/shadowtype-vs-cotypist">Shadowtype vs Cotypist</a>. Prefer free and open-source? <a href="/cotabby-alternative">Cotabby</a> is the community alternative worth considering.</p>
+        <p class="rewrite__meta" style="margin-top:1rem">Figures reflect each product&rsquo;s public pricing and docs as of June 2026. Want the full breakdown? See <a href="/shadowtype-vs-cotypist">Shadowtype vs Cotypist</a>. Want another free, open-source option? <a href="/cotabby-alternative">Cotabby</a> is the community alternative worth considering.</p>
       </div>
     </section>
 
@@ -175,7 +175,7 @@
         <div class="faq">
           <details><summary>Will I lose the on-device experience if I switch?</summary><div class="faq__a">No. Shadowtype runs a local LLM on Apple Silicon, fully offline, no account — the same private ghost-text autocomplete you have today. You keep Tab-to-accept and system-wide completion; you just stop paying monthly. On the privacy-and-local axis the two are a genuine tie.</div></details>
           <details><summary>Is there a free Cotypist alternative?</summary><div class="faq__a">Yes. Shadowtype is free and open source — system-wide completion and Tab-to-accept, every feature, no cap, no account. <a href="/cotabby-alternative">Cotabby</a> is another free, open-source community option worth a look. Most people leaving Cotypist&rsquo;s subscription land on Shadowtype.</div></details>
-          <details><summary>Do I need to cancel my Cotypist subscription first?</summary><div class="faq__a">No. Shadowtype is a separate app — install it, try the free tier alongside Cotypist, then cancel Cotypist whenever you&rsquo;re ready. There&rsquo;s nothing to migrate; your text never left your Mac in either app, so there&rsquo;s no data to export or import.</div></details>
+          <details><summary>Do I need to cancel my Cotypist subscription first?</summary><div class="faq__a">No. Shadowtype is a separate app — install it, try it alongside Cotypist, then cancel Cotypist whenever you&rsquo;re ready. There&rsquo;s nothing to migrate; your text never left your Mac in either app, so there&rsquo;s no data to export or import.</div></details>
           <details><summary>Does Shadowtype work in the same apps?</summary><div class="faq__a">Yes. Shadowtype gives you ghost-text completion in any standard macOS text field — Mail, Notes, Slack, browsers, editors — the same surfaces Cotypist covers. Both require macOS 14 or later on Apple Silicon; neither supports Intel Macs.</div></details>
           <details><summary>Can my own scripts, editors, and agents use the same local model?</summary><div class="faq__a">Yes. Shadowtype exposes an OpenAI-compatible HTTP endpoint on <code>127.0.0.1</code> with no key required, so your terminal, editor plugins, and AI agents can call <code>/v1/chat/completions</code> against the same on-device model. A built-in MCP server plugs into Claude Code and other MCP clients, and the BYOM picker loads any GGUF you drop in. Everything is bound to localhost — nothing leaves your Mac. Cotypist doesn&rsquo;t offer a local API or MCP server.</div></details>
         </div>
@@ -187,12 +187,12 @@
         <div class="cta-band">
           <span class="eyebrow" style="justify-content:center">Ready when you are</span>
           <h2>Switch to the local autocomplete you actually own.</h2>
-          <p>Download Shadowtype free, accept your first word with <kbd>Tab</kbd>, and upgrade once — never monthly. No account, no migration, nothing leaves your Mac.</p>
+          <p>Download Shadowtype free and accept your first word with <kbd>Tab</kbd>. No account, no migration, nothing leaves your Mac.</p>
           <div class="hero__cta">
             <a class="btn btn--primary btn--lg" href="https://github.com/dario-valles/shadowtype/releases/latest/download/Shadowtype.dmg">Download for macOS</a>
             <a class="btn btn--ghost btn--lg" href="https://github.com/dario-valles/shadowtype">View source</a>
           </div>
-          <ul class="risk-reversal" style="justify-content:center" aria-label="Purchase reassurance">
+          <ul class="risk-reversal" style="justify-content:center" aria-label="Why you'll like it">
             <li>Free forever</li><li>No subscription</li><li>No account</li><li>Zero telemetry</li><li>Open source</li>
           </ul>
         </div>
