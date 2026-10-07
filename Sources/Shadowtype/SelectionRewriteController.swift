@@ -174,7 +174,7 @@ final class SelectionRewriteController: NSObject {
     private func run(action: RewriteAction, selection sel: EditContextTracker.CurrentSelection) {
         // A generic "Couldn't rewrite" when the model simply hasn't finished loading reads like a
         // bug; tell the user the real reason and bail before arming any flow state.
-        guard coordinator.isEngineLoaded else {
+        guard coordinator.isRewriteReady else {
             toast("Model not ready — still loading")
             return
         }

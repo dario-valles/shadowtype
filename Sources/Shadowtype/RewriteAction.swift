@@ -105,6 +105,28 @@ enum RewriteAction: String, CaseIterable, Identifiable {
         """
     }
 
+    /// Zero-shot variant for an INSTRUCT model (the opt-in Apple Intelligence rewrite): the same task line
+    /// and language/tone steer, then the selection, with no worked exemplar. Apple's on-device model fed
+    /// the few-shot prompt sometimes answered with the exemplar's own rewrite instead of the selection's
+    /// (FoundationModelsEvalTests); an instruct model doesn't need the pattern to follow the task. Pure.
+    static func instructionPrompt(for action: RewriteAction, selection: String, userTone: String? = nil,
+                                  language: String? = nil) -> String {
+        var taskLine = action.task
+        if let lang = language?.trimmingCharacters(in: .whitespacesAndNewlines), !lang.isEmpty {
+            taskLine += " Write the rewritten text in \(lang)."
+        }
+        if let tone = userTone?.trimmingCharacters(in: .whitespacesAndNewlines), !tone.isEmpty {
+            taskLine += " Also follow this style preference: \(tone)"
+        }
+        taskLine += " Reply with only the rewritten text, without any preamble, quotes or notes, and don't"
+            + " add a subject line, greeting or sign-off the text doesn't already have."
+        return """
+        \(taskLine)
+
+        \(selection)
+        """
+    }
+
     /// A generous token budget scaled to the selection so the model can finish without runaway. Roughly
     /// selection-length × 1.7 (rewrites are usually ≈ the same size; summaries finish well under it),
     /// floored so tiny selections still complete and capped at 1024 (≈4000 chars) so a paragraph-sized

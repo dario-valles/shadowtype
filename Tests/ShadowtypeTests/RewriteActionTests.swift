@@ -139,4 +139,22 @@ final class RewriteActionTests: XCTestCase {
         XCTAssertEqual(RewriteAction.cleanOutput(multi, selectionWasMultiline: true),
                        "Primer párrafo.\n\nSegundo párrafo.")
     }
+
+    // The zero-shot prompt for an instruct model (Apple Intelligence rewrite): task + steers + selection,
+    // and no few-shot exemplar the model could answer with instead of the selection.
+    func testInstructionPromptHasNoExemplar() {
+        for action in RewriteAction.allCases {
+            let p = RewriteAction.instructionPrompt(for: action, selection: "oye, mañana no puedo",
+                                                    userTone: "Keep it short.", language: "Spanish")
+            XCTAssertTrue(p.hasSuffix("\n\noye, mañana no puedo"), "\(action): selection must close the prompt")
+            XCTAssertTrue(p.contains("Write the rewritten text in Spanish."))
+            XCTAssertTrue(p.contains("Also follow this style preference: Keep it short."))
+            XCTAssertTrue(p.contains("Reply with only the rewritten text"))
+            XCTAssertFalse(p.contains("Text:"), "\(action): no exemplar block")
+            XCTAssertFalse(p.contains("Rewritten:"), "\(action): no exemplar block")
+        }
+        let plain = RewriteAction.instructionPrompt(for: .formal, selection: "hi")
+        XCTAssertFalse(plain.contains("Write the rewritten text in"))
+        XCTAssertFalse(plain.contains("style preference"))
+    }
 }

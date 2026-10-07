@@ -1372,6 +1372,9 @@ private struct ShortcutsPane: View {
     @AppStorage("shadowtype.acceptOnRightArrow") private var acceptOnRightArrow = true
     @AppStorage("shadowtype.emojiShortcode") private var emojiShortcode = true
     @AppStorage("shadowtype.rewriteEnabled") private var rewriteEnabled = true
+    @AppStorage("shadowtype.rewriteWithAppleIntelligence") private var rewriteWithAppleIntelligence = false
+    // Read once per pane build: the option is only offered when the system model is usable right now.
+    private let appleIntelligenceAvailable = FoundationModelsSupport.isAvailable
 
     @AppStorage("shadowtype.rewriteHotkeyChord") private var rewriteChord = "opt-cmd-k"
 
@@ -1426,6 +1429,11 @@ private struct ShortcutsPane: View {
                 caption("Type “:” then a name to insert emoji. Turn off to disable the trigger entirely.")
                 Toggle("Selection rewrite (\(rewriteChordLabel))", isOn: $rewriteEnabled)
                 caption("Rewrite selected text on-device with a local model. Off disables the \(rewriteChordLabel) hotkey. Change the shortcut in General.")
+                if appleIntelligenceAvailable {
+                    Toggle("Rewrite with Apple Intelligence (experimental)", isOn: $rewriteWithAppleIntelligence)
+                        .disabled(!rewriteEnabled)
+                    caption("Use Apple's built-in on-device model for selection rewrite instead of the loaded model. Still on-device. Only for languages Apple Intelligence supports — other languages (e.g. Catalan), or any error, fall back to the local model. Suggestions as you type always use the local model.")
+                }
             }
         }
         .formStyle(.grouped)

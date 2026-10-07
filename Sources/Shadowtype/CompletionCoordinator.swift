@@ -537,45 +537,81 @@ final class CompletionCoordinator {
     // that dropped the ENTIRE ghost prefix, making the first keystroke after every rewrite pay a second
     // full cold prefill. Seq 1 is the API/MCP slot (see runRawCompletion), so rewrite takes 2; the
     // engine's n_seq_max is 4 and kv_unified means the seqs share one n_ctx pool rather than carving it up.
+    //
+    // Opt-in (Shortcuts → "Rewrite with Apple Intelligence"): when `appleRewriteEngine` is set and loaded,
+    // a zero-shot instruction prompt goes to Apple's on-device model first — only for a selection in one
+    // of `appleRewriteLanguages` — and the llama engine runs the few-shot prompt as before if it declines,
+    // errors, times out or returns nothing. Measured rationale in FoundationModelsEngine.swift.
+    var appleRewriteEngine: InferenceEngineProtocol?
+    var appleRewriteLanguages: Set<String> = []
+
+    // Whether a rewrite can run at all: the local model, or the opt-in Apple model, is ready.
+    var isRewriteReady: Bool { engine.isLoaded || (appleRewriteEngine?.isLoaded ?? false) }
+
     func rewrite(selection: String, action: RewriteAction, completion: @escaping (String?) -> Void) {
-        guard engine.isLoaded, !selection.isEmpty else { completion(nil); return }
+        guard isRewriteReady, !selection.isEmpty else { completion(nil); return }
         let tone = instructionStore?.effectiveInstruction(bundleId: context.frontmostBundleId)
         // Steer the base model to the SELECTION's language. The exemplar is English; without an explicit
         // marker the model mirrors it and emits English regardless of what the user selected. Confidence
         // threshold matches languageDrifts (0.50) — selections are user-curated, lower noise than OCR.
         let declared = UserDefaults.standard.string(forKey: Self.personalizeLanguagesKey) ?? ""
         let languageConstraints = Self.parsePersonalizedLanguages(declared)
-        let lang = Self.dominantLanguage(selection, minConfidence: 0.50,
-                                         languageConstraints: languageConstraints)
-            .flatMap(Self.englishLanguageName)
+        let detected = Self.dominantLanguage(selection, minConfidence: 0.50,
+                                             languageConstraints: languageConstraints)
+        let lang = detected.flatMap(Self.englishLanguageName)
         let prompt = RewriteAction.prompt(for: action, selection: selection, userTone: tone, language: lang)
+        let applePrompt = RewriteAction.instructionPrompt(for: action, selection: selection, userTone: tone,
+                                                          language: lang)
+        let apple = appleRewriteEngine.flatMap { candidate -> InferenceEngineProtocol? in
+            guard candidate.isLoaded,
+                  FoundationModelsOutput.handlesLanguage(detected?.rawValue, supported: appleRewriteLanguages)
+            else { return nil }
+            return candidate
+        }
         let budget = RewriteAction.maxTokens(forSelection: selection)
         // Ghost sampling minus the ghost stop policy, plus a fresh seed per call so ⌘R redo actually
         // re-rolls instead of replaying the same text (see SamplingParams.rewriteDefaults).
         let params = SamplingParams.rewriteDefaults()
         let myGen = bumpGeneration()
         engine.requestCancel()     // stop a running ghost decode so the serial queue frees up promptly
-        Diag.log("rewrite: action=\(action.rawValue) selLen=\(selection.count) budget=\(budget) lang=\(lang ?? "auto")")
+        appleRewriteEngine?.requestCancel()   // and a superseded Apple-model rewrite
+        Diag.log("rewrite: action=\(action.rawValue) selLen=\(selection.count) budget=\(budget) lang=\(lang ?? "auto") apple=\(apple != nil)")
         inferenceQueue.async { [weak self] in
             guard let self else { return }
             var acc = ""
-            do {
-                try self.engine.generate(prompt: prompt, maxTokens: budget, seqID: 2, params: params,
-                                         requiredPrefix: nil, onToken: { piece in
-                    guard self.isCurrent(myGen) else { return false }
-                    acc += piece
-                    // Stop as soon as the base model rolls into a fresh few-shot block (the runaway tail).
-                    // `\nText (` also catches the language-tagged marker (`Text (in Spanish):`).
-                    return !acc.contains("\nText:") && !acc.contains("\nText (")
-                }, onSample: nil)
-            } catch {
-                Diag.log("rewrite: ERROR \(error)")
+            var fromApple = false
+            let collect: (String) -> Bool = { piece in
+                guard self.isCurrent(myGen) else { return false }
+                acc += piece
+                // Stop as soon as the base model rolls into a fresh few-shot block (the runaway tail).
+                // `\nText (` also catches the language-tagged marker (`Text (in Spanish):`).
+                return !acc.contains("\nText:") && !acc.contains("\nText (")
             }
-            // Hand seq 2's cells straight back: `kv_unified` shares one n_ctx pool, and a rewrite prompt
-            // always diverges at token 0, so this cache can never be reused — holding it would just starve
-            // the ghost (ghost + rewrite both near the cap exceed the pool and llama_decode fails).
-            self.engine.releaseSeq(2)
-            let cleaned = RewriteAction.cleanOutput(acc, selectionWasMultiline: selection.contains("\n"))
+            if let apple {
+                do {
+                    try apple.generate(prompt: applePrompt, maxTokens: budget, seqID: 2, params: params,
+                                       requiredPrefix: nil, onToken: collect, onSample: nil)
+                } catch {
+                    Diag.log("rewrite: apple ERROR \(error) — falling back to the local model")
+                }
+                // The instruct model ends its answer itself (no runaway into a new block), so a paragraph
+                // break in it is real structure, never the base-model "starting anew" tell.
+                fromApple = !RewriteAction.cleanOutput(acc, selectionWasMultiline: true).isEmpty
+                if !fromApple { acc = "" }
+            }
+            if acc.isEmpty, self.engine.isLoaded, self.isCurrent(myGen) {
+                do {
+                    try self.engine.generate(prompt: prompt, maxTokens: budget, seqID: 2, params: params,
+                                             requiredPrefix: nil, onToken: collect, onSample: nil)
+                } catch {
+                    Diag.log("rewrite: ERROR \(error)")
+                }
+                // Hand seq 2's cells straight back: `kv_unified` shares one n_ctx pool, and a rewrite prompt
+                // always diverges at token 0, so this cache can never be reused — holding it would just
+                // starve the ghost (ghost + rewrite both near the cap exceed the pool and llama_decode fails).
+                self.engine.releaseSeq(2)
+            }
+            let cleaned = RewriteAction.cleanOutput(acc, selectionWasMultiline: fromApple || selection.contains("\n"))
             DispatchQueue.main.async {
                 guard self.isCurrent(myGen) else { return }
                 Diag.logContent("rewrite: done out=\"\(cleaned.prefix(60))\"")
