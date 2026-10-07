@@ -1,5 +1,5 @@
-// InstructionStore — custom global + per-app AI instructions (FR-PA-3, paid).
-// PAID tier: the user can write a free-form GLOBAL instruction that steers every completion
+// InstructionStore — custom global + per-app AI instructions (FR-PA-3).
+// The user can write a free-form GLOBAL instruction that steers every completion
 // (e.g. "be concise, no emojis") and PER-APP overrides keyed by frontmost bundle id (e.g. casual
 // in Slack, formal in Mail). Persisted as JSON in Application Support so the choice survives
 // relaunch. Mirrors AppRules exactly: shared singleton, NSLock, injectable `init(storeURL:)` test
@@ -13,8 +13,8 @@
 // (loaded once at init), so these MUST share one instance or a Settings edit wouldn't reach the
 // coordinator until relaunch. Tests use the injectable `init(storeURL:)` instead and stay hermetic.
 //
-// Gating: every read of effectiveInstruction() at the coordinator MUST be wrapped in
-// `CompletionCoordinator.isLicensed` — this is a paid feature. The store itself is gate-agnostic.
+// Gating: none — Shadowtype is free, so instructions are always available (an empty one adds nothing
+// to the prompt). The store itself is gate-agnostic.
 import Foundation
 
 final class InstructionStore {

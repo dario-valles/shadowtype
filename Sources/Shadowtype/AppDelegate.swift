@@ -416,7 +416,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // FR-CTX-1: mirror the Context pane's @AppStorage toggle (default OFF). Read once at launch,
         // then keep in sync via the change notification posted below. Same UserDefaults-didChange path
-        // also carries the paid toggles (autocorrect / style / clipboard), all read in syncToggles().
+        // also carries the autocorrect / style / clipboard toggles, all read in syncToggles().
         syncToggles()
         // The Context pane writes the toggle via @AppStorage (UserDefaults); reflect live changes.
         ocrSettingObserver = NotificationCenter.default.addObserver(
