@@ -1610,7 +1610,8 @@ final class CompletionCoordinator {
         if let reason = Self.languageRejectionReason(
             checkPrefixDup: checkPrefixDup, generationIsHealed: generationSession.isHealed,
             prefixLanguage: generationSession.prefixLanguage, suggestion: text, contextLang: generationSession.contextLanguage,
-            languageConstraints: generationSession.languageConstraints
+            languageConstraints: generationSession.languageConstraints,
+            typedText: generationSession.activePrefix
         ) {
             rejectRender(reason); return
         }
@@ -2749,13 +2750,30 @@ final class CompletionCoordinator {
         return sl != contextLang
     }
 
+    // the screen's language stands in for the reply language only because a short prefix cannot tell it. When the
+    // user's own text and the suggestion are confidently the SAME language, the suggestion follows the user and the screen
+    // must not hide it. Seen in a scratch TextEdit document (little on screen but the document, title and toolbar):
+    // an English ghost for an English sentence was hidden as a "context-lang conflict". Both reads must be confident, so a
+    // wrong-language drift (the case the context guard exists for) still disagrees with the typed text and is still hidden.
+    // Only the typed tail is read: this runs per render tick on the conflict path.
+    static func suggestionMatchesTypedLanguage(suggestion: String, typedText: String,
+                                               minTypedChars: Int = 20, minConfidence: Double = 0.80,
+                                               languageConstraints: [NLLanguage] = []) -> Bool {
+        guard let typed = driftPrefixLanguage(String(typedText.suffix(400)), minPrefixChars: minTypedChars,
+                                              minConfidence: minConfidence,
+                                              languageConstraints: languageConstraints) else { return false }
+        let s = suggestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        return dominantLanguage(s, minConfidence: minConfidence, languageConstraints: languageConstraints) == typed
+    }
+
     // Pure render policy for the two language backstops. `generationSession.isHealed` is deliberately not a
     // gate: healing only exempts prefix-relative text transforms. `checkPrefixDup == false` identifies
     // the stale accept-remainder re-render, where both language comparisons must stay skipped.
     static func languageRejectionReason(checkPrefixDup: Bool, generationIsHealed _: Bool,
                                         prefixLanguage: NLLanguage?, suggestion: String,
                                         contextLang: NLLanguage?,
-                                        languageConstraints: [NLLanguage] = []) -> String? {
+                                        languageConstraints: [NLLanguage] = [],
+                                        typedText: String = "") -> String? {
         guard checkPrefixDup else { return nil }
         if languageDrifts(prefixLanguage: prefixLanguage, suggestion: suggestion,
                           languageConstraints: languageConstraints) {
@@ -2763,7 +2781,9 @@ final class CompletionCoordinator {
         }
         if let contextLang,
            suggestionConflictsWithContext(suggestion: suggestion, contextLang: contextLang,
-                                          languageConstraints: languageConstraints) {
+                                          languageConstraints: languageConstraints),
+           !suggestionMatchesTypedLanguage(suggestion: suggestion, typedText: typedText,
+                                           languageConstraints: languageConstraints) {
             return "context-lang conflict"
         }
         return nil
