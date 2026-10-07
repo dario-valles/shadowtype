@@ -198,14 +198,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Shadowtype: required permissions not yet granted — capture/overlay will start automatically after Accessibility and Input Monitoring are enabled.")
         }
 
-        // Load model (P0). Errors are non-fatal at scaffold stage.
+        // Load model (P0). Errors are non-fatal at scaffold stage. `coordinator` is a lazy var and this
+        // Task is not main-isolated, so resolve it here, on main, rather than racing wireCoordinator().
+        let coordinator = self.coordinator
         Task {
             do {
                 // FR-LM-1: prefer the user's persisted model when it's already on disk. We never kick
                 // off a multi-GB download at launch — if the chosen model isn't present, fall back to
                 // the small default.
                 let url = try await modelManager.ensureStartupModel()
-                try engine.load(modelPath: url.path)
+                guard try await coordinator.loadStartupModel(at: url.path) else { return }
                 await MainActor.run {
                     self.inferenceRuntimeController.setCurrentModelURL(url)
                     self.statusItem.setModelName(url.deletingPathExtension().lastPathComponent)
