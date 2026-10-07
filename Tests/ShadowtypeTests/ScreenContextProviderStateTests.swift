@@ -1,4 +1,5 @@
 import XCTest
+import CoreGraphics
 @testable import Shadowtype
 
 final class ScreenContextProviderStateTests: XCTestCase {
@@ -61,5 +62,71 @@ final class ScreenContextProviderStateTests: XCTestCase {
             focusedWindowID: 303, frontmostPID: 42, candidates: candidates))
         XCTAssertNil(ScreenContextProvider.resolvedFocusedWindowID(
             focusedWindowID: nil, frontmostPID: 42, candidates: candidates))
+    }
+
+    // MARK: - window match by frame, for hosts with no AXWindowNumber (Chromium/Electron)
+
+    private let axFrame = CGRect(x: 100, y: 50, width: 800, height: 600)
+
+    private func candidate(_ id: CGWindowID, pid: pid_t = 7, onScreen: Bool = true, layer: Int = 0,
+                           frame: CGRect = CGRect(x: 100, y: 50, width: 800, height: 600))
+        -> ScreenContextProvider.FrameCandidate {
+        .init(windowID: id, owningPID: pid, isOnScreen: onScreen, layer: layer, frame: frame)
+    }
+
+    func testFrameMatchResolvesASingleExactMatch() {
+        let other = CGRect(x: 0, y: 0, width: 50, height: 50)
+        XCTAssertEqual(ScreenContextProvider.resolvedWindowIDByFrame(
+            axFrame: axFrame, frontmostPID: 7, candidates: [candidate(1), candidate(2, frame: other)]), 1)
+    }
+
+    func testFrameMatchFailsClosedOnTwoMatches() {
+        XCTAssertNil(ScreenContextProvider.resolvedWindowIDByFrame(
+            axFrame: axFrame, frontmostPID: 7, candidates: [candidate(1), candidate(2)]))
+    }
+
+    func testFrameMatchNeverUsesAnotherProcessesWindow() {
+        XCTAssertNil(ScreenContextProvider.resolvedWindowIDByFrame(
+            axFrame: axFrame, frontmostPID: 7, candidates: [candidate(1, pid: 99)]))
+    }
+
+    func testFrameMatchNeverUsesAnOffScreenWindow() {
+        XCTAssertNil(ScreenContextProvider.resolvedWindowIDByFrame(
+            axFrame: axFrame, frontmostPID: 7, candidates: [candidate(1, onScreen: false)]))
+    }
+
+    func testFrameMatchNeverUsesANonZeroLayer() {
+        XCTAssertNil(ScreenContextProvider.resolvedWindowIDByFrame(
+            axFrame: axFrame, frontmostPID: 7, candidates: [candidate(1, layer: 25)]))
+    }
+
+    func testFrameMatchToleranceIsTwoPoints() {
+        let inside = CGRect(x: 102, y: 50, width: 800, height: 600)
+        let outside = CGRect(x: 103, y: 50, width: 800, height: 600)
+        XCTAssertEqual(ScreenContextProvider.resolvedWindowIDByFrame(
+            axFrame: axFrame, frontmostPID: 7, candidates: [candidate(1, frame: inside)]), 1)
+        XCTAssertNil(ScreenContextProvider.resolvedWindowIDByFrame(
+            axFrame: axFrame, frontmostPID: 7, candidates: [candidate(1, frame: outside)]))
+    }
+
+    // MARK: - the capture latch: only a window that cannot be captured at all switches OCR context off
+
+    func testOnlyAnUncapturableWindowLatchesOCROff() {
+        typealias Outcome = ScreenContextProvider.RecentTextOutcome
+        XCTAssertTrue(Outcome.noWindow.cannotCapture)
+        XCTAssertTrue(Outcome.unavailable.cannotCapture)
+        // Ordinary reasons for "no text right now" must NOT latch: a capture inside minInterval, a blank
+        // chat whose only text is UI chrome, and (of course) a capture that returned text.
+        XCTAssertFalse(Outcome.throttled.cannotCapture)
+        XCTAssertFalse(Outcome.empty.cannotCapture)
+        XCTAssertFalse(Outcome.text("hello").cannotCapture)
+    }
+
+    func testRecentTextOutcomeCarriesTheTextOnlyWhenThereIsSome() {
+        typealias Outcome = ScreenContextProvider.RecentTextOutcome
+        XCTAssertEqual(Outcome.text("hello").text, "hello")
+        XCTAssertNil(Outcome.empty.text)
+        XCTAssertNil(Outcome.throttled.text)
+        XCTAssertNil(Outcome.noWindow.text)
     }
 }

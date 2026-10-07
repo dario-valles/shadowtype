@@ -97,6 +97,13 @@ final class CompletionCoordinator {
     // the recognized text is prepended as extra LEADING context — the prompt stays forward-from-caret.
     var screenContext: ScreenContextProvider?
     var useScreenOCR: Bool = false
+    // Focus session for which screen capture already FAILED (e.g. the host exposes no usable window).
+    // While it matches the current focus we skip OCR and complete from the typed text alone, instead of
+    // re-arming the first-capture gate on every keystroke and deferring forever.
+    private var ocrUnavailableFocusSeq: UInt64?
+    // A fire() was deferred waiting for a capture; the capture's landing must restart it even when the
+    // captured text is unchanged or missing (otherwise the pause after typing ends with no suggestion).
+    private var ocrFireDeferred = false
     // Settings → "Show Tab hint on suggestions" (default ON). Draws a faint "⇥ Tab" keycap after the
     // ghost so new users learn the accept key; auto-hidden once they've accepted `tabHintThreshold`
     // suggestions (the count persists, so the cue fades for good). Mirrored by AppDelegate.syncToggles.
@@ -382,6 +389,7 @@ final class CompletionCoordinator {
         focusSnapshot = nil
         // #11: a warm prefill deferred behind a capture is for the field we are leaving.
         contextAssembler.pendingWarm = nil
+        ocrFireDeferred = false
         clearSuggestion()
     }
 
@@ -394,6 +402,7 @@ final class CompletionCoordinator {
         storeOCRCache(nil)
         contextAssembler.captureState = .idle
         contextAssembler.pendingWarm = nil
+        ocrFireDeferred = false
     }
 
     // MARK: - Local API runner (M1 — Pro)
@@ -865,6 +874,7 @@ final class CompletionCoordinator {
             let haveOCR = contextAssembler.cachedOCR != nil
             if !haveOCR, contextAssembler.captureState == .pending {
                 Diag.log("fire: defer (OCR capture pending, no context yet)")
+                ocrFireDeferred = true
                 clearSuggestion(); return
             }
         }
@@ -1995,6 +2005,7 @@ final class CompletionCoordinator {
         let maxChars = ocrContextChars
         let capturedBundleId = context.frontmostBundleId
         let capturedFocusSeq = snapshot?.focusSeq ?? context.focusChangeSequence
+        if ocrUnavailableFocusSeq == capturedFocusSeq { return }   // capture failed for this focus: stay prefix-only
         let capturedGeneration = currentGeneration()
 
         // Arm the first-capture gate only when we have NO context yet for this focus; a re-capture while
@@ -2046,9 +2057,22 @@ final class CompletionCoordinator {
             return
         }
         Task { [weak self] in
-            let text = await screenContext.recentText(maxChars: maxChars)
+            let outcome = await screenContext.recentTextOutcome(maxChars: maxChars)
+            let text = outcome.text
             guard let self else { return }
             await MainActor.run {
+                // A window that cannot be captured at all (no focused window, or ScreenCaptureKit failed) is a fact
+                // about this focus session even if a newer keystroke already outdated the generation: remember
+                // it, release the first-capture gate, run the warm-up that waited on it, and restart a fire()
+                // that was waiting. A throttled or blank capture is NOT this: it must not switch OCR off.
+                if outcome.cannotCapture, focusSeq == self.context.focusChangeSequence {
+                    self.ocrUnavailableFocusSeq = focusSeq
+                    if self.contextAssembler.captureState == .pending { self.contextAssembler.captureState = .ready }
+                    Diag.log("ocr: capture unavailable for this focus -> prefix-only")
+                    self.flushPendingWarm()
+                    if self.ocrFireDeferred { self.ocrFireDeferred = false; self.maybeRefireForContext() }
+                    return
+                }
                 guard self.captureIsCurrent(
                     generation: generation, focusSeq: focusSeq, bundleId: bundleId) else { return }
                 let changed = self.storeOCRCache(self.dedupedCapture(text, prefix: prefix))
@@ -2059,7 +2083,9 @@ final class CompletionCoordinator {
                 // Fresh context for the current viewport → re-fire so the ghost reflects it (closes the
                 // focus-in race + scroll staleness). Bounded to ONE upgrade per prefix so a dynamic
                 // screen can't keep regenerating and cycling the ghost during a pause.
-                if changed { self.maybeRefireForContext() }
+                let wasDeferred = self.ocrFireDeferred
+                self.ocrFireDeferred = false
+                if changed || wasDeferred { self.maybeRefireForContext() }
             }
         }
     }

@@ -141,4 +141,116 @@ final class ElectronAccessibilitySupportTests: XCTestCase {
 
         XCTAssertEqual(writes(), [55])
     }
+
+    // MARK: - AXEnhancedUserInterface fallback (Claude desktop app, Codex app: issue #8)
+
+    /// Like `makeStub`, with the fallback's three collaborators injected: the AXEnhancedUserInterface writer,
+    /// the user's opt-in, and the "is this a non-browser Chromium host" test. Records every enhanced write.
+    private struct FallbackStub {
+        let ea: ElectronAccessibility
+        let manualWrites: () -> [pid_t]
+        let enhancedWrites: () -> [(pid: pid_t, on: Bool)]
+    }
+
+    private func makeFallbackStub(
+        manual: @escaping (pid_t) -> AXError = { _ in .attributeUnsupported },
+        enhanced: @escaping (pid_t, Bool) -> AXError = { _, _ in .success },
+        enabled: @escaping () -> Bool = { true },
+        chromium: @escaping (pid_t) -> Bool = { _ in true }
+    ) -> FallbackStub {
+        var manualWrites: [pid_t] = []
+        var enhancedWrites: [(pid: pid_t, on: Bool)] = []
+        let ea = ElectronAccessibility(
+            write: { pid in manualWrites.append(pid); return manual(pid) },
+            enhancedWrite: { pid, on in enhancedWrites.append((pid, on)); return enhanced(pid, on) },
+            enhancedEnabled: enabled,
+            isChromiumHost: chromium)
+        return FallbackStub(ea: ea, manualWrites: { manualWrites }, enhancedWrites: { enhancedWrites })
+    }
+
+    func testFallbackIsTakenOnlyWhenManualIsUnsupportedAndTheHostIsChromium() {
+        let s = makeFallbackStub()
+        XCTAssertEqual(s.ea.apply(pid: 10), .enhancedFallback)
+        XCTAssertEqual(s.enhancedWrites().count, 1)
+        XCTAssertEqual(s.enhancedWrites().first?.pid, 10)
+        XCTAssertEqual(s.enhancedWrites().first?.on, true)
+        XCTAssertTrue(s.ea.isEnhancedActive(pid: 10))
+    }
+
+    func testFallbackIsNeverTakenForANativeAppOrABrowser() {
+        // `isChromiumHost` is false for native Cocoa apps and for browsers (liveIsChromiumHost excludes them).
+        let s = makeFallbackStub(chromium: { _ in false })
+        XCTAssertEqual(s.ea.apply(pid: 10), .unsupported)
+        XCTAssertTrue(s.enhancedWrites().isEmpty)
+        XCTAssertFalse(s.ea.isEnhancedActive(pid: 10))
+    }
+
+    func testFallbackIsNeverTakenWhenManualAccessibilityIsSupported() {
+        let s = makeFallbackStub(manual: { _ in .success })
+        XCTAssertEqual(s.ea.apply(pid: 10), .supported)
+        XCTAssertTrue(s.enhancedWrites().isEmpty)
+    }
+
+    func testFallbackIsNeverTakenUnlessTheUserOptedIn() {
+        let s = makeFallbackStub(enabled: { false })
+        XCTAssertEqual(s.ea.apply(pid: 10), .unsupported)
+        XCTAssertTrue(s.enhancedWrites().isEmpty)
+    }
+
+    func testAHostThatRefusesTheFallbackStaysUnsupported() {
+        let s = makeFallbackStub(enhanced: { _, _ in .attributeUnsupported })
+        XCTAssertEqual(s.ea.apply(pid: 10), .unsupported)
+        XCTAssertFalse(s.ea.isEnhancedActive(pid: 10))
+    }
+
+    func testEnhancedFallbackVerdictIsStickyAgainstALaterUnsupported() {
+        let s = makeFallbackStub()
+        XCTAssertEqual(s.ea.apply(pid: 10), .enhancedFallback)
+        // Manual is still unsupported on the next apply(); the verdict must not slide back to .unsupported.
+        XCTAssertEqual(s.ea.apply(pid: 10), .enhancedFallback)
+        XCTAssertEqual(s.ea.support(pid: 10), .enhancedFallback)
+        XCTAssertEqual(s.enhancedWrites().count, 1, "the flag is already on: no second write")
+    }
+
+    func testFlagIsSwitchedOffWhenTheAppDeactivatesAndBackOnWhenItReactivates() {
+        let s = makeFallbackStub()
+        s.ea.applicationDidActivate(pid: 10)                        // first activation: normal attempt + fallback
+        XCTAssertTrue(s.ea.isEnhancedActive(pid: 10))
+
+        s.ea.applicationDidDeactivate(pid: 10)
+        XCTAssertFalse(s.ea.isEnhancedActive(pid: 10))
+        XCTAssertEqual(s.enhancedWrites().last?.on, false)
+
+        s.ea.applicationDidActivate(pid: 10)                        // back in front: the host rebuilds its tree
+        XCTAssertTrue(s.ea.isEnhancedActive(pid: 10))
+        XCTAssertEqual(s.enhancedWrites().last?.on, true)
+    }
+
+    func testDeactivatingAnAppWeNeverTouchedWritesNothing() {
+        let s = makeFallbackStub(chromium: { _ in false })
+        s.ea.applicationDidActivate(pid: 10)
+        s.ea.applicationDidDeactivate(pid: 10)
+        XCTAssertTrue(s.enhancedWrites().isEmpty)
+    }
+
+    func testRevertAllSwitchesEveryAppOffOnQuit() {
+        let s = makeFallbackStub()
+        s.ea.applicationDidActivate(pid: 10)
+        s.ea.applicationDidActivate(pid: 11)
+        s.ea.revertAll()
+        XCTAssertFalse(s.ea.isEnhancedActive(pid: 10))
+        XCTAssertFalse(s.ea.isEnhancedActive(pid: 11))
+        XCTAssertEqual(s.enhancedWrites().filter { !$0.on }.map { $0.pid }.sorted(), [10, 11])
+    }
+
+    func testReactivationDoesNothingIfTheUserTurnedTheOptInOff() {
+        var enabled = true
+        let s = makeFallbackStub(enabled: { enabled })
+        s.ea.applicationDidActivate(pid: 10)
+        s.ea.applicationDidDeactivate(pid: 10)
+        enabled = false
+        s.ea.applicationDidActivate(pid: 10)
+        XCTAssertFalse(s.ea.isEnhancedActive(pid: 10))
+        XCTAssertEqual(s.enhancedWrites().count, 2, "on, then off; nothing after the opt-out")
+    }
 }

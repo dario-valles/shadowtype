@@ -946,6 +946,7 @@ private struct ContextPane: View {
 
 private struct AppsDomainsPane: View {
     private let metadataProvider = ApplicationMetadataProvider.shared
+    @AppStorage(ElectronAccessibility.enhancedDefaultsKey) private var chromiumAccessibilityFallback = false
     @StateObject private var model = AppScopeSettingsModel()
 
     // AppRules is the source of truth; these @State mirrors drive native redraw on toggle (no .id()
@@ -1243,6 +1244,15 @@ private struct AppsDomainsPane: View {
                          "Completions appear in the sidebar AI chat, not the code editor. Press ⌃` to force them anywhere.")
                 setupRow("terminal", "Terminal · iTerm",
                          "Auto-on inside an AI agent prompt (Claude Code, Codex, Cursor Agent). For plain commands press ⌃`.")
+                setupRow("bubble.left.and.bubble.right", "Claude desktop app · other Chromium apps",
+                         "Turn on “Enable accessibility for Chromium apps” below, for apps that ignore the usual switch.")
+                Toggle(isOn: $chromiumAccessibilityFallback) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Enable accessibility for Chromium apps")
+                        Text("Only for Chromium apps that ignore the usual switch. It is on while the app is in front and off when you leave it. Off by default.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
 
             Section {

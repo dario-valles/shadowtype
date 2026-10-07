@@ -32,6 +32,7 @@ final class EditContextTracker {
     private var observedElement: AXUIElement?
 
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var terminationObserver: NSObjectProtocol?
     private var started = false
 
     // Forces lazy Electron/Chromium AX trees to materialize (once per app) so text-marker reads work
@@ -106,6 +107,19 @@ final class EditContextTracker {
             self?.refreshFocus()
         }
         workspaceObservers.append(activated)
+        // The Chromium accessibility fallback is only on while the app is in front: switch it off on deactivate
+        // and for every app when Shadowtype quits.
+        let deactivated = wc.addObserver(forName: NSWorkspace.didDeactivateApplicationNotification,
+                                         object: nil, queue: .main) { [weak self] note in
+            if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                self?.electronA11y.applicationDidDeactivate(pid: app.processIdentifier)
+            }
+        }
+        workspaceObservers.append(deactivated)
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.electronA11y.revertAll()
+        }
 
         refreshFocus()
     }
@@ -116,6 +130,8 @@ final class EditContextTracker {
         let wc = NSWorkspace.shared.notificationCenter
         for o in workspaceObservers { wc.removeObserver(o) }
         workspaceObservers.removeAll()
+        if let t = terminationObserver { NotificationCenter.default.removeObserver(t); terminationObserver = nil }
+        electronA11y.revertAll()
         teardownObserver()
         focused = nil
     }
@@ -1088,7 +1104,7 @@ final class EditContextTracker {
         frontmostBundleId = front?.bundleIdentifier
         // Nudge Electron/Chromium to expose its AX tree before we read it (once per app). The write is
         // unsupported (no-op) on native apps, so this is safe to attempt for every frontmost app.
-        if let pid = front?.processIdentifier { electronA11y.forceIfNeeded(pid: pid) }
+        if let pid = front?.processIdentifier { electronA11y.applicationDidActivate(pid: pid) }
         // Re-arm the per-focus-session browser-AX rewake (a stale pid from a prior focus must not
         // block re-priming when the user lands on a fresh Gmail tab in the same browser process).
         rewakedPidThisFocus = nil
