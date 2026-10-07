@@ -83,8 +83,9 @@ enum ModelCatalog {
     /// sources — community Q4_K_M re-quants (mradermacher) and Google's own QAT `q4_0` builds. Each
     /// entry records its actual format in `quant`; do not assume Q4_K_M. Qwen entries use the
     /// *Base* (pretrained, NOT instruct) GGUFs so they continue text under the raw-prefix prompt path
-    /// (no chat template) instead of chatting — same rationale as the Gemma 3 base default; the Gemma 4
-    /// entries fall back to instruct fed raw-prefix because no base GGUF exists for them at all.
+    /// (no chat template) instead of chatting — same rationale as the Gemma 3 base default. Gemma 4 ships
+    /// both ways: Google's QAT GGUFs are instruct-only (kept for the chat API, fed raw-prefix for ghost
+    /// text), and the E2B *Base* row is a community Q4_K_M quant of Google's pt checkpoint.
     /// All non-default `sha256` are `nil` until independently audited and pinned in a release
     /// — we do not hallucinate hashes or trust the download server to authenticate itself. Their
     /// `catalogIntegrity` is therefore explicitly `.unverified`. `downloadGB` is the observed LFS
@@ -174,8 +175,8 @@ enum ModelCatalog {
         // Gemma 4 E2B — Google's OFFICIAL QAT Q4_0 GGUF (gemma-4-E2B-it-qat-q4_0-gguf). QAT
         // (quantization-aware training) preserves quality at Q4 far better than community PTQ Q4_K_M,
         // and ships smaller (3.35 vs 3.46 GB). MatFormer "effective-2B" on-device model. Still INSTRUCT
-        // (no base/QAT-base variant exists) — fed raw-prefix, so EOG-prone and deprioritized vs Qwen
-        // base. Multimodal mmproj file exists in the repo but is not needed for text completion.
+        // (Google publishes no QAT base GGUF) — fed raw-prefix, so EOG-prone and deprioritized vs the
+        // base rows; it stays for its chat template (see the E2B Base row below). Multimodal mmproj file exists in the repo but is not needed for text completion.
         // sha256 nil until self-downloaded + verified at release.
         ModelCatalogEntry(
             id: "gemma-4-e2b-it-qat-q4_0",
@@ -189,6 +190,28 @@ enum ModelCatalog {
             paidOnly: false,
             quant: "Q4_0",
             isInstruct: true
+        ),
+        // Gemma 4 E2B BASE (pretrained, `google/gemma-4-E2B`) Q4_K_M, mradermacher. Google DID publish
+        // pt checkpoints for Gemma 4 (Apache-2.0, ungated) — only its own QAT GGUFs are instruct-only,
+        // which is what the "no base exists" note above was really about. Added BESIDE the instruct
+        // row, not instead of it: the instruct GGUFs carry the chat template that /v1/chat/completions
+        // and the MCP bridge's chat tool need, and base models have none. For ghost text this is the
+        // row to pick. ModelContinuationEvalTests (greedy, en/es/ca): 0/10 empty ghosts vs 3/10 for the
+        // instruct QAT row, no markdown `**` leaking into the ghost, and Catalan stays Catalan.
+        // ~4.1 GB resident measured (3.25 GB weights + KV + compute), so 4.5 here is conservative.
+        // The mradermacher quant predates llama.cpp's later Gemma 4 converter fixes (#22753, #26882);
+        // it loads and continues cleanly in the pinned build, so it ships as-is, unpinned.
+        ModelCatalogEntry(
+            id: "gemma-4-e2b-pt-q4_k_m",
+            name: "Gemma 4 E2B Base",
+            fileName: "gemma-4-E2B.Q4_K_M.gguf",
+            url: URL(string:
+                "https://huggingface.co/mradermacher/gemma-4-E2B-GGUF/resolve/main/gemma-4-E2B.Q4_K_M.gguf")!,
+            sha256: nil,
+            approxRAMGB: 4.5,
+            downloadGB: 3.43,  // verified Content-Length 3,427,861,984 B
+            paidOnly: false,
+            quant: "Q4_K_M"
         ),
         // Gemma 4 E4B — Google's OFFICIAL QAT Q4_0 GGUF. Larger MatFormer "effective-4B"; fed
         // raw-prefix. Smaller than the old bartowski Q4_K_M (5.15 vs 5.40 GB) at higher fidelity.
@@ -205,6 +228,21 @@ enum ModelCatalog {
             quant: "Q4_0",
             isInstruct: true
         ),
+        // NOT ADDED — Gemma 4 E4B Base (mradermacher `gemma-4-E4B.Q4_K_M.gguf`, 5.34 GB): it loads, but
+        // on ModelContinuationEvalTests it continued WORSE than the E2B Base row (off-topic and broken
+        // Catalan — "et dicem que" — on both b10156 and b11466, so not a runtime regression). The quant
+        // dates from 2026-04-07, before llama.cpp's Gemma 4 converter fixes (#22753, #26882), and that
+        // quant IS the problem: ggml-org's own `gemma-4-E4B-Q8_0.gguf` (ggml-org/gemma-4-E4B-GGUF,
+        // 2026-07-16) continues the same prompts coherently, Catalan included. That Q8_0 is no catalog
+        // row either (8.03 GB, ~5 s cold first token on 1500 tokens). The fix is a Q4_K_M quantized from
+        // ggml-org's BF16 there and hosted somewhere stable; until then the E4B instruct row stays the
+        // only E4B. Same story for 26B-A4B Base (16.8 GB, same April
+        // batch, and too slow for the ghost deadline anyway).
+        // NOT ADDED — LFM2.5-2.6B-Base (Liquid, 2026-08): fast and clean in English/Spanish, but its
+        // Catalan drifted into nonsense on the eval set, Catalan is not among its listed languages,
+        // and the LFM Open License v1.0 withdraws commercial use from any company at or above
+        // US$10M revenue — the same kind of licence carve-out that helped retire Llama 3.1 from an
+        // otherwise Apache-2.0 catalog.
         // Qwen 3.5 9B BASE (pretrained) Q4_K_M, mradermacher. Replaces qwen3-8b-base-q4_k_m.
         ModelCatalogEntry(
             id: "qwen3.5-9b-base-q4_k_m",
@@ -222,7 +260,7 @@ enum ModelCatalog {
         // has to earn: beaten by ~4B-class 2026 models while being twice their size, a 2023-12
         // knowledge cutoff, the only non-Apache/permissive license in an otherwise clean catalog, and
         // the only instruct entry that broke the base-variant-for-raw-continuation rule by choice (the
-        // Gemma 4 entries are instruct only because no base GGUF exists for them; a Llama 3.1 8B base
+        // Gemma 4 QAT entries are instruct only because Google ships no QAT base GGUF; a Llama 3.1 8B base
         // does exist). Its approxRAMGB (7.5) also sat ABOVE the Qwen 8B/9B base entry's despite a
         // SMALLER download, so it sorted last and `recommended` skipped it as instruct — it could only
         // ever be reached by a mis-click.
