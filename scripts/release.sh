@@ -28,6 +28,7 @@
 #   ST_SIGN_IDENTITY                Developer ID identity override (passed through to make-app.sh)
 #   GITHUB_REPO                     publish target (default: dario-valles/shadowtype)
 #   TAP_REPO, TAP_DIR               Homebrew tap repo + local clone; if set, the cask is bumped
+#   SKIP_TESTS=1                    skip the pre-build `swift test` gate (emergencies only)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,6 +94,33 @@ derived_update_public_key="$(
 command -v gh >/dev/null || { echo "error: gh CLI not found — install with: brew install gh" >&2; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "error: gh not authenticated — run: gh auth login" >&2; exit 1; }
 
+# The published tag must name the commit that was built. Refuse uncommitted tracked changes (and
+# untracked files where SwiftPM or the bundle would pick them up), a HEAD no remote branch contains,
+# and an existing tag that points anywhere but HEAD — a new build of an already-tagged version would
+# otherwise ship under the old tag's source.
+if [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ||
+      -n "$(git -C "$REPO_ROOT" status --porcelain -- Sources Tests Resources Package.swift)" ]]; then
+  echo "error: working tree is not clean — commit or discard changes before releasing." >&2
+  git -C "$REPO_ROOT" status --short >&2
+  exit 1
+fi
+HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+git -C "$REPO_ROOT" fetch --quiet origin || {
+  echo "error: could not fetch origin to confirm HEAD is pushed." >&2; exit 1
+}
+[[ -n "$(git -C "$REPO_ROOT" branch -r --contains "$HEAD_SHA")" ]] || {
+  echo "error: HEAD $HEAD_SHA is not on any remote branch — push it before releasing." >&2; exit 1
+}
+remote_tag_sha="$(
+  git -C "$REPO_ROOT" ls-remote origin "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" |
+    tail -1 | cut -f1
+)"
+if [[ -n "$remote_tag_sha" && "$remote_tag_sha" != "$HEAD_SHA" ]]; then
+  echo "error: tag v$VERSION already points at $remote_tag_sha, not HEAD $HEAD_SHA." >&2
+  echo "       Pick a new VERSION for a build of different source." >&2
+  exit 1
+fi
+
 # GitHub release assets are the persisted publication ledger across machines/channels. Fail closed if
 # it cannot be read, and reject reusing or decreasing any previously published build.
 if ! published_assets="$(gh api --paginate "repos/$GITHUB_REPO/releases?per_page=100" \
@@ -147,6 +175,16 @@ assert_release_identity() {
   }
   codesign --verify --deep --strict -R="$EXPECTED_REQUIREMENT" "$APP_DIR"
 }
+
+echo "==> [0/9] pinned llama.cpp prefix + test gate ($HEAD_SHA)"
+# No-op when vendor/llama already matches the pin, flags and toolchain; rebuilds it otherwise.
+"$REPO_ROOT/scripts/build-llama.sh"
+if [[ "${SKIP_TESTS:-0}" == "1" ]]; then
+  echo "    WARNING: SKIP_TESTS=1 — releasing without running the test suite" >&2
+else
+  # The bridge is built first so MCPBridgeSecurityTests run instead of skipping.
+  ( cd "$REPO_ROOT" && swift build --product MCPBridge && CI=1 swift test )
+fi
 
 echo "==> [1/9] build + bundle Developer ID app (VERSION=$VERSION BUILD=$BUILD)"
 RELEASE=1 VERSION="$VERSION" BUILD="$BUILD" "$REPO_ROOT/scripts/make-app.sh"
@@ -236,15 +274,22 @@ TITLE="$APP_NAME $VERSION (build $BUILD)"
 BODY="$NOTES
 
 sha256: $SHA256"
-PRE_FLAG=(); [[ "$CHANNEL" == "beta" ]] && PRE_FLAG=(--prerelease)
+# Explicit both ways: re-publishing an existing beta tag as stable must clear the prerelease flag.
+if [[ "$CHANNEL" == "beta" ]]; then
+  PRE_FLAG=(--prerelease)
+else
+  PRE_FLAG=(--prerelease=false --latest)
+fi
 if gh release view "$TAG" --repo "$GITHUB_REPO" >/dev/null 2>&1; then
-  # Tag already exists (e.g. a new build at the same VERSION): clobber the assets + refresh metadata.
+  # Release already exists (a new build at the same VERSION, same commit — checked up front): clobber
+  # the assets + refresh metadata.
   gh release upload "$TAG" "$ZIP" "$DMG" "$MANIFEST_FILE" --repo "$GITHUB_REPO" --clobber
-  gh release edit   "$TAG" --repo "$GITHUB_REPO" --title "$TITLE" --notes "$BODY" "${PRE_FLAG[@]+"${PRE_FLAG[@]}"}"
+  gh release edit   "$TAG" --repo "$GITHUB_REPO" --title "$TITLE" --notes "$BODY" "${PRE_FLAG[@]}"
   echo "    updated existing release $TAG"
 else
+  # --target pins a new tag to the built commit instead of the remote default branch's tip.
   gh release create "$TAG" "$ZIP" "$DMG" "$MANIFEST_FILE" --repo "$GITHUB_REPO" \
-    --title "$TITLE" --notes "$BODY" "${PRE_FLAG[@]+"${PRE_FLAG[@]}"}"
+    --target "$HEAD_SHA" --title "$TITLE" --notes "$BODY" "${PRE_FLAG[@]}"
   echo "    created release $TAG"
 fi
 

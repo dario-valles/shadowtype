@@ -116,8 +116,12 @@ if [[ -x "$MCP_BIN" ]]; then
   cp "$MCP_BIN" "$APP_DIR/Contents/Resources/shadowtype-mcp"
   chmod +x "$APP_DIR/Contents/Resources/shadowtype-mcp"
   echo "==> bundled MCP bridge: $APP_DIR/Contents/Resources/shadowtype-mcp"
+elif [[ "${RELEASE:-0}" == "1" ]]; then
+  # A release without the bridge silently breaks every MCP host configured against the app.
+  echo "error: $MCP_BIN missing — run 'swift build --product MCPBridge -c $CONFIG' first" >&2
+  exit 1
 else
-  echo "==> WARNING: $MCP_BIN missing — MCP bridge will not be available in this build (run 'swift build --target MCPBridge -c $CONFIG' first)"
+  echo "==> WARNING: $MCP_BIN missing — MCP bridge will not be available in this build (run 'swift build --product MCPBridge -c $CONFIG' first)"
 fi
 
 # App icon. Resources/AppIcon.icns is the committed source of truth (regenerate from

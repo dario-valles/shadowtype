@@ -1,0 +1,71 @@
+# Pull-request CI: build, test, lint. Deliberately NOT a release pipeline — releases need the
+# maintainer's Developer ID + notarization credentials and are cut locally (see RELEASING.md).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift:
+    name: Build & test
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          cmake --version | head -1
+
+      # The pin, CMake flags and toolchain all feed build-llama.sh's build-info stamp, so a stale
+      # cache is rebuilt by the script itself; the key just avoids restoring an obviously wrong one.
+      - name: Restore llama.cpp prefix
+        uses: actions/cache@v6
+        with:
+          path: vendor/llama
+          key: llama-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-llama.sh') }}
+
+      - name: Build pinned llama.cpp
+        run: ./scripts/build-llama.sh
+
+      - name: Build app
+        run: swift build
+
+      # Its own step so a bridge build break is reported as such. MCPBridgeSecurityTests exec this
+      # binary and, under CI, fail rather than skip when it is missing.
+      - name: Build MCP bridge
+        run: swift build --product MCPBridge
+
+      - name: Test
+        run: swift test
+
+  lint:
+    name: Shell & web
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: shellcheck
+        run: |
+          command -v shellcheck >/dev/null || brew install shellcheck
+          shellcheck scripts/*.sh bin/menu
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Web worker typecheck
+        working-directory: web/worker
+        run: |
+          bun install --frozen-lockfile
+          bun run typecheck

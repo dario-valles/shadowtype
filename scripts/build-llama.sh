@@ -49,11 +49,15 @@ CMAKE_FLAGS=(
   "-DLLAMA_BUILD_COMMON=OFF"
 )
 
+# The compiler is part of the stamp: an Xcode upgrade must rebuild the prefix rather than link
+# objects from the previous toolchain into a release.
+TOOLCHAIN="$(xcrun clang --version 2>/dev/null | head -1)"
 EXPECTED_BUILD_INFO="$(
   printf '%s\n' \
     "repository=$LLAMA_REPOSITORY" \
     "tag=$LLAMA_TAG" \
     "commit=$LLAMA_COMMIT" \
+    "toolchain=$TOOLCHAIN" \
     "${CMAKE_FLAGS[@]}"
 )"
 

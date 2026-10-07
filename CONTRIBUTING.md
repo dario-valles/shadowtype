@@ -45,6 +45,8 @@ change.
 3. **Run `swift test`** and make sure it passes.
 4. Open a PR against `main`. Describe *what* changed and *why*, and how you tested it. The PR
    template will prompt you for this.
+5. CI (`.github/workflows/ci.yml`) builds the pinned llama.cpp prefix, the app and the MCP bridge,
+   runs `swift test`, shellchecks `scripts/` and `bin/menu`, and typechecks `web/worker`.
 
 ## Releases are maintainer-only
 

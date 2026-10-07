@@ -53,6 +53,10 @@ The flow:
 1. **Preflight** — the menu verifies the Developer ID identity, the `gh` CLI auth, and the notary
    configuration. `release.sh` additionally refuses to build if `ST_UPDATE_SIGNING_KEY` is missing,
    has unsafe permissions, or does not match the public key embedded in the app.
+   It also refuses a working tree with uncommitted changes, a HEAD that isn't pushed to any remote
+   branch, or a `v<version>` tag that already points at a different commit. It then rebuilds the
+   pinned llama.cpp prefix if it's stale and runs `swift test` (`SKIP_TESTS=1` bypasses the test gate
+   in an emergency).
 2. **Version + build** — proposes the next version bump and auto-increments the monotonic **build**
    number (the updater's ordering key; it must always increase). You confirm release notes and
    whether the update is mandatory.
@@ -60,7 +64,8 @@ The flow:
    static llama.cpp/ggml prefix, verifies that the executable targets macOS 14.0 and has only
    system dynamic dependencies, packages a `.zip` (the auto-updater feed) and a `.dmg`
    (drag-to-Applications first install), then submits to Apple notarytool and staples the ticket.
-4. **Publish to GitHub Releases** — creates a GitHub Release tagged `v<version>` with the `.zip`,
+4. **Publish to GitHub Releases** — creates a GitHub Release tagged `v<version>` on the exact commit
+   that was built, with the `.zip`,
    `.dmg`, and an Ed25519-signed updater manifest (`latest.json`) as assets. The signed payload
    carries the version, build, channel, archive URL and SHA-256, minimum build, and notes.
 
@@ -81,10 +86,12 @@ A **beta** is published as a GitHub **prerelease** on a separate beta channel. I
 build → sign → notarize → publish flow; the in-app updater treats the beta channel independently so
 beta testers get prereleases without affecting stable users.
 
-Do not use the menu's current "promote beta to stable" action. A beta manifest's signed payload says
-`"channel":"beta"`; flipping only GitHub's prerelease flag leaves that signature-valid value
-unchanged, so stable clients reject it. Cut a stable release whose signed payload says
-`"channel":"stable"`.
+Beta testers are also offered a stable release whenever its build is newer than the newest beta, so
+shipping stable never strands them on an old prerelease.
+
+There is no "promote beta to stable". A beta manifest's signed payload says `"channel":"beta"`;
+flipping only GitHub's prerelease flag leaves that signature-valid value unchanged, so stable clients
+would reject it. Cut a stable release whose signed payload says `"channel":"stable"`.
 
 ## Secrets
 
