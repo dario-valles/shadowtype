@@ -341,7 +341,7 @@ final class ModelCatalogTests: XCTestCase {
 
     func testInstructFlagTagsExactlyTheInstructEntries() {
         let instruct = Set(ModelCatalog.entries.filter { $0.isInstruct }.map { $0.id })
-        // Only the Gemma 4 family, which ships instruct-only (no base GGUF exists for it).
+        // Only Google's Gemma 4 QAT GGUFs, which ship instruct-only (the Gemma 4 Base rows are separate).
         XCTAssertEqual(instruct, [
             "gemma-4-e2b-it-qat-q4_0", "gemma-4-e4b-it-qat-q4_0", "gemma-4-12b-it-qat-q4_0",
             "gemma-4-26b-a4b-it-qat-q4_0",
@@ -395,6 +395,28 @@ final class ModelCatalogTests: XCTestCase {
         let twentySixB = ram("gemma-4-26b-a4b-it-qat-q4_0")
         XCTAssertGreaterThan(twelveB, e4b, "12B must be larger than E4B")
         XCTAssertLessThan(twelveB, twentySixB, "12B must be smaller than 26B-A4B")
+    }
+
+    /// Gemma 4 does have pt checkpoints; the E2B Base row sits BESIDE the instruct QAT rows (which
+    /// keep the chat template the chat API needs) rather than replacing them. Pins both halves: the base
+    /// row is base, from the ungated mradermacher quant of Google's pt repo, and the instruct row it
+    /// shadows is still present.
+    func testGemma4BaseRowsSitBesideTheirInstructQATRows() {
+        let pairs = [("gemma-4-e2b-pt-q4_k_m", "gemma-4-e2b-it-qat-q4_0")]
+        for (baseID, instructID) in pairs {
+            guard let base = ModelCatalog.entries.first(where: { $0.id == baseID }) else {
+                XCTFail("missing \(baseID)")
+                continue
+            }
+            XCTAssertFalse(base.isInstruct, "\(baseID): a pt GGUF is a base model")
+            XCTAssertFalse(base.fileName.contains("-it"), "\(baseID): \(base.fileName) looks like an instruct GGUF")
+            XCTAssertTrue(base.name.hasSuffix("Base"), "\(baseID): name must tell it apart from the instruct row")
+            XCTAssertTrue(base.url.path.hasPrefix("/mradermacher/gemma-4-"),
+                          "\(baseID): unexpected publisher: \(base.url.path)")
+            XCTAssertNil(base.sha256, "\(baseID): no Gemma 4 base digest has been release-audited")
+            XCTAssertTrue(ModelCatalog.entries.contains { $0.id == instructID },
+                          "\(instructID) must stay: it is the chat-template-bearing sibling")
+        }
     }
 
     // MARK: - Network smoke test (OPT-IN: set SHADOWTYPE_NET_TESTS=1)
