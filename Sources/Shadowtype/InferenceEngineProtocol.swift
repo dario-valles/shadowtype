@@ -1,8 +1,9 @@
 // InferenceEngineProtocol — the abstraction the suggestion pipeline depends on, so a second backend
 // (Apple's on-device FoundationModels on macOS 26+) can be slotted in behind a router without touching
-// the coordinator. Scaffold only for now: the llama.cpp backend (InferenceEngine) is the sole live
-// implementation; FoundationModelsEngine is a stub and the router forwards to whichever backend is
-// selected (always llama today).
+// the coordinator. The llama.cpp backend (InferenceEngine) serves the ghost text and the Local API;
+// FoundationModelsEngine is real but only reachable through the opt-in Apple-model rewrite — measured too
+// slow and too chatty for ghost text (see FoundationModelsEngine.swift). The router forwards to whichever
+// backend is selected (always llama today).
 //
 // The surface is what CompletionCoordinator + AppDelegate touch on the engine — generation,
 // lifecycle, cooperative cancel, the settable stop-policy / context-window tunables, and (since M0)
@@ -195,37 +196,5 @@ final class InferenceEngineRouter: InferenceEngineProtocol {
                             contextTokenCap: contextTokenCap,
                             requiredPrefix: requiredPrefix,
                             onToken: onToken, onSample: onSample)
-    }
-}
-
-// Stub for Apple's on-device FoundationModels runtime (macOS 26+). Not yet implemented: it reports
-// unloaded and throws on load/generate so the router compiles and the wiring is exercised, without
-// pretending to produce completions. Replace with a real FoundationModels-backed implementation.
-final class FoundationModelsEngine: InferenceEngineProtocol {
-    private(set) var isLoaded: Bool = false
-    var stopAtFirstSentence: Bool = false
-    var maxWords: Int = 12
-    var stopAtSentenceAfterWords: Int = 0
-    var maxContextTokens: Int = 4096
-    var modelChatTemplate: String? { nil }
-    var modelArchitecture: String? { nil }
-    var modelSupportsChat: Bool { false }
-    var supportsFIM: Bool { false }
-
-    func load(modelPath: String) throws {
-        // TODO: bridge Apple FoundationModels (macOS 26+). Unavailable until then.
-        throw InferenceError.modelLoadFailed("FoundationModels backend not implemented")
-    }
-
-    func unload() {}
-    func requestCancel() {}
-    func releaseSeq(_ seqID: Int32) {}
-
-    func generate(prompt: String, maxTokens: Int,
-                  seqID: Int32, params: SamplingParams,
-                  requiredPrefix: [UInt8]?,
-                  onToken: (String) -> Bool,
-                  onSample: ((_ prob: Float, _ isFirstContent: Bool) -> Void)?) throws {
-        throw InferenceError.notLoaded
     }
 }

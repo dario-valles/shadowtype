@@ -432,8 +432,8 @@ final class CotabbyGrabsTests: XCTestCase {
         XCTAssertTrue(router.isLoaded)
     }
 
-    func testFoundationModelsStubIsUnavailable() {
-        let fm = FoundationModelsEngine()
+    func testFoundationModelsEngineUnavailableWithoutSystemModel() {
+        let fm = FoundationModelsEngine(isSystemModelAvailable: { false })
         XCTAssertFalse(fm.isLoaded)
         XCTAssertThrowsError(try fm.load(modelPath: "/tmp/x"))
     }

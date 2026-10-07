@@ -63,6 +63,9 @@ final class PermissionLifecycleCoordinator {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     // P0
     let engine = InferenceEngine()
+    // Apple's on-device model, used only by the opt-in "Rewrite with Apple Intelligence" (see
+    // syncAppleRewrite). Never serves the ghost or the Local API.
+    let appleIntelligenceEngine = FoundationModelsEngine()
     let modelManager = ModelManager()
     let statusItem = StatusItemController()
     let settings = SettingsWindowController()
@@ -600,6 +603,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // update timer to match. No immediate network call here (syncToggles runs on every defaults
         // change); the launch check + manual "Check for Updates…" cover on-demand checking.
         appUpdateCoordinator.scheduleUpdateTimer()
+        syncAppleRewrite()
+    }
+
+    // Shortcuts → "Rewrite with Apple Intelligence" (default OFF; only offered when the system model is
+    // available). Re-checked on every defaults change, so Apple Intelligence being turned off later just
+    // drops the rewrite back to the local model.
+    private func syncAppleRewrite() {
+        let wanted = UserDefaults.standard.bool(forKey: "shadowtype.rewriteWithAppleIntelligence")
+        guard wanted, (try? appleIntelligenceEngine.load(modelPath: "")) != nil else {
+            coordinator.appleRewriteEngine = nil
+            return
+        }
+        coordinator.appleRewriteLanguages = FoundationModelsSupport.supportedLanguageCodes
+        coordinator.appleRewriteEngine = appleIntelligenceEngine
     }
 
     // Evaluate whether the active-field badge should be visible and where. Same gates as completions:
