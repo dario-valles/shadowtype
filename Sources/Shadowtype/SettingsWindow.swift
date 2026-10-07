@@ -1370,6 +1370,8 @@ private struct TriStatePicker: View {
 private struct ShortcutsPane: View {
     @AppStorage("shadowtype.swallowTab") private var swallowTab = true
     @AppStorage("shadowtype.acceptOnRightArrow") private var acceptOnRightArrow = true
+    // "word" (default) or "all". Live: AppDelegate.updateRightArrowAcceptForFrontmost pushes it to the tap.
+    @AppStorage("shadowtype.rightArrowAcceptMode") private var rightArrowAcceptMode = "word"
     @AppStorage("shadowtype.emojiShortcode") private var emojiShortcode = true
     @AppStorage("shadowtype.rewriteEnabled") private var rewriteEnabled = true
 
@@ -1391,7 +1393,7 @@ private struct ShortcutsPane: View {
     private var shortcuts: [Shortcut] { staticShortcuts(rewriteKeys: rewriteChordKeys) }
     private func staticShortcuts(rewriteKeys: [String]) -> [Shortcut] { [
         .init(action: "Accept next word", note: "Take one word from the current suggestion. Right Arrow also works at end-of-line when enabled.", keys: ["Tab"]),
-        .init(action: "Accept whole line", note: "Take the entire suggested line at once.", keys: ["⌥", "Tab"]),
+        .init(action: "Accept whole line", note: "Take the entire suggested line at once. Right Arrow can do this too — see below.", keys: ["⌥", "Tab"]),
         .init(action: "Dismiss suggestion", note: "Hide the current ghost text. Typing also dismisses.", keys: ["esc"]),
         .init(action: "Force suggestions here", note: "Turn completions on in the current field, even where Shadowtype stays idle (terminals, code editors).", keys: ["⌃", "`"]),
         .init(action: "Rewrite selection", note: "Rewrite the selected text on-device — improve, shorten, change tone, fix grammar, or summarize. Preview before keeping.", keys: rewriteKeys),
@@ -1421,7 +1423,14 @@ private struct ShortcutsPane: View {
                 Toggle("Swallow Tab when a suggestion is showing", isOn: $swallowTab)
                 caption("Prevents the literal Tab from also reaching the app while accepting. Off lets Tab pass through to the app even when a ghost is visible.")
                 Toggle("Also accept with Right Arrow", isOn: $acceptOnRightArrow)
-                caption("Accept the next word with Right Arrow when the caret is at end-of-line. Matches Smart Compose and Superhuman. Cursor motion still wins mid-line or with any modifier held.")
+                caption("Accept with Right Arrow when the caret is at end-of-line. Matches Smart Compose and Superhuman. Cursor motion still wins mid-line or with any modifier held.")
+                Picker("Right Arrow accepts", selection: $rightArrowAcceptMode) {
+                    Text("Next word").tag("word")
+                    Text("Whole line").tag("all")
+                }
+                .pickerStyle(.segmented)
+                .disabled(!acceptOnRightArrow)
+                caption("Whole line makes Right Arrow a one-key accept-all, like ⌥Tab.")
                 Toggle("Emoji shortcode", isOn: $emojiShortcode)
                 caption("Type “:” then a name to insert emoji. Turn off to disable the trigger entirely.")
                 Toggle("Selection rewrite (\(rewriteChordLabel))", isOn: $rewriteEnabled)

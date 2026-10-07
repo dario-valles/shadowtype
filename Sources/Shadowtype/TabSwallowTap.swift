@@ -49,6 +49,11 @@ final class TabSwallowTap {
     // swallowed and keeps its native cursor-move behavior. Resolves the global toggle merged with
     // the per-app TriState override (AppDelegate.updateRightArrowAcceptForFrontmost).
     private var _rightArrowEnabled = true
+    // Shortcuts → "Right Arrow accepts" (default: next word). When true, Right Arrow takes the whole
+    // suggestion in one keystroke — the same acceptance as ⌥Tab — so there is an unmodified accept-all
+    // key for people used to Smart Compose. Global only; the per-app TriState still decides whether
+    // Right Arrow accepts at all.
+    private var _rightArrowAcceptsAll = false
     // Snapshot of EditContextTracker.caretAtLineEnd() pushed by CompletionCoordinator at every
     // suggestion render / accept-advance. Without this gate Right Arrow would swallow mid-line
     // cursor motion when the user had mid-line completions on. Pushed false on every clear.
@@ -128,6 +133,12 @@ final class TabSwallowTap {
         os_unfair_lock_unlock(&_lock)
     }
 
+    func setRightArrowAcceptsAll(_ v: Bool) {
+        os_unfair_lock_lock(&_lock)
+        _rightArrowAcceptsAll = v
+        os_unfair_lock_unlock(&_lock)
+    }
+
     func setCaretAtLineEnd(_ v: Bool) {
         os_unfair_lock_lock(&_lock)
         _caretAtLineEnd = v
@@ -172,7 +183,7 @@ final class TabSwallowTap {
         if isTabAccept {
             acceptance = flags.contains(.maskAlternate) ? .line : .word
         } else if isRightArrowAccept {
-            acceptance = .word
+            acceptance = _rightArrowAcceptsAll ? .line : .word
         } else {
             acceptance = nil
         }
