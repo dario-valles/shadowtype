@@ -58,14 +58,50 @@ final class TabSwallowTap {
     // a second acceptance against the same visible suggestion.
     private var _acceptancePending = false
 
+    struct Runtime {
+        let createTap: (CGEventMask, CGEventTapCallBack, UnsafeMutableRawPointer) -> CFMachPort?
+        let setTapEnabled: (CFMachPort, Bool) -> Void
+        let invalidateTap: (CFMachPort) -> Void
+
+        static let live = Runtime(
+            createTap: { mask, callback, refcon in
+                CGEvent.tapCreate(
+                    tap: .cgSessionEventTap,
+                    place: .headInsertEventTap,
+                    options: .defaultTap,
+                    eventsOfInterest: mask,
+                    callback: callback,
+                    userInfo: refcon
+                )
+            },
+            setTapEnabled: { tap, enabled in
+                CGEvent.tapEnable(tap: tap, enable: enabled)
+            },
+            invalidateTap: { CFMachPortInvalidate($0) }
+        )
+    }
+
+    // Lifecycle state, guarded by `lifecycle`. `tap` itself is confined to the tap thread.
+    private let lifecycle = NSCondition()
+    private var thread: Thread?
+    private var runLoop: CFRunLoop?
+    private var startupAcknowledged = false
     private var tap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private let runtime: Runtime
     private let scheduleAcceptance: (@escaping () -> Void) -> Void
 
-    init(scheduleAcceptance: @escaping (@escaping () -> Void) -> Void = { work in
+    init(runtime: Runtime = .live,
+         scheduleAcceptance: @escaping (@escaping () -> Void) -> Void = { work in
         DispatchQueue.main.async(execute: work)
     }) {
+        self.runtime = runtime
         self.scheduleAcceptance = scheduleAcceptance
+    }
+
+    var isRunning: Bool {
+        lifecycle.lock()
+        defer { lifecycle.unlock() }
+        return runLoop != nil
     }
 
     func setSuggestionVisible(_ v: Bool) {
@@ -167,57 +203,113 @@ final class TabSwallowTap {
         return true
     }
 
-    // Enable the active tap only during the visible window to bound freeze risk (Spike 4 pt 4).
+    // MARK: - Lifecycle
+
+    // The tap is ACTIVE: every keyDown on the system waits for this callback before reaching the
+    // focused app. It therefore runs on its own run loop — never main, where synchronous AX reads,
+    // overlay drawing and model bookkeeping would otherwise delay every keystroke system-wide. The
+    // callback only takes `_lock` and enqueues; it stays enabled for the pipeline's lifetime because
+    // that decision is cheaper than racing an enable against the first Tab after a ghost appears.
+    // start()/stop() are called from main and block until the tap thread has finished setting up /
+    // tearing down, so a stop can never race a half-created tap.
     func start() {
-        guard tap == nil else {
-            if let t = tap { CGEvent.tapEnable(tap: t, enable: true) }
+        lifecycle.lock()
+        guard thread == nil else {
+            lifecycle.unlock()
             return
         }
-        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        startupAcknowledged = false
+        let t = Thread { [weak self] in self?.threadMain() }
+        t.name = "com.shadowtype.accept-tap"
+        t.qualityOfService = .userInteractive
+        t.stackSize = 512 * 1024
+        thread = t
+        t.start()
+        while !startupAcknowledged {
+            lifecycle.wait()
+        }
+        lifecycle.unlock()
+    }
+
+    func stop() {
+        lifecycle.lock()
+        guard thread != nil else {
+            lifecycle.unlock()
+            return
+        }
+        if let rl = runLoop {
+            // Queued as a block rather than a bare CFRunLoopStop: a stop flag set before the thread
+            // enters CFRunLoopRun would be discarded, while a performed block runs once it does.
+            CFRunLoopPerformBlock(rl, CFRunLoopMode.commonModes.rawValue) {
+                CFRunLoopStop(CFRunLoopGetCurrent())
+            }
+            CFRunLoopWakeUp(rl)
+        }
+        while thread != nil {
+            lifecycle.wait()
+        }
+        lifecycle.unlock()
+    }
+
+    // MARK: - Dedicated tap thread
+
+    private func threadMain() {
+        let rl = CFRunLoopGetCurrent()
         let refcon = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
 
         // Active gate at HEAD of the session tap: A -> app. Returning nil deletes the event.
-        guard let t = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: { _, type, event, refcon in
-                // Always re-enable on disable; pass the event through untouched.
-                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    let me = Unmanaged<TabSwallowTap>.fromOpaque(refcon!).takeUnretainedValue()
-                    if let tap = me.tap { CGEvent.tapEnable(tap: tap, enable: true) }
-                    return Unmanaged.passUnretained(event)
-                }
-                let me = Unmanaged<TabSwallowTap>.fromOpaque(refcon!).takeUnretainedValue()
-                guard type == .keyDown else { return Unmanaged.passUnretained(event) }
-                let code = event.getIntegerValueField(.keyboardEventKeycode)
-                if me.handleKeyDown(keycode: code, flags: event.flags) {
-                    return nil                              // DELETE: app never gets the accept key
-                }
-                return Unmanaged.passUnretained(event)       // passthrough
-            },
-            userInfo: refcon
-        ) else {
-            // Active taps require Accessibility permission; without it tapCreate returns nil.
+        guard let t = runtime.createTap(CGEventMask(1 << CGEventType.keyDown.rawValue),
+                                        Self.tapCallback, refcon),
+              let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, t, 0) else {
+            // Active taps require Accessibility permission; without it tapCreate returns nil. Not
+            // latched: the permission pipeline calls start() again once the grant arrives.
             NSLog("TabSwallowTap: could not create active tap — grant Accessibility permission.")
+            finishThread()
             return
         }
 
         tap = t
-        let src = CFMachPortCreateRunLoopSource(nil, t, 0)
-        runLoopSource = src
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), src, .commonModes)
-        CGEvent.tapEnable(tap: t, enable: true)
+        CFRunLoopAddSource(rl, src, .commonModes)
+        runtime.setTapEnabled(t, true)
+
+        lifecycle.lock()
+        runLoop = rl
+        startupAcknowledged = true
+        lifecycle.broadcast()
+        lifecycle.unlock()
+
+        CFRunLoopRun()
+
+        runtime.setTapEnabled(t, false)
+        CFRunLoopRemoveSource(rl, src, .commonModes)
+        runtime.invalidateTap(t)
+        tap = nil
+        finishThread()
     }
 
-    func stop() {
-        if let t = tap { CGEvent.tapEnable(tap: t, enable: false) }
-        if let src = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), src, .commonModes)
+    private func finishThread() {
+        lifecycle.lock()
+        runLoop = nil
+        thread = nil
+        startupAcknowledged = true
+        lifecycle.broadcast()
+        lifecycle.unlock()
+    }
+
+    private static let tapCallback: CGEventTapCallBack = { _, type, event, refcon in
+        guard let refcon else { return Unmanaged.passUnretained(event) }
+        let me = Unmanaged<TabSwallowTap>.fromOpaque(refcon).takeUnretainedValue()
+        // Always re-enable on disable; pass the event through untouched. `tap` is only written on
+        // this thread, before the run loop starts and after it stops.
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = me.tap { me.runtime.setTapEnabled(tap, true) }
+            return Unmanaged.passUnretained(event)
         }
-        if let t = tap { CFMachPortInvalidate(t) }
-        runLoopSource = nil
-        tap = nil
+        guard type == .keyDown else { return Unmanaged.passUnretained(event) }
+        let code = event.getIntegerValueField(.keyboardEventKeycode)
+        if me.handleKeyDown(keycode: code, flags: event.flags) {
+            return nil                              // DELETE: app never gets the accept key
+        }
+        return Unmanaged.passUnretained(event)       // passthrough
     }
 }
