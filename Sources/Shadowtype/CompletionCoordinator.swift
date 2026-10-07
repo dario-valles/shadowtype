@@ -1447,7 +1447,13 @@ final class CompletionCoordinator {
             return
         }
         Diag.log("render: \(reason) -> hide")
+        // The stream keeps going after a reject and a later snapshot may pass. clearSuggestion() drops
+        // this generation's hoisted state (#9), so without restoring it every later render is discarded
+        // as "stale focus", and the language guards would run with no prefix language. The generation,
+        // the field and the caret are unchanged, so the values are still the right ones.
+        let kept = generationSession.hoisted
         clearSuggestion()
+        generationSession.hoisted = kept
     }
 
     private func renderSuggestion(_ rawText: String, checkPrefixDup: Bool = true, caretOverride: CGRect? = nil) {
