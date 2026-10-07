@@ -225,6 +225,12 @@ final class MCPBridgeSecurityTests: XCTestCase {
             fileURLWithPath: FileManager.default.currentDirectoryPath
         ).appendingPathComponent(".build/debug/MCPBridge")
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            // Locally a missing bridge just skips; under CI a silent skip would hide the whole suite.
+            if ProcessInfo.processInfo.environment["CI"] != nil {
+                struct BridgeNotBuilt: Error {}
+                XCTFail("MCPBridge product has not been built (run `swift build --product MCPBridge`)")
+                throw BridgeNotBuilt()
+            }
             throw XCTSkip("MCPBridge product has not been built")
         }
 
