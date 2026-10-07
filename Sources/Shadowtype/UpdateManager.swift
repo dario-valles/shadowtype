@@ -218,20 +218,45 @@ final class UpdateManager: ObservableObject {
         let assets: [GitHubAsset]
     }
 
-    /// Resolve the chosen channel's release, find its `latest.json` asset, download + parse it.
+    /// Resolve the chosen channel's release(s), find each `latest.json` asset, download + parse it.
     /// - stable → GET /releases/latest (GitHub's "latest non-prerelease, non-draft" endpoint).
-    /// - beta   → GET /releases (first non-draft entry, which includes prereleases).
+    /// - beta   → GET /releases and consider BOTH the newest prerelease and the newest stable release,
+    ///   returning whichever manifest has the higher build. Beta means "stable plus earlier builds",
+    ///   not "prereleases only": a stable shipped after the last beta must still reach beta testers.
+    ///   Each manifest is validated against the channel of the release it came from, so a stable
+    ///   release still has to carry a manifest signed as "stable".
     /// Returns nil when there's no published release / no `latest.json` asset (treated as up-to-date).
     private func fetchManifest(channel: UpdateChannel) async throws -> UpdateManifest? {
-        let release: GitHubRelease?
         switch channel {
         case .stable:
-            release = try await fetchLatestStableRelease()
+            guard let release = try await fetchLatestStableRelease() else { return nil }
+            return try await manifest(in: release, for: .stable)
         case .beta:
-            release = try await fetchFirstRelease()
+            let releases = try await fetchReleaseListing().filter { !$0.draft }
+            let candidates: [(GitHubRelease, UpdateChannel)] = [
+                releases.first(where: { $0.prerelease }).map { ($0, .beta) },
+                releases.first(where: { !$0.prerelease }).map { ($0, .stable) },
+            ].compactMap { $0 }
+            var best: UpdateManifest?
+            var firstError: Error?
+            for (release, releaseChannel) in candidates {
+                do {
+                    guard let manifest = try await manifest(in: release, for: releaseChannel) else {
+                        continue
+                    }
+                    if manifest.build > (best?.build ?? Int.min) { best = manifest }
+                } catch {
+                    // One unusable release must not hide a valid one on the other track.
+                    firstError = firstError ?? error
+                }
+            }
+            if best == nil, let firstError { throw firstError }
+            return best
         }
-        guard let release,
-              let asset = release.assets.first(where: { $0.name == "latest.json" }),
+    }
+
+    private func manifest(in release: GitHubRelease, for channel: UpdateChannel) async throws -> UpdateManifest? {
+        guard let asset = release.assets.first(where: { $0.name == "latest.json" }),
               let assetURL = URL(string: asset.browserDownloadURL) else {
             return nil
         }
@@ -248,12 +273,11 @@ final class UpdateManager: ObservableObject {
         return try? JSONDecoder().decode(GitHubRelease.self, from: data)
     }
 
-    private func fetchFirstRelease() async throws -> GitHubRelease? {
+    /// GitHub returns releases newest-first, prereleases and drafts included.
+    private func fetchReleaseListing() async throws -> [GitHubRelease] {
         let url = apiBase.appendingPathComponent("releases")
         let data = try await getData(from: url, accept: "application/vnd.github+json")
-        let releases = (try? JSONDecoder().decode([GitHubRelease].self, from: data)) ?? []
-        // First non-draft entry — GitHub returns releases newest-first, prereleases included.
-        return releases.first(where: { !$0.draft && $0.prerelease })
+        return (try? JSONDecoder().decode([GitHubRelease].self, from: data)) ?? []
     }
 
     /// GET with the required User-Agent header (and optional Accept). No auth token (public repo).

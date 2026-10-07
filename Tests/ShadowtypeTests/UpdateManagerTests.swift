@@ -99,6 +99,17 @@ final class UpdateManagerTests: XCTestCase {
         ])
     }
 
+    /// A newest-first GitHub release listing with one `latest.json` asset per release.
+    private func multiReleaseListingJSON(_ releases: [(assetURL: String, prerelease: Bool)]) -> Data {
+        try! JSONSerialization.data(withJSONObject: releases.map { release in
+            [
+                "prerelease": release.prerelease,
+                "draft": false,
+                "assets": [["name": "latest.json", "browser_download_url": release.assetURL]],
+            ] as [String: Any]
+        })
+    }
+
     private func singleReleaseJSON(assetURL: String, prerelease: Bool = false) -> Data {
         try! JSONSerialization.data(withJSONObject: [
             "prerelease": prerelease,
@@ -163,6 +174,62 @@ final class UpdateManagerTests: XCTestCase {
         let mgr = manager()
         let manifest = await mgr.check(channel: .beta, manual: true)
         XCTAssertEqual(manifest?.version, "0.4.0")
+    }
+
+    // A stable cut after the last beta must still reach beta testers; the beta channel used to look
+    // at prereleases only and would sit on the older beta forever.
+    func testCheckBetaOffersNewerStableOverOlderBeta() async {
+        let base = UpdateManager.currentBuild()
+        let stableURL = manifestAssetURL(version: "0.5.0")
+        let betaURL = manifestAssetURL(version: "0.5.0-beta.2")
+        StubProtocol.routes = [
+            "/repos/dario-valles/shadowtype/releases": multiReleaseListingJSON([
+                (stableURL, false), (betaURL, true),
+            ]),
+            "/dario-valles/shadowtype/releases/download/v0.5.0/latest.json":
+                sampleManifestJSON(version: "0.5.0", build: base + 30, channel: "stable"),
+            "/dario-valles/shadowtype/releases/download/v0.5.0-beta.2/latest.json":
+                sampleManifestJSON(version: "0.5.0-beta.2", build: base + 20, channel: "beta"),
+        ]
+        let manifest = await manager().check(channel: .beta, manual: true)
+        XCTAssertEqual(manifest?.version, "0.5.0")
+        XCTAssertEqual(manifest?.channel, "stable")
+    }
+
+    func testCheckBetaPrefersNewerBetaOverOlderStable() async {
+        let base = UpdateManager.currentBuild()
+        let stableURL = manifestAssetURL(version: "0.5.0")
+        let betaURL = manifestAssetURL(version: "0.6.0-beta.1")
+        StubProtocol.routes = [
+            "/repos/dario-valles/shadowtype/releases": multiReleaseListingJSON([
+                (betaURL, true), (stableURL, false),
+            ]),
+            "/dario-valles/shadowtype/releases/download/v0.5.0/latest.json":
+                sampleManifestJSON(version: "0.5.0", build: base + 30, channel: "stable"),
+            "/dario-valles/shadowtype/releases/download/v0.6.0-beta.1/latest.json":
+                sampleManifestJSON(version: "0.6.0-beta.1", build: base + 40, channel: "beta"),
+        ]
+        let manifest = await manager().check(channel: .beta, manual: true)
+        XCTAssertEqual(manifest?.version, "0.6.0-beta.1")
+    }
+
+    // Each manifest is still validated against its own release's track: a stable release carrying a
+    // beta-signed manifest (e.g. a promoted beta) is rejected, without hiding the valid beta.
+    func testCheckBetaRejectsMismatchedStableManifestButKeepsValidBeta() async {
+        let base = UpdateManager.currentBuild()
+        let stableURL = manifestAssetURL(version: "0.5.0")
+        let betaURL = manifestAssetURL(version: "0.5.0-beta.2")
+        StubProtocol.routes = [
+            "/repos/dario-valles/shadowtype/releases": multiReleaseListingJSON([
+                (stableURL, false), (betaURL, true),
+            ]),
+            "/dario-valles/shadowtype/releases/download/v0.5.0/latest.json":
+                sampleManifestJSON(version: "0.5.0", build: base + 30, channel: "beta"),
+            "/dario-valles/shadowtype/releases/download/v0.5.0-beta.2/latest.json":
+                sampleManifestJSON(version: "0.5.0-beta.2", build: base + 20, channel: "beta"),
+        ]
+        let manifest = await manager().check(channel: .beta, manual: true)
+        XCTAssertEqual(manifest?.version, "0.5.0-beta.2")
     }
 
     // MARK: - Manifest decode (camelCase minBuild)
