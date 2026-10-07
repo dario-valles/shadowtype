@@ -1259,6 +1259,29 @@ final class CompletionCoordinator {
         }
     }
 
+    // Launch-time load, under the same `inferenceQueue` confinement as reloadModel(). AppDelegate used
+    // to call engine.load() straight from its launch Task, so a model swap or a quit landing during
+    // launch could load/unload concurrently with it — engine.load()'s `isLoaded` guard is only set once
+    // a load finishes, so two overlapping loads could leak a model or mix pointers from both.
+    // Returns false when a model is already resident by the time this runs: a swap queued during launch
+    // won, and its own completion owns the UI state, so the caller must not relabel it.
+    func loadStartupModel(at path: String) async throws -> Bool {
+        try await withCheckedThrowingContinuation { continuation in
+            inferenceQueue.async { [engine] in
+                guard !engine.isLoaded else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                do {
+                    try engine.load(modelPath: path)
+                    continuation.resume(returning: true)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     // Models → "Unload model when idle": free the resident model + Metal context after an idle window.
     // Like reloadModel(), the unload MUST run on `inferenceQueue` (the engine is not thread-safe), so we
     // cancel any in-flight generation on main first, then serialize the unload after it. Safe to call

@@ -4,6 +4,7 @@
 // byte and leak the key prefix-by-prefix via response timing to a local process that can reach
 // 127.0.0.1 but can't read the Keychain. These lock the helper's correctness (timing is not asserted
 // here — only that the result is right for matches, mismatches, and length differences).
+import AppKit
 import XCTest
 import CryptoKit
 @testable import Shadowtype
@@ -252,6 +253,44 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: String(overlong.prefix(MemoryLayout.size(ofValue: sockaddr_un().sun_path) - 1))
         ))
+    }
+
+    // Each wake runs stop()+start(). The observer used to be added on NSWorkspace's center but removed
+    // from NotificationCenter.default, so registrations doubled per wake (and per Settings toggle):
+    // 1 + 2 + 4 + 8 re-binds over four wakes instead of four.
+    func testWakeRebindsExactlyOncePerWakeAcrossRepeatedWakesAndRestarts() throws {
+        try requireLoopbackBindAvailable()
+        let directory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let wakeCenter = NotificationCenter()
+        let server = LocalAPIServer(
+            portCandidates: [0],
+            udsPath: nil,
+            discoveryPath: directory + "/api-endpoint.json",
+            apiKeyProvider: { Self.testKey },
+            wakeNotificationCenter: wakeCenter
+        )
+        defer { server.stop() }
+        XCTAssertNotNil(server.start())
+        // A Settings off/on toggle must not leave a second registration behind either.
+        server.stop()
+        XCTAssertNotNil(server.start())
+
+        var rebinds = 0
+        let token = NotificationCenter.default.addObserver(
+            forName: .shadowtypeLocalAPIDidChange, object: nil, queue: nil) { _ in rebinds += 1 }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        let wakes = 4
+        for _ in 0..<wakes {
+            wakeCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        }
+
+        XCTAssertTrue(server.isRunning)
+        // Ephemeral ports almost always change per bind, so this is normally == wakes; a reused port
+        // only lowers it. The doubling bug pushes it to 2^wakes - 1.
+        XCTAssertGreaterThan(rebinds, 0)
+        XCTAssertLessThanOrEqual(rebinds, wakes)
     }
 
     func testUDSRejectsUnprotectableParentAndTCPRemainsBearerProtected() throws {

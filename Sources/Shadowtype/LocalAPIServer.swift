@@ -67,6 +67,7 @@ final class LocalAPIServer {
                                             qos: .userInitiated, attributes: .concurrent)
     private let stateQueue = DispatchQueue(label: "com.shadowtype.localapi.state")
     private var pendingDepth: Int = 0
+    private let wakeNotificationCenter: NotificationCenter
 
     // Dependencies (weak — owner is AppDelegate, lives longer than us anyway).
     weak var coordinator: CompletionCoordinator?
@@ -86,13 +87,15 @@ final class LocalAPIServer {
          discoveryPath: String,
          apiKeyProvider: @escaping () -> String?,
          headerReceiveTimeout: TimeInterval = LocalAPIServer.defaultHeaderReceiveTimeout,
-         bodyReceiveTimeout: TimeInterval = LocalAPIServer.defaultBodyReceiveTimeout) {
+         bodyReceiveTimeout: TimeInterval = LocalAPIServer.defaultBodyReceiveTimeout,
+         wakeNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter) {
         self.configuredPorts = portCandidates
         self.configuredUDSPath = udsPath
         self.configuredDiscoveryPath = discoveryPath
         self.apiKeyProvider = apiKeyProvider
         self.headerReceiveTimeout = headerReceiveTimeout
         self.bodyReceiveTimeout = bodyReceiveTimeout
+        self.wakeNotificationCenter = wakeNotificationCenter
     }
 
     // --- Public API -------------------------------------------------------------------------
@@ -164,6 +167,8 @@ final class LocalAPIServer {
         activeAPIKey = nil
         boundPort = nil
         NotificationCenter.default.removeObserver(self)
+        wakeNotificationCenter.removeObserver(self,
+            name: NSWorkspace.didWakeNotification, object: nil)
     }
 
     // Reachable URL for the menu-bar "Copy API URL" affordance.
@@ -661,10 +666,14 @@ final class LocalAPIServer {
 
     // After system sleep the listener fd is sometimes closed by the kernel (varies by Mac
     // generation + power state). Tear down + restart on wake so the server stays up.
+    // didWake is only delivered on NSWorkspace's own center, so registration AND removal must both
+    // target it. Removing from NotificationCenter.default (as this once did) was a no-op, and since
+    // handleDidWake runs stop()+start(), every wake doubled the registrations: after N wakes a single
+    // wake re-bound the sockets and rewrote the discovery file 2^N times on main.
     private func observeSleepWake() {
-        NotificationCenter.default.removeObserver(self,
+        wakeNotificationCenter.removeObserver(self,
             name: NSWorkspace.didWakeNotification, object: nil)
-        NSWorkspace.shared.notificationCenter.addObserver(self,
+        wakeNotificationCenter.addObserver(self,
             selector: #selector(handleDidWake),
             name: NSWorkspace.didWakeNotification, object: nil)
     }
