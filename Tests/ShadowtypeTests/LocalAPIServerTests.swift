@@ -416,7 +416,10 @@ final class LocalAPIServerTests: XCTestCase {
         let fd = try tcpConnect(port: fixture.port)
         defer { close(fd) }
         for byte in "GET".utf8 {
-            _ = LocalHTTPParser.writeAll(fd: fd, data: Data([byte]))
+            // On a stalled runner a usleep can overshoot the whole deadline, so the server may
+            // already have answered 408 and closed. That is the behaviour under test: stop
+            // dripping and read the response rather than writing into a reset connection.
+            guard LocalHTTPParser.writeAll(fd: fd, data: Data([byte])) else { break }
             usleep(80_000)
         }
         let response = readResponse(fd: fd)
@@ -520,6 +523,7 @@ final class LocalAPIServerTests: XCTestCase {
     private func tcpConnect(port: Int) throws -> Int32 {
         let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
         guard fd >= 0 else { throw POSIXError(.ENOTSOCK) }
+        disableSIGPIPE(fd)
         var timeout = timeval(tv_sec: 2, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
                    socklen_t(MemoryLayout<timeval>.size))
@@ -540,6 +544,15 @@ final class LocalAPIServerTests: XCTestCase {
         return fd
     }
 
+    // Several tests deliberately let the server time out and close mid-request. Without this,
+    // the client's next send() into the reset connection raises SIGPIPE, whose default action
+    // kills the whole xctest process (CI: "exited with unexpected signal code 13") instead of
+    // returning EPIPE to writeAll.
+    private func disableSIGPIPE(_ fd: Int32) {
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
+    }
+
     private func request(port: Int, raw: String) throws -> Data {
         let fd = try tcpConnect(port: port)
         defer { close(fd) }
@@ -551,6 +564,7 @@ final class LocalAPIServerTests: XCTestCase {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(.ENOTSOCK) }
         defer { close(fd) }
+        disableSIGPIPE(fd)
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(path.utf8)
