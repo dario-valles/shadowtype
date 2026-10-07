@@ -21,6 +21,45 @@ final class InjectorTests: XCTestCase {
         XCTAssertEqual(surface.syntheticBackspaceCount, 3)
     }
 
+    // Snippet accept: the typed `;sig` run is swapped for a multi-line expansion in one AX op, with
+    // the newlines intact and the caret left after the inserted text.
+    func testMultiLineSnippetReplacesTypedTriggerAtomically() {
+        let surface = FakeInjectorAXSurface(value: "Thanks ;sig",
+                                            selection: CFRange(location: 11, length: 0))
+        let element = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let injector = Injector(
+            axAccess: surface,
+            unicodeTyper: { surface.syntheticallyType($0) },
+            backspacePoster: { surface.syntheticallyBackspace($0) })
+        let match = SnippetMatch(name: "sig", expansion: "Best,\nDarío", typedRun: ";sig")
+
+        XCTAssertTrue(injector.replaceBeforeCaret(utf16Length: match.replaceUTF16Length,
+                                                  keystrokeCount: match.replaceKeystrokeCount,
+                                                  with: match.expansion, in: element))
+        XCTAssertEqual(surface.value, "Thanks Best,\nDarío")
+        XCTAssertEqual(surface.selection.location, ("Thanks Best,\nDarío" as NSString).length)
+        XCTAssertEqual(surface.syntheticBackspaceCount, 0)
+        XCTAssertEqual(surface.syntheticTypeCount, 0)
+    }
+
+    // AX refused: the ordered fallback deletes exactly the typed run, then types the full expansion.
+    func testMultiLineSnippetFallbackDeletesTypedRunThenTypes() {
+        let surface = FakeInjectorAXSurface(value: "Hi ;si",
+                                            selection: CFRange(location: 6, length: 0))
+        surface.selectedTextWriteError = .cannotComplete
+        let element = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let injector = Injector(
+            axAccess: surface,
+            unicodeTyper: { surface.syntheticallyType($0) },
+            backspacePoster: { surface.syntheticallyBackspace($0) })
+
+        XCTAssertTrue(injector.replaceBeforeCaret(utf16Length: 3, keystrokeCount: 3,
+                                                  with: "Best,\nD", in: element))
+        XCTAssertEqual(surface.value, "Hi Best,\nD")
+        XCTAssertEqual(surface.syntheticBackspaceCount, 3)
+        XCTAssertEqual(surface.syntheticTypeCount, 1)
+    }
+
     func testUnreadableSelectionRangeDoesNotAppendThroughAXSplice() {
         let surface = FakeInjectorAXSurface(value: "headtail",
                                             selection: CFRange(location: 4, length: 0))

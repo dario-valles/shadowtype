@@ -77,8 +77,8 @@ final class Injector {
     }
 
     // Atomically replace the run of `utf16Length` UTF-16 units immediately BEFORE the caret with `text`
-    // (used to swap a mistyped token for its correction, FR-AC-1, and a typed `:shortcode` for its emoji,
-    // FR-EM-1). Native AX fields: select [caret-len, len] and write it in ONE set-value op — no async
+    // (used to swap a mistyped token for its correction, FR-AC-1, a typed `:shortcode` for its emoji,
+    // FR-EM-1, and a typed `;name` for its snippet expansion). Native AX fields: select [caret-len, len] and write it in ONE set-value op — no async
     // backspaces racing a synchronous value read (the bug a "postBackspaces then inject" sequence has:
     // the AX value is read BEFORE the queued Delete events are processed, so the splice lands on the
     // still-mistyped text). Web/Electron nodes ignore AX writes, so they (and any AX failure) fall back
@@ -99,10 +99,13 @@ final class Injector {
                 break
             }
         }
-        // Ordered fallback: backspaces THEN typed text, both async CGEvents on the session tap (FIFO).
+        // Ordered fallback: backspaces THEN the text, both async CGEvents on the session tap (FIFO). The
+        // text goes through synthesize() so a long/multi-line replacement (a snippet expansion) takes
+        // the opt-in paste path exactly like a multi-line completion accept; short single-line
+        // corrections and emoji still type as Unicode.
         Diag.log("replace: ordered CGEvent fallback")
         postBackspaces(keystrokeCount)
-        return unicodeType(text)
+        return synthesize(text)
     }
 
     private enum AXReplacementResult {

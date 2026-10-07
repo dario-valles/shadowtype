@@ -31,6 +31,9 @@ struct CompletionActivationEvaluator {
         let focusSeq: UInt64
         let emojiTrigger: Bool
         let minPrefixChars: Int
+        // A `;name` snippet trigger is being typed. Like emojiTrigger it only bypasses the word-boundary
+        // gate, so a partial name ending in `-`/`_` still resolves; every other gate applies.
+        var snippetTrigger = false
     }
 
     struct PrefixEvaluation {
@@ -40,6 +43,7 @@ struct CompletionActivationEvaluator {
 
     enum Decision: Equatable {
         case skip(SkipReason)
+        case snippet(SnippetMatch)
         case emoji(value: String, queryLength: Int)
         case correction(value: String, run: String)
         case shellHistory(remainder: String)
@@ -48,6 +52,7 @@ struct CompletionActivationEvaluator {
 
     enum PreTypoDecision: Equatable {
         case skip(SkipReason)
+        case snippet(SnippetMatch)
         case emoji(value: String, queryLength: Int)
         case continueEvaluation
     }
@@ -69,6 +74,9 @@ struct CompletionActivationEvaluator {
         let typo: TypoAssessment
         let holdBackOnTypos: Bool
         let contextCapturePendingWithoutContext: Bool
+        // The `;name` snippet the prefix resolves to, pre-matched by the coordinator (it owns the store
+        // and the clock). nil when snippets are off, none match, or the field is a terminal.
+        var snippet: SnippetMatch? = nil
     }
 
     static func evaluatePrefix(
@@ -105,7 +113,8 @@ struct CompletionActivationEvaluator {
             ActivationPolicy.terminalMode($0) == .shellCommand
         } ?? false
 
-        guard shellMode || isMeaningfulBoundary(prefix) || snapshot.emojiTrigger else {
+        guard shellMode || isMeaningfulBoundary(prefix) || snapshot.emojiTrigger
+                || snapshot.snippetTrigger else {
             return PrefixEvaluation(decision: .skip(.notBoundary), capabilityGate: gate)
         }
         guard hasUsefulContext(prefix, minPrefixChars: snapshot.minPrefixChars) else {
@@ -124,6 +133,8 @@ struct CompletionActivationEvaluator {
         switch evaluateBeforeTypo(snapshot) {
         case let .skip(reason):
             return .skip(reason)
+        case let .snippet(match):
+            return .snippet(match)
         case let .emoji(value, queryLength):
             return .emoji(value: value, queryLength: queryLength)
         case .continueEvaluation:
@@ -139,6 +150,11 @@ struct CompletionActivationEvaluator {
             return .skip(.midLineDisabled)
         }
 
+        // Snippets win over everything after the field gates: a typed `;name` is an explicit request.
+        // Never in shell mode — `;` is a command separator there and an expansion's newline would run it.
+        if !snapshot.shellMode, let snippet = snapshot.snippet {
+            return .snippet(snippet)
+        }
         if let emoji = snapshot.emoji, snapshot.emojiEnabled,
            emoji.isTrigger(prefix: snapshot.prefix),
            let best = emoji.matches(prefix: snapshot.prefix, limit: 1).first,
