@@ -1,6 +1,6 @@
 // TypoGuard — FR-CE-6 (Free half): fast, offline heuristic that flags the last typed
 // token as a likely mid-typing typo so the coordinator can SUPPRESS the suggestion
-// (Cotypist's "hold back on typo"). This is NOT autocorrect (paid/deferred) — it only
+// (Cotypist's "hold back on typo"). This is NOT autocorrect (see Autocorrect) — it only
 // answers yes/no. Bias is conservative: false on normal words, proper nouns, short
 // words, numbers, code-ish tokens. A false positive merely skips one suggestion; a
 // false negative just lets a suggestion fire off a misspelling — so we err toward false.
@@ -95,7 +95,7 @@ final class TypoGuard {
     // MARK: - System dictionary
 
     /// True when the on-device system dictionary spells `word` correctly in ANY of the languages we
-    /// consult. Shared with Autocorrect so the Free suppressor and the paid corrector apply the exact
+    /// consult. Shared with Autocorrect so the suppressor and the corrector apply the exact
     /// same "is this a real word" test and can never drift apart.
     ///
     /// Threading: NSSpellChecker is AppKit and main-thread-affine. Every caller reaches here from

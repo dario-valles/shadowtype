@@ -1,9 +1,9 @@
-// ClipboardContextProvider — FR-CTX-2 clipboard-aware context (Paid tier).
+// ClipboardContextProvider — FR-CTX-2 clipboard-aware context.
 // Reads the general NSPasteboard's string and offers it as optional leading prompt context.
 // Unlike OCR (FR-CTX-1), a pasteboard read is cheap and synchronous, so there is no capture/throttle
 // machinery here — each call simply samples the current pasteboard string. Results are transient and
 // NEVER written to disk. Degrades to nil whenever the pasteboard holds no usable string. The integrator
-// gates this behind CompletionCoordinator.isLicensed + a user toggle (off by default).
+// gates this behind a user toggle (off by default).
 import AppKit
 import Foundation
 

@@ -1,9 +1,9 @@
-// Autocorrect — FR-AC-1 (paid): the upgrade to TypoGuard's Free suppress behavior.
+// Autocorrect — FR-AC-1: the upgrade to TypoGuard's suppress behavior.
 // Where TypoGuard (FR-CE-6 Free half) merely answers "does this look like a typo?" and the
 // coordinator HOLDS BACK the suggestion, Autocorrect OFFERS a concrete fix for the mistyped
 // trailing token (Cotypist's paid autocorrect). This is a PURE engine — no AX, no UI, no LLM —
 // so it is fully unit-testable; the coordinator wires it into the existing typo branch (gated on
-// `isLicensed` + the autocorrect toggle).
+// the autocorrect toggle).
 //
 // Bias is the same as TypoGuard's, only flipped in cost: a WRONG correction (silently rewriting a
 // word the user meant) is far worse than NO correction, so every path here is conservative. We only
@@ -17,7 +17,7 @@ struct Autocorrect {
     // Common-word lexicon used as the correction target set. This intentionally mirrors (and lightly
     // extends) TypoGuard's `common` lexicon — that set is `private` to TypoGuard, so we replicate it
     // here. See integrationNotes: ideally TypoGuard's lexicon would be promoted to a single shared
-    // source so the Free suppressor and the paid corrector can never drift apart. The list is small on
+    // source so the suppressor and the corrector can never drift apart. The list is small on
     // purpose — this is a high-confidence fixer for everyday typos, not a full dictionary speller.
     private static let defaultLexicon: Set<String> = [
         "the", "and", "that", "have", "for", "not", "with", "you", "this", "but",

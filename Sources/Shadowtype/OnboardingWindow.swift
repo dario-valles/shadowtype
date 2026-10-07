@@ -569,7 +569,7 @@ private struct OBHowItWorks: View {
     private let features: [Feature] = [
         .init(icon: "text.alignleft",       title: "Ghost text at the caret",  body: "Predictions appear inline in faint grey, matching the field's font and size.", accent: true),
         .init(icon: "keyboard",             title: "Tab or → to accept",       body: "Tab (or Right Arrow at end-of-line) takes the next word; ⌥Tab takes the whole line. Keep typing to dismiss.", accent: false),
-        .init(icon: "lock.fill",            title: "Nothing leaves your Mac",  body: "A local model on Apple Silicon does all the work. Free tier never touches the network.", accent: false),
+        .init(icon: "lock.fill",            title: "Nothing leaves your Mac",  body: "A local model on Apple Silicon does all the work. Completions run fully offline.", accent: false),
         .init(icon: "sparkles",             title: "Knows your context",       body: "Optionally reads the screen and clipboard locally to make sharper suggestions.", accent: false),
     ]
 

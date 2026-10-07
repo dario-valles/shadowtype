@@ -615,7 +615,7 @@ private struct ModelsPane: View {
                 }
             }
 
-            // M3 BYOM — Imported models section (Pro). Lists any user-imported GGUFs plus the
+            // M3 BYOM — Imported models section. Lists any user-imported GGUFs plus the
             // "Import .gguf…" button. Symlinked into models/imported/ — the user's original file
             // is never copied or modified.
             Section {

@@ -1,4 +1,4 @@
-// ScreenContextProvider — FR-CTX-1 screen-aware OCR context (Free tier).
+// ScreenContextProvider — FR-CTX-1 screen-aware OCR context.
 // One-shot capture of the FOCUSED window via ScreenCaptureKit (SCScreenshotManager.captureImage,
 // no SCStream), then local OCR with the modern async Vision RecognizeTextRequest. Throttled to
 // <=1 capture/sec; results held transiently in memory and NEVER written to disk. Degrades to nil

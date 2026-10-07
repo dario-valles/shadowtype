@@ -5,7 +5,7 @@
 // Anti-tamper (PRD §4.1, R6) — proportionate, offline:
 //   • HMAC-SHA256 over {date, count, install_uuid, last_seen_max_date} keyed by a per-install secret
 //     held in the Keychain (never in this file). Verified on load; a forged/edited file fails the
-//     check and the counter resets — a free user can't simply hand-edit `count` down.
+//     check and the counter resets — the stats can't simply be hand-edited.
 //   • Clock-rollback guard: persist `last_seen_max_date` (a monotonic high-water of the observed
 //     local date). "Today" is never allowed below it, so rolling the system clock back grants no
 //     free daily reset until real time catches up.
@@ -19,11 +19,11 @@ final class WordMeter {
     // On-disk record. `hmac` authenticates the other fields under the per-install secret.
     private struct Record: Codable {
         var date: String              // day the count belongs to (local YYYY-MM-DD)
-        var count: Int                // words accepted TODAY (resets at local midnight; drives the free cap)
+        var count: Int                // words accepted TODAY (resets at local midnight; drives the menu-bar meter)
         var installUUID: String
         var lastSeenMaxDate: String   // monotonic high-water of observed local date (clock guard)
         // All-time, never-reset stats for the local Statistics dashboard (PRD §4.1; never transmitted).
-        // `count` above stays the only cap-relevant figure; these are cumulative since install.
+        // `count` above stays the only daily figure; these are cumulative since install.
         var wordsAllTime: Int = 0     // cumulative accepted words
         var shownAllTime: Int = 0     // cumulative inline completions shown to the user
         var acceptedAllTime: Int = 0  // cumulative completions the user accepted ≥1 word of
@@ -34,7 +34,7 @@ final class WordMeter {
     private let storeURL: URL
     private let secret: Data
     private var record: Record
-    // Persistence split (FR-ST-1): the cap-relevant `count` is written synchronously at its existing
+    // Persistence split (FR-ST-1): the daily `count` is written synchronously at its existing
     // call sites (accept, rollover, init) so it survives a crash. The cosmetic all-time stats use a
     // coalesced background flush so the hot per-suggestion path never blocks the main thread on disk I/O.
     private let saveQueue = DispatchQueue(label: "com.shadowtype.wordmeter.save", qos: .utility)
@@ -88,7 +88,7 @@ final class WordMeter {
     // MARK: - All-time stats (local Statistics dashboard; never transmitted)
 
     /// Count one inline completion as having been shown to the user (the rising edge of a fresh ghost).
-    /// Pairs with `recordSuggestionAccepted()` to give a real acceptance rate. Not cap-relevant.
+    /// Pairs with `recordSuggestionAccepted()` to give a real acceptance rate. Not part of the daily count.
     func recordSuggestionShown() {
         lock.lock(); defer { lock.unlock() }
         rolloverIfNeededLocked()
@@ -171,7 +171,7 @@ final class WordMeter {
     // MARK: - Persistence (HMAC is applied/verified at these single choke points)
 
     // Caller holds `lock`. Synchronous, authoritative write of the whole record (sign + encode + atomic
-    // write). Used for cap-relevant mutations (accept, rollover, init) where crash-durability matters.
+    // write). Used for daily-count mutations (accept, rollover, init) where crash-durability matters.
     // Also persists any pending stat bumps, since the whole record is written.
     private func saveNow() {
         dirty = false

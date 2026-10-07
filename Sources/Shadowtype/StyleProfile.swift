@@ -1,4 +1,4 @@
-// StyleProfile — on-device, encrypted, user-wipeable writing-style personalization (PRD FR-CTX-3, PAID).
+// StyleProfile — on-device, encrypted, user-wipeable writing-style personalization (PRD FR-CTX-3).
 // Biases generation toward the user's own phrasing WITHOUT an embedding model: it maintains a compact,
 // lightweight model of how the user writes — (a) word + multi-word n-gram frequency counts and (b) a
 // bounded recent list of accepted phrasings — and renders that into a short "style hint" string the
@@ -17,8 +17,8 @@
 //     as WordMeter.
 //   • Nothing here ever leaves the device; this type does no networking.
 //
-// This is paid-gated at runtime by the integrator behind CompletionCoordinator.isLicensed (see notes);
-// this component itself is gate-agnostic — it just learns + emits a hint when asked.
+// Gated at runtime only by the user's Personalization settings (Shadowtype is free); this
+// component itself is gate-agnostic — it just learns + emits a hint when asked.
 import Foundation
 import Security
 import CryptoKit

@@ -61,15 +61,15 @@ final class CompletionCoordinator {
     // FR-CE-6 (Free half): suppress a suggestion when the last typed word looks like a mid-typing typo.
     var typoGuard: TypoGuard?
     // General → "Hold back suggestions on likely typos" (Free, default ON). When off, a likely-typo
-    // trailing word no longer suppresses the suggestion (the model just continues from it); the paid
-    // autocorrect OFFER path is independent and still fires when licensed + enabled. Mirrored by
+    // trailing word no longer suppresses the suggestion (the model just continues from it); the
+    // autocorrect OFFER path is independent and still fires when enabled. Mirrored by
     // AppDelegate.syncToggles.
     var holdBackOnTypos: Bool = true
     // FR-AC-1: the upgrade to TypoGuard. When the last word looks like a typo and autocorrect is enabled,
     // OFFER a concrete fix (correction ghost) instead of merely
     // suppressing. Pure value type; default-constructed so it is safe even before wiring. nil disables.
     var autocorrect: Autocorrect? = Autocorrect()
-    // FR-AC-1 user toggle (paid). Mirrors the OCR/emoji toggle flow: default OFF, persisted in
+    // FR-AC-1 user toggle. Mirrors the OCR/emoji toggle flow: default OFF, persisted in
     // UserDefaults ("GW.autocorrectEnabled"), kept in sync by AppDelegate's didChange observer.
     var autocorrectEnabled: Bool = false
     // FR-CTX-3: on-device encrypted writing-style personalization. Injected (defaults to the
@@ -77,7 +77,7 @@ final class CompletionCoordinator {
     // only when styleProfileEnabled.
     var styleProfile: StyleProfile? = StyleProfile.shared
     var styleProfileEnabled: Bool = true
-    // FR-CTX-3 Personalization → "strength" (paid, 0...3). Scales the style-hint char budget prepended
+    // FR-CTX-3 Personalization → "strength" (0...3). Scales the style-hint char budget prepended
     // to the prompt: 0 = off (no hint, even when learning stays on), 1/2/3 = progressively larger bias.
     // Mirrored by AppDelegate.syncToggles; read on focus-in when the hint snapshot is rebuilt.
     var personalizationStrength: Int = 3
@@ -238,9 +238,9 @@ final class CompletionCoordinator {
     // bounds runaway generation if the model misses the newline stop.
     static let shellMaxTokens = 48
 
-    // Paid leading-context char budgets (FR-CTX-2/3, FR-PA-3). Kept small and consistent with the OCR
+    // Leading-context char budgets (FR-CTX-2/3, FR-PA-3). Kept small and consistent with the OCR
     // budget so KV-reuse stays warm and truncation order is predictable. Each block is only prepended
-    // when its feature is licensed + toggled on.
+    // when its feature is toggled on.
     private let clipboardContextChars = 512
 
     // Minimum useful context before we bother the model: at least this many non-space chars in the
