@@ -90,6 +90,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     case context = "Context"
     case perApp = "Per-App"
     case shortcuts = "Shortcuts"
+    case snippets = "Snippets"
     case personalization = "Personalization"
     case instructions = "Instructions"
     case localAPI = "Local API"
@@ -114,6 +115,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .context:        return "What Shadowtype reads to make sharper suggestions — all local."
         case .perApp:         return "Where Shadowtype is active, per app and per website."
         case .shortcuts:      return "Keys for accepting, dismissing, and toggling suggestions."
+        case .snippets:       return "Type a short name, press Tab, get the full text."
         case .personalization:return "Learn your writing style on-device."
         case .instructions:   return "Steer tone and role globally and per app."
         case .localAPI:       return "Expose your local model to Cursor, Zed, Claude Code, and any OpenAI-compatible tool."
@@ -130,6 +132,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .context: return "doc.text.magnifyingglass"
         case .perApp: return "square.grid.2x2"
         case .shortcuts: return "keyboard"
+        case .snippets: return "text.insert"
         case .personalization: return "person.crop.circle"
         case .instructions: return "text.justify.left"
         case .localAPI: return "network"
@@ -145,7 +148,7 @@ private struct SettingsRootView: View {
         PermissionsManager.allRequiredGranted() ? .general : .permissions
 
     private let top: [SettingsSection] = [.permissions, .general, .models, .context, .perApp, .shortcuts,
-                                          .personalization, .instructions, .localAPI]
+                                          .snippets, .personalization, .instructions, .localAPI]
     private let more: [SettingsSection] = [.statistics, .about]
 
     var body: some View {
@@ -203,6 +206,7 @@ private struct SettingsDetailView: View {
         case .context: ContextPane()
         case .perApp: AppsDomainsPane()
         case .shortcuts: ShortcutsPane()
+        case .snippets: SnippetsPane()
         case .personalization: PersonalizationPane()
         case .instructions: InstructionsPane()
         case .localAPI: LocalAPISettingsPane()
@@ -1439,6 +1443,146 @@ private struct ShortcutsPane: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Shortcuts")
+    }
+}
+
+// MARK: Snippets — user text expansions (`;sig` -> signature).
+
+private struct SnippetsPane: View {
+    @AppStorage("shadowtype.snippetsEnabled") private var snippetsEnabled = true
+    @State private var snippets: [Snippet] = []
+    @State private var newName = ""
+    @State private var newExpansion = ""
+
+    private var newNameError: SnippetValidationError? {
+        guard !newName.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        let error = SnippetStore.shared.validate(name: newName, expansion: newExpansion)
+        return error == .emptyExpansion ? nil : error
+    }
+
+    private var canAdd: Bool {
+        SnippetStore.shared.validate(name: newName, expansion: newExpansion) == nil
+    }
+
+    var body: some View {
+        Form {
+            Callout(systemImage: "text.insert",
+                    text: "Type **;** and a snippet name — say **;sig** — and the full text appears as a suggestion. Press Tab to insert it. Snippets stay on this Mac.",
+                    tint: OBTheme.accent)
+
+            Section {
+                Toggle("Expand snippets", isOn: $snippetsEnabled)
+                caption("Names start at the beginning of a word and match without case; a unique start is enough (;si for ;sig). Use {date} or {time} for today’s date or the current time. Off in terminals, secure fields, and apps or sites you’ve paused.")
+            }
+
+            Section("Your snippets") {
+                if snippets.isEmpty {
+                    Text("No snippets yet.").foregroundStyle(.secondary)
+                } else {
+                    ForEach(snippets) { snippet in
+                        SnippetRow(snippet: snippet) { refresh() }
+                    }
+                }
+            }
+
+            Section("Add snippet") {
+                HStack(spacing: 2) {
+                    Text(";").font(.system(.body, design: .monospaced)).foregroundStyle(.secondary)
+                    TextField("Name", text: $newName, prompt: Text("sig"))
+                        .labelsHidden()
+                        .font(.system(.body, design: .monospaced))
+                }
+                if let newNameError {
+                    Text(newNameError.message).font(.caption).foregroundStyle(.red)
+                }
+                SnippetTextEditor(text: $newExpansion, placeholder: "Best,\nYour Name")
+                Button("Add snippet") {
+                    if case .success = SnippetStore.shared.add(name: newName, expansion: newExpansion) {
+                        newName = ""; newExpansion = ""
+                        refresh()
+                    }
+                }
+                .disabled(!canAdd)
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Snippets")
+        .onAppear(perform: refresh)
+    }
+
+    private func refresh() {
+        snippets = SnippetStore.shared.all()
+    }
+}
+
+// One editable snippet. Edits save as you type once they're valid; an invalid name (bad characters,
+// a duplicate) shows why and leaves the stored snippet untouched until it's fixed.
+private struct SnippetRow: View {
+    let snippet: Snippet
+    let onDelete: () -> Void
+    @State private var name: String
+    @State private var expansion: String
+    @State private var error: SnippetValidationError?
+
+    init(snippet: Snippet, onDelete: @escaping () -> Void) {
+        self.snippet = snippet
+        self.onDelete = onDelete
+        _name = State(initialValue: snippet.name)
+        _expansion = State(initialValue: snippet.expansion)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 2) {
+                Text(";").font(.system(.body, design: .monospaced)).foregroundStyle(.secondary)
+                TextField("Name", text: $name)
+                    .labelsHidden()
+                    .font(.system(.body, design: .monospaced))
+                Spacer()
+                Button(role: .destructive) {
+                    SnippetStore.shared.remove(id: snippet.id)
+                    onDelete()
+                } label: { Image(systemName: "trash") }
+                .buttonStyle(.borderless)
+                .help("Delete this snippet")
+            }
+            SnippetTextEditor(text: $expansion, placeholder: "Snippet text")
+            if let error {
+                Text(error.message).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .padding(.vertical, 2)
+        .onChange(of: name) { save() }
+        .onChange(of: expansion) { save() }
+    }
+
+    private func save() {
+        error = SnippetStore.shared.update(id: snippet.id, name: name, expansion: expansion)
+    }
+}
+
+// Multi-line editor for a snippet's text — a TextEditor, not a vertical TextField, so Return inserts
+// a line break (signatures and addresses are multi-line) instead of ending the edit.
+private struct SnippetTextEditor: View {
+    @Binding var text: String
+    let placeholder: String
+
+    var body: some View {
+        TextEditor(text: $text)
+            .font(.body)
+            .scrollContentBackground(.hidden)
+            .frame(minHeight: 54, maxHeight: 140)
+            .padding(4)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25), lineWidth: 1))
+            .overlay(alignment: .topLeading) {
+                if text.isEmpty {
+                    Text(placeholder)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 9).padding(.vertical, 4)
+                        .allowsHitTesting(false)
+                }
+            }
     }
 }
 

@@ -7,6 +7,7 @@ final class GhostPresentationController {
     var suggestionFocusSeq: UInt64?
     var emojiSuggestion: String?
     var emojiQueryLength = 0
+    var snippetSuggestion: SnippetMatch?
     var correctionSuggestion: String?
     var correctionRun: String?
     var isVisible = false
@@ -49,6 +50,7 @@ final class GhostPresentationController {
         suggestionFocusSeq = nil
         emojiSuggestion = nil
         emojiQueryLength = 0
+        snippetSuggestion = nil
         correctionSuggestion = nil
         correctionRun = nil
         overlay.hide()

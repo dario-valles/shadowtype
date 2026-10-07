@@ -58,6 +58,12 @@ final class CompletionCoordinator {
     // never offered and the prefix falls through to the normal LLM/typo path. AppDelegate.syncToggles
     // mirrors the @AppStorage value here on launch + every change.
     var emojiEnabled: Bool = true
+    // User text snippets (`;sig` -> signature). Same ghost/accept machinery as emoji: Tab replaces the
+    // typed `;name` run with the expansion and counts 0 words. Read per fire (the store is the shared
+    // instance Settings edits). Shortcuts-style toggle "Expand snippets" (default ON) is mirrored by
+    // AppDelegate.syncToggles; with no snippets defined the trigger never arms.
+    var snippetStore: SnippetStore? = SnippetStore.shared
+    var snippetsEnabled: Bool = true
     // FR-CE-6 (Free half): suppress a suggestion when the last typed word looks like a mid-typing typo.
     var typoGuard: TypoGuard?
     // General → "Hold back suggestions on likely typos" (Free, default ON). When off, a likely-typo
@@ -654,7 +660,8 @@ final class CompletionCoordinator {
                 prefix: rawPrefix,
                 focusSeq: context.focusChangeSequence,
                 emojiTrigger: rawPrefix.map(isEmojiTrigger) ?? false,
-                minPrefixChars: minPrefixChars
+                minPrefixChars: minPrefixChars,
+                snippetTrigger: rawPrefix.map { isSnippetTrigger($0, bundleId: bundleId) } ?? false
             ),
             capabilityGate: capabilityGate
         )
@@ -734,7 +741,8 @@ final class CompletionCoordinator {
             emoji: emoji,
             typo: .notLikely,
             holdBackOnTypos: holdBackOnTypos,
-            contextCapturePendingWithoutContext: false
+            contextCapturePendingWithoutContext: false,
+            snippet: snippetMatch(for: prefix, bundleId: bundleId)
         )
         switch CompletionActivationEvaluator.evaluateBeforeTypo(preTypoSnapshot) {
         case .skip(.nonProseField):
@@ -744,6 +752,11 @@ final class CompletionCoordinator {
         case .skip(.midLineDisabled):
             Diag.log("fire: skip midLineOff \(bundleId ?? "?")")
             clearSuggestion()
+            return
+        case let .snippet(match):
+            Diag.log("fire: snippet match")
+            Diag.logContent("fire: snippet match -> \(match.name)")
+            showSnippet(match)
             return
         case let .emoji(value, queryLength):
             Diag.logContent("fire: emoji match -> \(value)")
@@ -797,7 +810,7 @@ final class CompletionCoordinator {
             return
         case .generate:
             break
-        case .emoji:
+        case .emoji, .snippet:
             clearSuggestion()
             return
         case .skip:
@@ -858,6 +871,24 @@ final class CompletionCoordinator {
     private func isEmojiTrigger(_ prefix: String) -> Bool {
         guard emojiEnabled, let emoji else { return false }
         return emoji.isTrigger(prefix: prefix)
+    }
+
+    // Same role as isEmojiTrigger for a `;name` snippet run. Cheap: a suffix scan plus an emptiness
+    // check on the in-memory store.
+    private func isSnippetTrigger(_ prefix: String, bundleId: String?) -> Bool {
+        guard snippetsAllowed(bundleId: bundleId), let snippetStore, !snippetStore.isEmpty else { return false }
+        return SnippetTrigger.isTrigger(prefix: prefix)
+    }
+
+    // The snippet the prefix resolves to, rendered now, or nil. Terminals never get snippets: `;` is a
+    // shell separator and a multi-line expansion would execute line by line.
+    private func snippetMatch(for prefix: String, bundleId: String?) -> SnippetMatch? {
+        guard snippetsAllowed(bundleId: bundleId), let snippetStore else { return nil }
+        return SnippetTrigger.match(prefix: prefix, snippets: snippetStore.all(), now: Date())
+    }
+
+    private func snippetsAllowed(bundleId: String?) -> Bool {
+        snippetsEnabled && !ActivationPolicy.isTerminal(bundleId: bundleId)
     }
 
     // MARK: - Generation (newest-wins, deadline-drop)
@@ -1318,6 +1349,7 @@ final class CompletionCoordinator {
     // run) and count 0 words — emojis never touch the WordMeter.
     func acceptWord() -> Int {
         if let fix = ghostPresentation.correctionSuggestion { return acceptCorrection(fix) }
+        if let snippet = ghostPresentation.snippetSuggestion { return acceptSnippet(snippet) }
         if let emoji = ghostPresentation.emojiSuggestion { return acceptEmoji(emoji) }
         guard suggestionVisible, !ghostPresentation.suggestionText.isEmpty else { return 0 }
         guard let target = acceptanceTarget() else { return 0 }
@@ -1358,6 +1390,7 @@ final class CompletionCoordinator {
     // Inject the whole current line of the suggestion (up to the first newline).
     func acceptLine() -> Int {
         if let fix = ghostPresentation.correctionSuggestion { return acceptCorrection(fix) }
+        if let snippet = ghostPresentation.snippetSuggestion { return acceptSnippet(snippet) }
         if let emoji = ghostPresentation.emojiSuggestion { return acceptEmoji(emoji) }
         guard suggestionVisible, !ghostPresentation.suggestionText.isEmpty else { return 0 }
         guard let target = acceptanceTarget() else { return 0 }
@@ -1818,6 +1851,36 @@ final class CompletionCoordinator {
             utf16Length: ghostPresentation.emojiQueryLength,
             keystrokeCount: ghostPresentation.emojiQueryLength,
             with: emoji,
+            in: target
+        ) else { return 0 }
+        clearSuggestion()
+        return 0
+    }
+
+    // MARK: - Snippets
+
+    // Show the snippet's one-line preview as the ghost; the match carries the full expansion and the
+    // typed `;name` run accept must delete. Mirrors showEmoji() — never calls the model.
+    private func showSnippet(_ match: SnippetMatch) {
+        let preview = SnippetPreview.ghostText(for: match.expansion)
+        ghostPresentation.snippetSuggestion = match
+        ghostPresentation.suggestionText = preview
+        ghostPresentation.suggestionFocusSeq = context.focusChangeSequence
+        let caret = context.caretRectOnScreen() ?? .null
+        emit(text: preview, at: caret, font: hostFont(caretHeight: caret.height), opacity: 1, rtl: false)
+        untrackOverlay()                // snippet ghost isn't tracked by the stability gate
+        suggestionVisible = true
+    }
+
+    // Tab and ⌥Tab both insert the WHOLE expansion (a snippet is atomic — no word-by-word stepping),
+    // replacing the typed `;name` run through the same atomic before-caret replace as emoji. Counts 0
+    // words and skips countAcceptanceOnce()/recordStyle(): the user wrote this text, not the model.
+    private func acceptSnippet(_ match: SnippetMatch) -> Int {
+        guard let target = acceptanceTarget() else { return 0 }
+        guard SuggestionAcceptor(injector: injector, context: context).replaceBeforeCaret(
+            utf16Length: match.replaceUTF16Length,
+            keystrokeCount: match.replaceKeystrokeCount,
+            with: match.expansion,
             in: target
         ) else { return 0 }
         clearSuggestion()

@@ -32,13 +32,16 @@ final class Injector {
     private let axAccess: any InjectorAXAccess
     private let unicodeTyper: ((String) -> Bool)?
     private let backspacePoster: ((Int) -> Void)?
+    private let softNewlinePoster: (() -> Void)?
 
     init(axAccess: any InjectorAXAccess = SystemInjectorAXAccess(),
          unicodeTyper: ((String) -> Bool)? = nil,
-         backspacePoster: ((Int) -> Void)? = nil) {
+         backspacePoster: ((Int) -> Void)? = nil,
+         softNewlinePoster: (() -> Void)? = nil) {
         self.axAccess = axAccess
         self.unicodeTyper = unicodeTyper
         self.backspacePoster = backspacePoster
+        self.softNewlinePoster = softNewlinePoster
     }
 
     // Returns true if the text was placed. `element` is the live focused AXUIElement (from
@@ -72,13 +75,13 @@ final class Injector {
             Diag.log("inject: synthetic -> paste")
             return pasteType(text)
         case .keystroke:
-            return unicodeType(text)
+            return text.contains(where: \.isNewline) ? typeLines(text) : unicodeType(text)
         }
     }
 
     // Atomically replace the run of `utf16Length` UTF-16 units immediately BEFORE the caret with `text`
-    // (used to swap a mistyped token for its correction, FR-AC-1, and a typed `:shortcode` for its emoji,
-    // FR-EM-1). Native AX fields: select [caret-len, len] and write it in ONE set-value op — no async
+    // (used to swap a mistyped token for its correction, FR-AC-1, a typed `:shortcode` for its emoji,
+    // FR-EM-1, and a typed `;name` for its snippet expansion). Native AX fields: select [caret-len, len] and write it in ONE set-value op — no async
     // backspaces racing a synchronous value read (the bug a "postBackspaces then inject" sequence has:
     // the AX value is read BEFORE the queued Delete events are processed, so the splice lands on the
     // still-mistyped text). Web/Electron nodes ignore AX writes, so they (and any AX failure) fall back
@@ -99,10 +102,13 @@ final class Injector {
                 break
             }
         }
-        // Ordered fallback: backspaces THEN typed text, both async CGEvents on the session tap (FIFO).
+        // Ordered fallback: backspaces THEN the text, both async CGEvents on the session tap (FIFO). The
+        // text goes through synthesize() so a long/multi-line replacement (a snippet expansion) takes
+        // the opt-in paste path exactly like a multi-line completion accept; short single-line
+        // corrections and emoji still type as Unicode.
         Diag.log("replace: ordered CGEvent fallback")
         postBackspaces(keystrokeCount)
-        return unicodeType(text)
+        return synthesize(text)
     }
 
     private enum AXReplacementResult {
@@ -295,6 +301,39 @@ final class Injector {
         let (error, ref) = axAccess.copyAttributeValue(kAXValueAttribute as CFString, from: element)
         guard error == .success else { return nil }
         return ref as? String
+    }
+
+    // Keystroke a multi-line chunk (a snippet expansion, a multi-paragraph rewrite) without ever typing a
+    // bare line break: in chat hosts (Slack, Discord, Teams, WhatsApp, Gmail) a synthesized \n or Return
+    // SENDS the message, so a signature would go out after its first line. Each line is typed as Unicode
+    // and the breaks between them become Shift-Return, which inserts a line break in those hosts and in
+    // plain text views alike. Only reached when paste insertion is off (the paste path keeps its \n).
+    private func typeLines(_ text: String) -> Bool {
+        let lines = Self.lineSegments(text)
+        for (i, line) in lines.enumerated() {
+            if i > 0 { postSoftNewline() }
+            if !line.isEmpty, !unicodeType(line) { return false }
+        }
+        return true
+    }
+
+    // Lines of `text` split on every newline flavour (\r\n counts once), keeping empty lines so a blank
+    // line in a signature survives. Pure, for tests.
+    static func lineSegments(_ text: String) -> [String] {
+        text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
+    }
+
+    private func postSoftNewline() {
+        if let softNewlinePoster { return softNewlinePoster() }
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true),   // Return
+              let up = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false) else { return }
+        down.flags = .maskShift
+        up.flags = .maskShift
+        down.setIntegerValueField(.eventSourceUserData, value: InputMonitor.injectedEventMagic)
+        up.setIntegerValueField(.eventSourceUserData, value: InputMonitor.injectedEventMagic)
+        down.post(tap: .cgSessionEventTap)
+        up.post(tap: .cgSessionEventTap)
     }
 
     // MARK: - Fallback: Unicode character posting (FR-IN-3)

@@ -103,12 +103,53 @@ final class CompletionActivationEvaluatorTests: XCTestCase {
         )
     }
 
+    // A resolved snippet wins over the typo/autocorrect path and the model, but never in shell mode.
+    func testSnippetDecision() {
+        let match = SnippetMatch(name: "sig", expansion: "Best,\nD", typedRun: ";sig")
+        XCTAssertEqual(
+            CompletionActivationEvaluator.evaluate(
+                actionSnapshot(prefix: "Thanks ;sig", typo: .likely(run: ";sig", correction: "sign"),
+                               snippet: match)
+            ),
+            .snippet(match)
+        )
+        XCTAssertEqual(
+            CompletionActivationEvaluator.evaluate(
+                actionSnapshot(prefix: "mac $ ls ;sig", shellMode: true, terminalText: "mac $ ls ;sig",
+                               typo: .notLikely, snippet: match)
+            ),
+            .generate(prefix: "mac $ ls ;sig", shellMode: true, terminalText: "mac $ ls ;sig")
+        )
+        let nonProse = CompletionActivationEvaluator.Snapshot(
+            prefix: ";sig", shellMode: false, terminalText: nil, nonProseField: true,
+            midLineEnabled: true, caretAtLineEnd: true, emojiEnabled: true, emoji: nil,
+            typo: .notLikely, holdBackOnTypos: true, contextCapturePendingWithoutContext: false,
+            snippet: match)
+        XCTAssertEqual(CompletionActivationEvaluator.evaluate(nonProse), .skip(.nonProseField))
+    }
+
+    // The snippet trigger bypasses only the word-boundary gate (a partial name ending in `-`).
+    func testSnippetTriggerBypassesBoundaryGate() {
+        func decision(snippetTrigger: Bool) -> CompletionActivationEvaluator.PrefixDecision {
+            CompletionActivationEvaluator.evaluatePrefix(
+                .init(forced: false, bundleId: "com.apple.TextEdit", terminalText: nil,
+                      editorFieldHeight: nil, editorWindowHeight: nil, shellCommandsEnabled: false,
+                      originalPrefix: "Hi ;sig-", prefix: "Hi ;sig-", focusSeq: 1,
+                      emojiTrigger: false, minPrefixChars: 2, snippetTrigger: snippetTrigger),
+                capabilityGate: FocusCapabilityFlickerGate()
+            ).decision
+        }
+        XCTAssertEqual(decision(snippetTrigger: false), .skip(.notBoundary))
+        XCTAssertEqual(decision(snippetTrigger: true), .continueEvaluation(prefix: "Hi ;sig-", shellMode: false))
+    }
+
     private func actionSnapshot(
         prefix: String,
         shellMode: Bool = false,
         terminalText: String? = nil,
         emoji: EmojiCompletion? = nil,
-        typo: CompletionActivationEvaluator.TypoAssessment
+        typo: CompletionActivationEvaluator.TypoAssessment,
+        snippet: SnippetMatch? = nil
     ) -> CompletionActivationEvaluator.Snapshot {
         CompletionActivationEvaluator.Snapshot(
             prefix: prefix,
@@ -121,7 +162,8 @@ final class CompletionActivationEvaluatorTests: XCTestCase {
             emoji: emoji,
             typo: typo,
             holdBackOnTypos: true,
-            contextCapturePendingWithoutContext: false
+            contextCapturePendingWithoutContext: false,
+            snippet: snippet
         )
     }
 }

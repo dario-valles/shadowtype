@@ -21,6 +21,70 @@ final class InjectorTests: XCTestCase {
         XCTAssertEqual(surface.syntheticBackspaceCount, 3)
     }
 
+    // Snippet accept: the typed `;sig` run is swapped for a multi-line expansion in one AX op, with
+    // the newlines intact and the caret left after the inserted text.
+    func testMultiLineSnippetReplacesTypedTriggerAtomically() {
+        let surface = FakeInjectorAXSurface(value: "Thanks ;sig",
+                                            selection: CFRange(location: 11, length: 0))
+        let element = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let injector = Injector(
+            axAccess: surface,
+            unicodeTyper: { surface.syntheticallyType($0) },
+            backspacePoster: { surface.syntheticallyBackspace($0) })
+        let match = SnippetMatch(name: "sig", expansion: "Best,\nDarío", typedRun: ";sig")
+
+        XCTAssertTrue(injector.replaceBeforeCaret(utf16Length: match.replaceUTF16Length,
+                                                  keystrokeCount: match.replaceKeystrokeCount,
+                                                  with: match.expansion, in: element))
+        XCTAssertEqual(surface.value, "Thanks Best,\nDarío")
+        XCTAssertEqual(surface.selection.location, ("Thanks Best,\nDarío" as NSString).length)
+        XCTAssertEqual(surface.syntheticBackspaceCount, 0)
+        XCTAssertEqual(surface.syntheticTypeCount, 0)
+    }
+
+    // AX refused: the ordered fallback deletes exactly the typed run, then types the expansion line by
+    // line with a Shift-Return between lines — never a bare typed \n, which SENDS in chat hosts.
+    func testMultiLineSnippetFallbackDeletesTypedRunThenTypesLinesWithSoftBreaks() {
+        let surface = FakeInjectorAXSurface(value: "Hi ;si",
+                                            selection: CFRange(location: 6, length: 0))
+        surface.selectedTextWriteError = .cannotComplete
+        let element = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        var typed: [String] = []
+        var softBreaks = 0
+        let injector = Injector(
+            axAccess: surface,
+            unicodeTyper: { typed.append($0); return surface.syntheticallyType($0) },
+            backspacePoster: { surface.syntheticallyBackspace($0) },
+            softNewlinePoster: { softBreaks += 1; _ = surface.syntheticallyType("\n") })
+
+        XCTAssertTrue(injector.replaceBeforeCaret(utf16Length: 3, keystrokeCount: 3,
+                                                  with: "Best,\n\nD", in: element))
+        XCTAssertEqual(surface.value, "Hi Best,\n\nD")
+        XCTAssertEqual(surface.syntheticBackspaceCount, 3)
+        XCTAssertEqual(typed, ["Best,", "D"], "the blank line is a soft break, not an empty typed chunk")
+        XCTAssertEqual(softBreaks, 2)
+        XCTAssertFalse(typed.contains { $0.contains(where: \.isNewline) }, "a line break was typed raw")
+    }
+
+    // Single-line text keeps the one-event Unicode path — no soft-break machinery for the common case.
+    func testSingleLineFallbackTypesOnceWithoutSoftBreaks() {
+        var typed: [String] = []
+        var softBreaks = 0
+        let injector = Injector(axAccess: FakeInjectorAXSurface(value: "", selection: CFRange(location: 0, length: 0)),
+                                unicodeTyper: { typed.append($0); return true },
+                                backspacePoster: { _ in },
+                                softNewlinePoster: { softBreaks += 1 })
+        XCTAssertTrue(injector.inject("hello world", into: nil))
+        XCTAssertEqual(typed, ["hello world"])
+        XCTAssertEqual(softBreaks, 0)
+    }
+
+    func testLineSegmentsCountsCRLFOnceAndKeepsBlankLines() {
+        XCTAssertEqual(Injector.lineSegments("a\r\nb\n\nc"), ["a", "b", "", "c"])
+        XCTAssertEqual(Injector.lineSegments("one"), ["one"])
+        XCTAssertEqual(Injector.lineSegments("end\n"), ["end", ""])
+    }
+
     func testUnreadableSelectionRangeDoesNotAppendThroughAXSplice() {
         let surface = FakeInjectorAXSurface(value: "headtail",
                                             selection: CFRange(location: 4, length: 0))

@@ -577,6 +577,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Shortcuts → "Emoji shortcode" (default ON when unset).
         coordinator.emojiEnabled =
             (UserDefaults.standard.object(forKey: "shadowtype.emojiShortcode") as? Bool) ?? true
+        // Snippets → "Expand snippets" (default ON when unset; inert until a snippet exists).
+        coordinator.snippetsEnabled =
+            (UserDefaults.standard.object(forKey: "shadowtype.snippetsEnabled") as? Bool) ?? true
         // Shortcuts → "Swallow Tab while a suggestion is showing" (default ON when unset).
         tabSwallow.setEnabled((UserDefaults.standard.object(forKey: "shadowtype.swallowTab") as? Bool) ?? true)
         updateTabDisableForFrontmost()   // a per-app "Disable Tab key" change may have just been saved
