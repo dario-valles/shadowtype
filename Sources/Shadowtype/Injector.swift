@@ -32,13 +32,16 @@ final class Injector {
     private let axAccess: any InjectorAXAccess
     private let unicodeTyper: ((String) -> Bool)?
     private let backspacePoster: ((Int) -> Void)?
+    private let softNewlinePoster: (() -> Void)?
 
     init(axAccess: any InjectorAXAccess = SystemInjectorAXAccess(),
          unicodeTyper: ((String) -> Bool)? = nil,
-         backspacePoster: ((Int) -> Void)? = nil) {
+         backspacePoster: ((Int) -> Void)? = nil,
+         softNewlinePoster: (() -> Void)? = nil) {
         self.axAccess = axAccess
         self.unicodeTyper = unicodeTyper
         self.backspacePoster = backspacePoster
+        self.softNewlinePoster = softNewlinePoster
     }
 
     // Returns true if the text was placed. `element` is the live focused AXUIElement (from
@@ -72,7 +75,7 @@ final class Injector {
             Diag.log("inject: synthetic -> paste")
             return pasteType(text)
         case .keystroke:
-            return unicodeType(text)
+            return text.contains(where: \.isNewline) ? typeLines(text) : unicodeType(text)
         }
     }
 
@@ -298,6 +301,39 @@ final class Injector {
         let (error, ref) = axAccess.copyAttributeValue(kAXValueAttribute as CFString, from: element)
         guard error == .success else { return nil }
         return ref as? String
+    }
+
+    // Keystroke a multi-line chunk (a snippet expansion, a multi-paragraph rewrite) without ever typing a
+    // bare line break: in chat hosts (Slack, Discord, Teams, WhatsApp, Gmail) a synthesized \n or Return
+    // SENDS the message, so a signature would go out after its first line. Each line is typed as Unicode
+    // and the breaks between them become Shift-Return, which inserts a line break in those hosts and in
+    // plain text views alike. Only reached when paste insertion is off (the paste path keeps its \n).
+    private func typeLines(_ text: String) -> Bool {
+        let lines = Self.lineSegments(text)
+        for (i, line) in lines.enumerated() {
+            if i > 0 { postSoftNewline() }
+            if !line.isEmpty, !unicodeType(line) { return false }
+        }
+        return true
+    }
+
+    // Lines of `text` split on every newline flavour (\r\n counts once), keeping empty lines so a blank
+    // line in a signature survives. Pure, for tests.
+    static func lineSegments(_ text: String) -> [String] {
+        text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
+    }
+
+    private func postSoftNewline() {
+        if let softNewlinePoster { return softNewlinePoster() }
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true),   // Return
+              let up = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false) else { return }
+        down.flags = .maskShift
+        up.flags = .maskShift
+        down.setIntegerValueField(.eventSourceUserData, value: InputMonitor.injectedEventMagic)
+        up.setIntegerValueField(.eventSourceUserData, value: InputMonitor.injectedEventMagic)
+        down.post(tap: .cgSessionEventTap)
+        up.post(tap: .cgSessionEventTap)
     }
 
     // MARK: - Fallback: Unicode character posting (FR-IN-3)

@@ -42,22 +42,47 @@ final class InjectorTests: XCTestCase {
         XCTAssertEqual(surface.syntheticTypeCount, 0)
     }
 
-    // AX refused: the ordered fallback deletes exactly the typed run, then types the full expansion.
-    func testMultiLineSnippetFallbackDeletesTypedRunThenTypes() {
+    // AX refused: the ordered fallback deletes exactly the typed run, then types the expansion line by
+    // line with a Shift-Return between lines — never a bare typed \n, which SENDS in chat hosts.
+    func testMultiLineSnippetFallbackDeletesTypedRunThenTypesLinesWithSoftBreaks() {
         let surface = FakeInjectorAXSurface(value: "Hi ;si",
                                             selection: CFRange(location: 6, length: 0))
         surface.selectedTextWriteError = .cannotComplete
         let element = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        var typed: [String] = []
+        var softBreaks = 0
         let injector = Injector(
             axAccess: surface,
-            unicodeTyper: { surface.syntheticallyType($0) },
-            backspacePoster: { surface.syntheticallyBackspace($0) })
+            unicodeTyper: { typed.append($0); return surface.syntheticallyType($0) },
+            backspacePoster: { surface.syntheticallyBackspace($0) },
+            softNewlinePoster: { softBreaks += 1; _ = surface.syntheticallyType("\n") })
 
         XCTAssertTrue(injector.replaceBeforeCaret(utf16Length: 3, keystrokeCount: 3,
-                                                  with: "Best,\nD", in: element))
-        XCTAssertEqual(surface.value, "Hi Best,\nD")
+                                                  with: "Best,\n\nD", in: element))
+        XCTAssertEqual(surface.value, "Hi Best,\n\nD")
         XCTAssertEqual(surface.syntheticBackspaceCount, 3)
-        XCTAssertEqual(surface.syntheticTypeCount, 1)
+        XCTAssertEqual(typed, ["Best,", "D"], "the blank line is a soft break, not an empty typed chunk")
+        XCTAssertEqual(softBreaks, 2)
+        XCTAssertFalse(typed.contains { $0.contains(where: \.isNewline) }, "a line break was typed raw")
+    }
+
+    // Single-line text keeps the one-event Unicode path — no soft-break machinery for the common case.
+    func testSingleLineFallbackTypesOnceWithoutSoftBreaks() {
+        var typed: [String] = []
+        var softBreaks = 0
+        let injector = Injector(axAccess: FakeInjectorAXSurface(value: "", selection: CFRange(location: 0, length: 0)),
+                                unicodeTyper: { typed.append($0); return true },
+                                backspacePoster: { _ in },
+                                softNewlinePoster: { softBreaks += 1 })
+        XCTAssertTrue(injector.inject("hello world", into: nil))
+        XCTAssertEqual(typed, ["hello world"])
+        XCTAssertEqual(softBreaks, 0)
+    }
+
+    func testLineSegmentsCountsCRLFOnceAndKeepsBlankLines() {
+        XCTAssertEqual(Injector.lineSegments("a\r\nb\n\nc"), ["a", "b", "", "c"])
+        XCTAssertEqual(Injector.lineSegments("one"), ["one"])
+        XCTAssertEqual(Injector.lineSegments("end\n"), ["end", ""])
     }
 
     func testUnreadableSelectionRangeDoesNotAppendThroughAXSplice() {
