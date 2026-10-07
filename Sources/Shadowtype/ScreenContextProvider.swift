@@ -78,33 +78,61 @@ final class ScreenContextProvider {
         }
     }
 
+    /// What one capture attempt came back with. Only `.noWindow` and `.unavailable` mean "this focus session
+    /// cannot be captured at all"; `.empty` and `.throttled` are ordinary (a blank chat, a second capture
+    /// inside `minInterval`) and must never switch OCR context off for the field.
+    enum RecentTextOutcome: Equatable {
+        case text(String)
+        case empty          // Vision found nothing, or denoise stripped everything (e.g. a new chat with only UI)
+        case throttled      // a capture less than minInterval after the previous one
+        case noWindow       // the focused window could not be resolved at all
+        case unavailable    // ScreenCaptureKit failed (Screen Recording missing, window gone, ...)
+
+        var text: String? { if case .text(let t) = self { return t }; return nil }
+        var cannotCapture: Bool { self == .noWindow || self == .unavailable }
+    }
+
+    private enum CaptureResult {
+        case image(CGImage)
+        case noWindow
+        case unavailable
+    }
+
     // Returns recent on-screen text from the focused window (capped to maxChars), or nil if
     // unavailable. The modern async Vision text request landed in macOS 15; below that we no-op.
     func recentText(maxChars: Int) async -> String? {
-        guard maxChars > 0 else { return nil }
+        await recentTextOutcome(maxChars: maxChars).text
+    }
+
+    // Same capture, but says WHY there is no text (see `RecentTextOutcome`).
+    func recentTextOutcome(maxChars: Int) async -> RecentTextOutcome {
+        guard maxChars > 0 else { return .empty }
 
         // Throttle + state access go through synchronous helpers so the lock is never held across an
         // await (which the locked-state accessors below guarantee).
         let gate = beginCaptureOrServeCached()
         switch gate {
         case .cached(let text):
-            return Self.clamp(text, to: maxChars)
+            guard let clamped = Self.clamp(text, to: maxChars) else { return .empty }
+            return .text(clamped)
         case .suppressed:
-            return nil
+            return .throttled
         case .capture(let ticket):
             guard #available(macOS 14.0, *) else {
                 captureFailed(ticket)
-                return nil
+                return .unavailable
             }
 
-            guard let image = await captureFocusedWindow() else {
+            let captured = await captureFocusedWindow()
+            guard case .image(let image) = captured else {
                 captureFailed(ticket)
-                return nil
+                if case .noWindow = captured { return .noWindow }
+                return .unavailable
             }
             guard let text = await Self.recognizeText(in: image) else {
                 Diag.log("ocr: capture yielded no text")
                 captureFailed(ticket)
-                return nil
+                return .empty
             }
 
             // Drop obvious UI chrome (buttons, prices, chips) BEFORE clamp so the budget + tail go to
@@ -112,10 +140,11 @@ final class ScreenContextProvider {
             let cleaned = Self.denoise(text)
             guard !cleaned.isEmpty else {
                 captureFailed(ticket)
-                return nil
+                return .empty
             }
             storeCachedText(cleaned, for: ticket)
-            return Self.clamp(cleaned, to: maxChars)
+            guard let clamped = Self.clamp(cleaned, to: maxChars) else { return .empty }
+            return .text(clamped)
         }
     }
 
@@ -147,13 +176,13 @@ final class ScreenContextProvider {
 
     // Captures the exact AX-focused on-screen window. Tight crop matters: OCR latency is dominated
     // by region size (per FR-CTX-1).
-    private func captureFocusedWindow() async -> CGImage? {
+    private func captureFocusedWindow() async -> CaptureResult {
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(
                 false, onScreenWindowsOnly: true)
-            guard let window = focusedWindow(in: content.windows) else {
+            guard let window = focusedWindow(in: content.windows) ?? focusedWindowByFrame(in: content.windows) else {
                 Diag.log("ocr: no focused window (windows=\(content.windows.count))")
-                return nil
+                return .noWindow
             }
 
             let filter = SCContentFilter(desktopIndependentWindow: window)
@@ -169,17 +198,20 @@ final class ScreenContextProvider {
             let image = try await SCScreenshotManager.captureImage(
                 contentFilter: filter, configuration: config)
             Diag.log("ocr: capture window=\(Int(window.frame.width))x\(Int(window.frame.height))pt image=\(image.width)x\(image.height)px")
-            return image
+            return .image(image)
         } catch {
-            // Screen Recording permission missing, window gone, etc. -> degrade to nil.
+            // Screen Recording permission missing, window gone, etc. -> degrade.
             Diag.log("ocr: capture FAILED \(error)")
-            return nil
+            return .unavailable
         }
     }
 
     // Resolve the AX-focused element's enclosing AXWindow to its CG window number, then require the
     // exact ScreenCaptureKit window owned by the frontmost process. Do not guess by size/layer: a wrong
     // window can leak unrelated text into a completion, so unresolved AX data fails closed.
+    // The ONE exception is a host that exposes no AXWindowNumber at all (Chromium/Electron): see
+    // `focusedWindowByFrame`, which accepts only the frontmost process's single on-screen layer-0 window
+    // whose frame equals the AX focused window's frame, and still fails closed otherwise.
     private func focusedWindow(in windows: [SCWindow]) -> SCWindow? {
         guard let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
               let focusedWindowID = Self.focusedAXWindowID(for: frontmostPID) else { return nil }
@@ -192,6 +224,62 @@ final class ScreenContextProvider {
             return nil
         }
         return windows.first { $0.windowID == selectedID }
+    }
+
+    // Chromium/Electron windows (the Claude desktop app, Codex) expose NO `AXWindowNumber`, so the
+    // exact-id match above can never succeed and OCR would fail forever. Fall back to matching the AX
+    // focused window of the frontmost process by pid + frame. Still fails closed: it needs exactly one
+    // on-screen layer-0 window of that process at that frame, so another app's text can never leak in.
+    private func focusedWindowByFrame(in windows: [SCWindow]) -> SCWindow? {
+        guard let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              let axFrame = Self.focusedAXWindowFrame(for: frontmostPID) else { return nil }
+        let candidates = windows.map {
+            FrameCandidate(windowID: $0.windowID, owningPID: $0.owningApplication?.processID,
+                           isOnScreen: $0.isOnScreen, layer: Int($0.windowLayer), frame: $0.frame)
+        }
+        guard let id = Self.resolvedWindowIDByFrame(
+            axFrame: axFrame, frontmostPID: frontmostPID, candidates: candidates) else { return nil }
+        return windows.first { $0.windowID == id }
+    }
+
+    private static func focusedAXWindowFrame(for pid: pid_t) -> CGRect? {
+        let app = AXUIElementCreateApplication(pid)
+        var winRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &winRef) == .success,
+              let winRef, CFGetTypeID(winRef) == AXUIElementGetTypeID() else { return nil }
+        let win = winRef as! AXUIElement
+        var posRef: CFTypeRef?, sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let posRef, let sizeRef,
+              CFGetTypeID(posRef) == AXValueGetTypeID(), CFGetTypeID(sizeRef) == AXValueGetTypeID()
+        else { return nil }
+        var pt = CGPoint.zero, sz = CGSize.zero
+        guard AXValueGetValue(posRef as! AXValue, .cgPoint, &pt),
+              AXValueGetValue(sizeRef as! AXValue, .cgSize, &sz), sz.width > 0, sz.height > 0 else { return nil }
+        return CGRect(origin: pt, size: sz)
+    }
+
+    struct FrameCandidate: Equatable {
+        let windowID: CGWindowID
+        let owningPID: pid_t?
+        let isOnScreen: Bool
+        let layer: Int
+        let frame: CGRect
+    }
+
+    /// Pure (testable): the single on-screen, layer-0 window of `frontmostPID` whose frame equals the
+    /// AX focused window's frame (within `tolerance` points). nil if none or more than one.
+    static func resolvedWindowIDByFrame(axFrame: CGRect, frontmostPID: pid_t, candidates: [FrameCandidate],
+                                        tolerance: CGFloat = 2) -> CGWindowID? {
+        let matches = candidates.filter {
+            $0.owningPID == frontmostPID && $0.isOnScreen && $0.layer == 0
+                && abs($0.frame.minX - axFrame.minX) <= tolerance
+                && abs($0.frame.minY - axFrame.minY) <= tolerance
+                && abs($0.frame.width - axFrame.width) <= tolerance
+                && abs($0.frame.height - axFrame.height) <= tolerance
+        }
+        return matches.count == 1 ? matches[0].windowID : nil
     }
 
     private static func focusedAXWindowID(for frontmostPID: pid_t,
