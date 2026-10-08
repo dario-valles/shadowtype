@@ -20,6 +20,10 @@ final class CompletionContextAssembler {
     var pendingWarm: (prefix: String, postCaret: String?)?
     var captureState: CaptureState = .idle
     var refireCount = 0
+    // fire() returned early to wait for this focus's first capture. The capture's completion must then
+    // re-fire even when it brought nothing new (no window, blank, throttled): otherwise that pause ends
+    // with no suggestion at all.
+    var fireDeferred = false
 
     private let styleLock = NSLock()
     private var styleHint: String?
@@ -47,10 +51,20 @@ final class CompletionContextAssembler {
         styleLock.unlock()
     }
 
+    // Arms the first-capture gate. Only before this focus's first capture has completed: once one has
+    // landed (`.ready`), an empty cache means "this window has no usable text", and fire() goes
+    // prefix-only. Re-arming here on every pause made each fire() wait for a capture that again came
+    // back empty, so a field whose window OCR cannot read never got a suggestion. A focus change resets
+    // the state to `.idle`, which re-arms the gate for the next field.
     func markCapturePendingIfEmpty() {
-        if cachedOCR == nil {
+        if cachedOCR == nil, captureState != .ready {
             captureState = .pending
         }
+    }
+
+    // A completed capture re-fires when it changed the context, or when fire() was waiting for it.
+    static func shouldRefireAfterCapture(changed: Bool, fireDeferred: Bool) -> Bool {
+        changed || fireDeferred
     }
 
     @discardableResult

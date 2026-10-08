@@ -181,14 +181,20 @@ final class ScreenContextProvider {
     // exact ScreenCaptureKit window owned by the frontmost process. Do not guess by size/layer: a wrong
     // window can leak unrelated text into a completion, so unresolved AX data fails closed.
     private func focusedWindow(in windows: [SCWindow]) -> SCWindow? {
-        guard let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
-              let focusedWindowID = Self.focusedAXWindowID(for: frontmostPID) else { return nil }
+        guard let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
+            Diag.log("ocr: window: no frontmost app")
+            return nil
+        }
+        guard let focusedWindowID = Self.focusedAXWindowID(for: frontmostPID) else { return nil }
         let candidates = windows.map {
             WindowCandidate(windowID: $0.windowID, owningPID: $0.owningApplication?.processID,
                             isOnScreen: $0.isOnScreen)
         }
         guard let selectedID = Self.resolvedFocusedWindowID(
             focusedWindowID: focusedWindowID, frontmostPID: frontmostPID, candidates: candidates) else {
+            let owned = candidates.filter { $0.owningPID == frontmostPID }
+            Diag.log("ocr: window: AX window \(focusedWindowID) not among \(owned.count) on-screen window(s) of pid \(frontmostPID) "
+                     + "(ids=\(owned.prefix(6).map { String($0.windowID) }.joined(separator: ",")))")
             return nil
         }
         return windows.first { $0.windowID == selectedID }
@@ -196,25 +202,35 @@ final class ScreenContextProvider {
 
     private static func focusedAXWindowID(for frontmostPID: pid_t,
                                           system: AXUIElement = AXUIElementCreateSystemWide()) -> CGWindowID? {
+        // Each failure names its step in the diag log: "ocr: no focused window" alone cannot tell a
+        // focus owned by another process from a host that exposes no AXWindowNumber.
         var elementRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            system, kAXFocusedUIElementAttribute as CFString, &elementRef) == .success,
-              let elementRef, CFGetTypeID(elementRef) == AXUIElementGetTypeID() else { return nil }
+        let focusErr = AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &elementRef)
+        guard focusErr == .success, let elementRef, CFGetTypeID(elementRef) == AXUIElementGetTypeID() else {
+            Diag.log("ocr: window: focused element unreadable (AX \(focusErr.rawValue))")
+            return nil
+        }
         let element = elementRef as! AXUIElement
 
         var elementPID: pid_t = 0
-        guard AXUIElementGetPid(element, &elementPID) == .success,
-              elementPID == frontmostPID else { return nil }
+        guard AXUIElementGetPid(element, &elementPID) == .success, elementPID == frontmostPID else {
+            Diag.log("ocr: window: focused element pid \(elementPID) != frontmost pid \(frontmostPID)")
+            return nil
+        }
 
         var windowRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element, kAXWindowAttribute as CFString, &windowRef) == .success,
-              let windowRef, CFGetTypeID(windowRef) == AXUIElementGetTypeID() else { return nil }
+        let windowErr = AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &windowRef)
+        guard windowErr == .success, let windowRef, CFGetTypeID(windowRef) == AXUIElementGetTypeID() else {
+            Diag.log("ocr: window: focused element has no AXWindow (AX \(windowErr.rawValue))")
+            return nil
+        }
 
         var numberRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            windowRef as! AXUIElement, Self.axWindowNumberAttribute, &numberRef) == .success,
-              let number = numberRef as? NSNumber, number.int64Value > 0 else { return nil }
+        let numberErr = AXUIElementCopyAttributeValue(windowRef as! AXUIElement, Self.axWindowNumberAttribute, &numberRef)
+        guard numberErr == .success, let number = numberRef as? NSNumber, number.int64Value > 0 else {
+            Diag.log("ocr: window: AXWindow has no AXWindowNumber (AX \(numberErr.rawValue))")
+            return nil
+        }
         return CGWindowID(number.uint32Value)
     }
 

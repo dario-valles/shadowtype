@@ -375,6 +375,7 @@ final class CompletionCoordinator {
         bumpGeneration()           // supersede any in-flight closure
         engine.requestCancel()     // cooperative stop between chunks/tokens
         contextAssembler.refireCount = 0     // a new keystroke/focus/force re-arms the one context-upgrade re-fire
+        contextAssembler.fireDeferred = false // the deferred fire belonged to the superseded generation
         generationSession.contextLanguage = nil
         // #9: the focus resolution belongs to the superseded fire(). Dropping it here (plus the focus-seq
         // check in `currentFocusSnapshot`) is what guarantees a stale snapshot can never cross into
@@ -865,6 +866,7 @@ final class CompletionCoordinator {
             let haveOCR = contextAssembler.cachedOCR != nil
             if !haveOCR, contextAssembler.captureState == .pending {
                 Diag.log("fire: defer (OCR capture pending, no context yet)")
+                contextAssembler.fireDeferred = true
                 clearSuggestion(); return
             }
         }
@@ -2027,7 +2029,7 @@ final class CompletionCoordinator {
                     Diag.log("pagectx: ax raw=\(ax.count) kept=\(text?.count ?? -1) changed=\(changed)")
                     Diag.logContent("pagectx: ax head=\"\(ax.prefix(200))\"")
                     self.flushPendingWarm()
-                    if changed { self.maybeRefireForContext() }
+                    self.refireAfterCapture(changed: changed)
                 } else {
                     self.requestScreenCapture(
                         prefix: prefix,
@@ -2050,6 +2052,7 @@ final class CompletionCoordinator {
         guard let screenContext else {
             contextAssembler.captureState = .ready
             flushPendingWarm()
+            refireAfterCapture(changed: false)
             return
         }
         Task { [weak self] in
@@ -2066,9 +2069,19 @@ final class CompletionCoordinator {
                 // Fresh context for the current viewport → re-fire so the ghost reflects it (closes the
                 // focus-in race + scroll staleness). Bounded to ONE upgrade per prefix so a dynamic
                 // screen can't keep regenerating and cycling the ghost during a pause.
-                if changed { self.maybeRefireForContext() }
+                self.refireAfterCapture(changed: changed)
             }
         }
+    }
+
+    // A capture for this focus just completed. Re-fire when it changed the context, or when fire() was
+    // waiting for it: a deferred fire whose capture came back empty would otherwise never run.
+    private func refireAfterCapture(changed: Bool) {
+        let wasDeferred = contextAssembler.fireDeferred
+        contextAssembler.fireDeferred = false
+        guard CompletionContextAssembler.shouldRefireAfterCapture(changed: changed, fireDeferred: wasDeferred) else { return }
+        if wasDeferred, !changed { Diag.log("ocr: capture brought no context -> run the deferred fire prefix-only") }
+        maybeRefireForContext()
     }
 
     private func captureIsCurrent(generation: Int, focusSeq: UInt64, bundleId: String?) -> Bool {
