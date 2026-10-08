@@ -19,6 +19,30 @@ final class CompletionGenerationSession {
     var contextLanguage: NLLanguage?
     var lastSmartComposeProbeGeneration: Int?
 
+    /// The per-generation values that `CompletionCoordinator.clearSuggestion()` drops because they belong to the ghost that just
+    /// went away. `rejectRender` keeps them across its hide (the stream may still produce a valid render for the same generation).
+    struct HoistedState: Equatable {
+        var caretRect: CGRect?
+        var font: NSFont?
+        var prefixLanguage: NLLanguage?
+        var languageConstraints: [NLLanguage]
+        var focusSeq: UInt64?
+    }
+
+    var hoisted: HoistedState {
+        get {
+            HoistedState(caretRect: caretRect, font: font, prefixLanguage: prefixLanguage,
+                         languageConstraints: languageConstraints, focusSeq: focusSeq)
+        }
+        set {
+            caretRect = newValue.caretRect
+            font = newValue.font
+            prefixLanguage = newValue.prefixLanguage
+            languageConstraints = newValue.languageConstraints
+            focusSeq = newValue.focusSeq
+        }
+    }
+
     private(set) var pendingStreamSnapshot: String?
     private(set) var pendingStreamWork: DispatchWorkItem?
     let streamCoalesceWindow: TimeInterval = 0.033
