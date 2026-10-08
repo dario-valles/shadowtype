@@ -9,6 +9,13 @@ import CoreGraphics
 @preconcurrency import ScreenCaptureKit
 import Vision
 
+// HIServices' window-id lookup for an AXWindow element. Private, but exported and stable for well over a
+// decade (window managers such as yabai, Rectangle and AltTab rely on it). Used only when the window does
+// not answer the public-ish AXWindowNumber attribute; it returns the exact CGWindowID, so the
+// fail-closed window match below is unchanged.
+@_silgen_name("_AXUIElementGetWindow")
+private func axUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
+
 final class ScreenContextProvider {
     // AppKit exposes this Accessibility attribute but does not import a Swift constant for it.
     private static let axWindowNumberAttribute = "AXWindowNumber" as CFString
@@ -225,13 +232,21 @@ final class ScreenContextProvider {
             return nil
         }
 
+        let window = windowRef as! AXUIElement
         var numberRef: CFTypeRef?
-        let numberErr = AXUIElementCopyAttributeValue(windowRef as! AXUIElement, Self.axWindowNumberAttribute, &numberRef)
-        guard numberErr == .success, let number = numberRef as? NSNumber, number.int64Value > 0 else {
-            Diag.log("ocr: window: AXWindow has no AXWindowNumber (AX \(numberErr.rawValue))")
+        let numberErr = AXUIElementCopyAttributeValue(window, Self.axWindowNumberAttribute, &numberRef)
+        if numberErr == .success, let number = numberRef as? NSNumber, number.int64Value > 0 {
+            return CGWindowID(number.uint32Value)
+        }
+        // Many windows answer AXWindowNumber with -25205 (unsupported): TextEdit on macOS 26 does, and so
+        // do Chromium/Electron hosts. Ask HIServices for the same id directly.
+        var windowID: CGWindowID = 0
+        let idErr = axUIElementGetWindow(window, &windowID)
+        guard idErr == .success, windowID > 0 else {
+            Diag.log("ocr: window: no window id (AXWindowNumber AX \(numberErr.rawValue), _AXUIElementGetWindow AX \(idErr.rawValue))")
             return nil
         }
-        return CGWindowID(number.uint32Value)
+        return windowID
     }
 
     struct WindowCandidate: Equatable {
