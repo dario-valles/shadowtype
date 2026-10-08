@@ -31,6 +31,20 @@ final class CompletionLanguageGuardTests: XCTestCase {
         XCTAssertNil(staleRemainderReason)
     }
 
+    // an English ghost for English typing is not a conflict, whatever language the screen reads as; a ghost
+    // in a third language still is.
+    func testSuggestionInTheTypedLanguageIsNotAContextConflict() {
+        let typed = "The quick brown fox jumps over the lazy"
+        XCTAssertNil(CompletionCoordinator.languageRejectionReason(
+            checkPrefixDup: true, generationIsHealed: true, prefixLanguage: nil,
+            suggestion: "I know that my team can finish the project tomorrow morning",
+            contextLang: .catalan, typedText: typed))
+        XCTAssertEqual(CompletionCoordinator.languageRejectionReason(
+            checkPrefixDup: true, generationIsHealed: true, prefixLanguage: nil,
+            suggestion: "Sé que mi equipo puede terminar el proyecto mañana por la mañana",
+            contextLang: .catalan, typedText: typed), "context-lang conflict")
+    }
+
     func testPersonalizedLanguagesParseSloppyNamesAndISOCodes() {
         let named = CompletionCoordinator.parsePersonalizedLanguages(
             "English, Spanish, catalan")
